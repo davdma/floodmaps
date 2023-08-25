@@ -96,7 +96,7 @@ def general_query_PRISM(prism, threshold=300):
     return df
 
 def event_completed(dir_path):
-    """Return whether event directory contains all generated rasters."""
+    """Returns whether or not event directory contains all generated rasters."""
     logger = logging.getLogger('main')
     logger.info('Confirming whether event has already been successfully processed before...')
     regex_patterns = ['dem\.tif', 'flowlines\.tif', 'roads\.tif', 'slope\.tif', 'waterbody\.tif', 's2_\d{8}\.tif', 'ndwi_\d{8}\.tif']
@@ -124,6 +124,38 @@ def event_completed(dir_path):
 
 @python_app
 def event_download(threshold, days_before, days_after, maxcoverpercentage, event_date, minx, miny, maxx, maxy, eid, log_file):
+    """Downloads S2 imagery for a high precipitation event based on parameters and generates accompanying rasters.
+    
+    Parameters
+    ----------
+    threshold : int
+        Daily cumulative precipitation threshold (mm) used to filter high precipitation event.
+    days_before : int
+        Number of days before high precipitation event allowed for sampling S2 imagery.
+    days_after : int
+        Number of days after high precipitation event allowed for sampling S2 imagery.
+    maxcoverpercentage : int
+        Maximum percentage of combined null data and cloud cover permitted for each sampled cell.
+    event_date : str
+        Date of high precipitation event in format YYYYMMDD.
+    minx : float
+        Bounding box value.
+    miny : float
+        Bounding box value.
+    maxx : float
+        Bounding box value.
+    maxy : float
+        Bounding box value.
+    eid : str
+        Event id.
+    log_file : str
+        File to use for logging.
+
+    Returns
+    -------
+    bool
+        Return True if successful, False if unsuccessful event download and processing.
+    """
     from datetime import datetime, timedelta, date
     from logging import basicConfig
     import logging
@@ -160,7 +192,6 @@ def event_download(threshold, days_before, days_after, maxcoverpercentage, event
         return False
 
     # filter out dates with high cloud or no data cover
-    # ensure we still have one before and one after event date once filtered
     # otherwise remove files and skip to next sample
     bounds = (minx, miny, maxx, maxy)
     has_after = False
@@ -170,7 +201,6 @@ def event_download(threshold, days_before, days_after, maxcoverpercentage, event
         if coverpercentage > maxcoverpercentage:
             logger.debug(f'Sample {dt} near event {event_date}, at {minx}, {miny}, {maxx}, {maxy} rejected due to {coverpercentage}% cloud or null cover.')
             del products_downloaded[dt]
-            # also delete zip files
             for filename in filenames:
                 os.remove(dir_path + filename)
         else:
@@ -193,20 +223,24 @@ def event_download(threshold, days_before, days_after, maxcoverpercentage, event
     for dt, filenames in products_downloaded.items():
         dst_shape, dst_crs, dst_transform = rasters.pipeline_S2(dir_path, f's2_{dt}.tif', filenames, bounds)
         rasters.pipeline_NDWI(dir_path, f'ndwi_{dt}.tif', filenames, bounds)
-            
         for filename in filenames:
             os.remove(dir_path + filename)
             
-    # need to search for state here
-    rasters.pipeline_roads(dir_path, 'roads.tif', dst_shape, dst_crs, dst_transform, state, buffer=3)
-    rasters.pipeline_dem_slope(dir_path, ('dem.tif', 'slope.tif'), dst_shape, dst_crs, dst_transform, bounds)
-    rasters.pipeline_flowlines(dir_path, 'flowlines.tif', dst_shape, dst_crs, dst_transform, bounds, buffer=3)
-    rasters.pipeline_waterbody(dir_path, 'waterbody.tif', dst_shape, dst_crs, dst_transform, bounds)
+    try:
+        rasters.pipeline_roads(dir_path, 'roads.tif', dst_shape, dst_crs, dst_transform, state, buffer=3)
+        rasters.pipeline_dem_slope(dir_path, ('dem.tif', 'slope.tif'), dst_shape, dst_crs, dst_transform, bounds)
+        rasters.pipeline_flowlines(dir_path, 'flowlines.tif', dst_shape, dst_crs, dst_transform, bounds, buffer=3)
+        rasters.pipeline_waterbody(dir_path, 'waterbody.tif', dst_shape, dst_crs, dst_transform, bounds)
+    except Exception as err:
+        logger.error(f'Raster generation of roads, DEM, flowlines, waterbody failed for {event_date}, at {minx}, {miny}, {maxx}, {maxy}. Id: {eid}. Removing directory and contents.')
+        shutil.rmtree(dir_path)
+        return False
+    
     return True # whether successful or not
 
 @bash_app
 def compile_logs(log_files, dir_path):
-    """Compile all log files into one."""
+    """Compiles all listed log files into one single log file."""
     return "sed -s -e '1i----------------' -e '$a----------------' {0} > {1}events.log && rm {0}".format(' '.join(log_files), dir_path)
 
 def main(threshold, days_before, days_after, maxcoverpercentage):
@@ -242,15 +276,14 @@ def main(threshold, days_before, days_after, maxcoverpercentage):
     fh.setFormatter(formatter)
     rootLogger.addHandler(fh)
     
-    # prism = read_PRISM()
-    # print("PRISM loaded.")
-    # events = general_query_PRISM(prism, threshold=threshold)
+    prism = read_PRISM()
+    rootLogger.info("PRISM successfully loaded.")
+    events = general_query_PRISM(prism, threshold=threshold)
 
     rootLogger.info("Initializing event downloads...")
 
     # parallelization
     parsl.set_file_logger(dir_path + 'parsl.log', level=logging.DEBUG)
-    # what partition? cores per worker? scheduler options?
     config = Config(
         retries=1,
         executors=[
@@ -281,7 +314,7 @@ def main(threshold, days_before, days_after, maxcoverpercentage):
     parsl.load(config)
     
     # TEST:
-    events = pd.DataFrame.from_dict({'Date': ['20201010', '20201016', '20201109'], 'minx': [-92.770833, -81.437500, -80.395833], 'miny': [30.062500, 26.104167, 25.937500], 'maxx': [-92.729167, -81.395833, -80.354167], 'maxy': [30.10416, 26.145833, 25.979167], 'eid': ['test1', 'test2', 'test3']})
+    # events = pd.DataFrame.from_dict({'Date': ['20201010', '20201016', '20201109'], 'minx': [-92.770833, -81.437500, -80.395833], 'miny': [30.062500, 26.104167, 25.937500], 'maxx': [-92.729167, -81.395833, -80.354167], 'maxy': [30.10416, 26.145833, 25.979167], 'eid': ['test1', 'test2', 'test3']})
     
     futures = []
     log_files = []

@@ -185,7 +185,7 @@ def download_Sentinel_2(footprint, event_date, date_interval, dir_path, loggerna
     logger.info('All product downloads complete.')
 
     # group filenames by dates in dictionary
-    # ISSUE: could be a problem if multiple tiles are on the edge of different dates if taken at midnight
+    # POTENTIAL ISSUE: could be a problem if multiple tiles are on the edge of different dates if taken at midnight
     products_by_date = dict()
     for product in products:
         dt = datetime.strptime(product['ContentDate']['Start'], "%Y-%m-%dT%H:%M:%S.%fZ").date().strftime("%Y%m%d")

@@ -29,14 +29,14 @@ import json
 
 def read_PRISM():
     """Reads the PRISM netCDF file and return the encoded data."""
-    with Dataset("PRISM/prismprecip.nc", "r", format="NETCDF4") as nc:
+    with Dataset("PRISM/prismprecipnew.nc", "r", format="NETCDF4") as nc:
         geotransform = nc["geotransform"][:]
         time_info = (nc["time"].units, nc["time"].calendar)
         precip_data = nc["precip"][:]
 
     return (geotransform, time_info, precip_data)
 
-def general_query_PRISM(prism, threshold=300):
+def general_query_PRISM(prism, threshold=300, n=None):
     """
     Queries contents of PRISM netCDF file given the return value of read_PRISM(). Filters for 
     precipitation events that meet minimum threshold of precipitation.
@@ -46,6 +46,8 @@ def general_query_PRISM(prism, threshold=300):
     prism : tuple returned by read_PRISM()
     threshold : int, optional
         Minimum cumulative daily precipitation in mm for filtering PRISM tiles.
+    n : int, optional
+        Selects only first n events that meet threshold criteria.
 
     Returns
     -------
@@ -63,10 +65,14 @@ def general_query_PRISM(prism, threshold=300):
     miny = []
     maxx = []
     maxy = []
-    id = []
+    eid = []
 
     min_date = datetime(2015, 7, 1)
+    count = 0
     for time, y, x in zip(events[0], events[1], events[2]):
+        if n is not None and count >= n:
+            break
+            
         event_date = num2date(time, units=time_info[0], calendar=time_info[1])
 
         # must not be earlier than s2 launch
@@ -84,6 +90,7 @@ def general_query_PRISM(prism, threshold=300):
         maxx.append((x + 1) * x_size + upper_left_x)
         maxy.append(y * y_size + upper_left_y)
         eid.append(f'{threshold}_{event_date_str}_{y}_{x}')
+        count += 1
 
     df = pd.DataFrame({"Date": event_dates,
                        "Precipitation (mm)": event_precip,
@@ -227,9 +234,9 @@ def event_download(threshold, days_before, days_after, maxcoverpercentage, event
             os.remove(dir_path + filename)
             
     try:
-        rasters.pipeline_roads(dir_path, 'roads.tif', dst_shape, dst_crs, dst_transform, state, buffer=3)
+        rasters.pipeline_roads(dir_path, 'roads.tif', dst_shape, dst_crs, dst_transform, state, buffer=2)
         rasters.pipeline_dem_slope(dir_path, ('dem.tif', 'slope.tif'), dst_shape, dst_crs, dst_transform, bounds)
-        rasters.pipeline_flowlines(dir_path, 'flowlines.tif', dst_shape, dst_crs, dst_transform, bounds, buffer=3)
+        rasters.pipeline_flowlines(dir_path, 'flowlines.tif', dst_shape, dst_crs, dst_transform, bounds, buffer=2)
         rasters.pipeline_waterbody(dir_path, 'waterbody.tif', dst_shape, dst_crs, dst_transform, bounds)
     except Exception as err:
         logger.error(f'Raster generation of roads, DEM, flowlines, waterbody failed for {event_date}, at {minx}, {miny}, {maxx}, {maxy}. Id: {eid}. Removing directory and contents.')
@@ -239,11 +246,11 @@ def event_download(threshold, days_before, days_after, maxcoverpercentage, event
     return True # whether successful or not
 
 @bash_app
-def compile_logs(log_files, dir_path):
+def compile_logs(log_files, dir_path, filename):
     """Compiles all listed log files into one single log file."""
-    return "sed -s -e '1i----------------' -e '$a----------------' {0} > {1}events.log && rm {0}".format(' '.join(log_files), dir_path)
+    return "sed -s -e '1i----------------' -e '$a----------------' {0} > {1}{2} && rm {0}".format(' '.join(log_files), dir_path, filename)
 
-def main(threshold, days_before, days_after, maxcoverpercentage):
+def main(threshold, days_before, days_after, maxcoverpercentage, maxevents):
     """
     Samples imagery of events queried from PRISM using a given minimum precipitation threshold.
     Downloaded samples will contain multispectral data from within specified interval of event date, their respective
@@ -259,6 +266,8 @@ def main(threshold, days_before, days_after, maxcoverpercentage):
         Number of days of interest following precipitation event.
     cloudcoverpercentage : (int, int)
         Desired cloud cover percentage range for querying Copernicus Sentinel-2.
+    maxevents: int or None
+        Specify a limit to the number of extreme precipitation events to process.
         
     Returns
     -------
@@ -267,10 +276,11 @@ def main(threshold, days_before, days_after, maxcoverpercentage):
     # make directory
     dir_path = f'samples_{threshold}_{days_before}_{days_after}_{maxcoverpercentage}/'
     Path(dir_path).mkdir(parents=True, exist_ok=True)
-        
+
+    start_time = datetime.now().strftime("%Y-%m-%d_%H-%M")
     rootLogger = logging.getLogger('main')
     rootLogger.setLevel(logging.DEBUG)
-    fh = logging.FileHandler(dir_path + 'main.log', mode='w')
+    fh = logging.FileHandler(dir_path + f'main_{start_time}.log', mode='w')
     fh.setLevel(logging.DEBUG)
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     fh.setFormatter(formatter)
@@ -278,12 +288,12 @@ def main(threshold, days_before, days_after, maxcoverpercentage):
     
     prism = read_PRISM()
     rootLogger.info("PRISM successfully loaded.")
-    events = general_query_PRISM(prism, threshold=threshold)
+    events = general_query_PRISM(prism, threshold=threshold, n=maxevents)
 
     rootLogger.info("Initializing event downloads...")
 
     # parallelization
-    parsl.set_file_logger(dir_path + 'parsl.log', level=logging.DEBUG)
+    parsl.set_file_logger(dir_path + f'parsl_{start_time}.log', level=logging.DEBUG)
     config = Config(
         retries=1,
         executors=[
@@ -317,28 +327,29 @@ def main(threshold, days_before, days_after, maxcoverpercentage):
     # events = pd.DataFrame.from_dict({'Date': ['20201010', '20201016', '20201109'], 'minx': [-92.770833, -81.437500, -80.395833], 'miny': [30.062500, 26.104167, 25.937500], 'maxx': [-92.729167, -81.395833, -80.354167], 'maxy': [30.10416, 26.145833, 25.979167], 'eid': ['test1', 'test2', 'test3']})
     
     futures = []
-    log_files = []
     alr_completed = 0
-    for event_date, minx, miny, maxx, maxy, eid in tqdm(zip(events['Date'], events['minx'], events['miny'], events['maxx'], events['maxy'], events['eid']), total=len(events.index)):
-        if Path(dir_path + eid + '/').is_dir():
-            if event_completed(dir_path + eid + '/'):
-                rootLogger.debug('Event has already been processed before. Moving on to the next event...')
-                alr_completed += 1
-                continue
-            else:
-                rootLogger.debug('Event has already been processed before but unsuccessfully. Reprocessing...')
-            
-        log_file = dir_path + f'{event_date}_{eid}.log'
-        log_files.append(log_file)
-        futures.append(event_download(threshold, days_before, days_after, maxcoverpercentage, event_date, minx, miny, maxx, maxy, eid, log_file))
+    print(f'{len(events.index)} possible extreme precipitation events found. Beginning data collection...')
+    try:
+        for event_date, minx, miny, maxx, maxy, eid in tqdm(zip(events['Date'], events['minx'], events['miny'], events['maxx'], events['maxy'], events['eid']), total=len(events.index)):
+            if Path(dir_path + eid + '/').is_dir():
+                if event_completed(dir_path + eid + '/'):
+                    rootLogger.debug('Event has already been processed before. Moving on to the next event...')
+                    alr_completed += 1
+                    continue
+                else:
+                    rootLogger.debug('Event has already been processed before but unsuccessfully. Reprocessing...')
+                
+            log_file = dir_path + f'event_{eid}.log'
+            futures.append(event_download(threshold, days_before, days_after, maxcoverpercentage, event_date, minx, miny, maxx, maxy, eid, log_file))
         
-    results = [future.result() for future in futures]
-    rootLogger.debug(f"Number of events already completed: {alr_completed}")
-    rootLogger.debug(f"Number of events skipped from this run: {len(results) - sum(results)} out of {len(results) + alr_completed}")
-
-    # concatenate log files here with separator in between using bash script
-    if len(log_files) > 0:
-        compile_logs(log_files, dir_path).result()
+        results = [future.result() for future in futures]
+        rootLogger.debug(f"Number of events already completed: {alr_completed}")
+        rootLogger.debug(f"Number of events skipped from this run: {len(results) - sum(results)} out of {len(results) + alr_completed}")
+    finally: 
+        # concatenate log files here with separator in between using bash script
+        log_files = glob(f'{dir_path}/event_*.log')
+        if len(log_files) > 0:
+            compile_logs(log_files, dir_path, f'events_{start_time}.log').result()
     
     return 0
 
@@ -348,6 +359,7 @@ if __name__ == '__main__':
     parser.add_argument('-b', '--before', dest='days_before', default=2, type=int, help='number of days allowed for download before precipitation event (default: 2)')
     parser.add_argument('-a', '--after', dest='days_after', default=4, type=int, help='number of days allowed for download following precipitation event (default: 4)')
     parser.add_argument('-c', '--maxcover', dest='maxcoverpercentage', default=30, type=int, help='maximum cloud and no data cover percentage (default: 30)')
+    parser.add_argument('-s', '--maxevents', dest='maxevents', type=int, help='maximum number of extreme precipitation events to attempt downloading (default: None)')
     args = parser.parse_args()
     
-    sys.exit(main(args.threshold, args.days_before, args.days_after, args.maxcoverpercentage))
+    sys.exit(main(args.threshold, args.days_before, args.days_after, args.maxcoverpercentage, args.maxevents))

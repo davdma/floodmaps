@@ -3,8 +3,6 @@ from contextlib import ExitStack
 from osgeo import gdal, ogr
 from rasterio.warp import reproject, Resampling
 import richdem as rd
-from tensorflow.keras.layers import MaxPooling2D
-import tensorflow as tf
 from rasterio.features import rasterize
 from zipfile import ZipFile
 from pathlib import Path
@@ -13,12 +11,17 @@ from datetime import datetime, timedelta, date
 import rasterio.merge
 import rasterio
 import numpy as np
-import os
 import fiona
 import re
 import logging
 import shutil
+import json
+import os
 from fiona.transform import transform, transform_geom
+
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+from tensorflow.keras.layers import MaxPooling2D
+import tensorflow as tf
 
 PRISM_CRS = "EPSG:4269"
 
@@ -99,35 +102,38 @@ def download_all(products, dir_path, loggername):
             session.hooks['response'] = []
             return session.send(r.request, verify=False)
 
-    Path(dir_path).mkdir(parents=True, exist_ok=True)
-    for product in products:
-        logger.info(f'Attempting download for product {product["Id"]}...')
-    
-        if not session.hooks['response']:
-            logger.info('Appending new session hook')
-            session.hooks['response'].append(auto_refresh)
-        
+    def download(product, session, dir_path):
         url = f'https://catalogue.dataspace.copernicus.eu/odata/v1/Products({product["Id"]})/$value'
         response = session.get(url, allow_redirects=False, timeout=180)
         while response.status_code in (301, 302, 303, 307):
             url = response.headers['Location']
             response = session.get(url, allow_redirects=False)
-
+    
         if response.status_code != 200:
             logger.info(f'Total token refreshes before unexpected status: {refresh_count}')
             raise Exception(f'Unsuccessful request with status code: {response.status_code}, {response.json()}.')
 
-        try:
-            file = session.get(url, verify=False, allow_redirects=True)
-        except requests.exceptions.ChunkedEncodingError as err:
-            # retry
-            logger.info(f'Encountered {err}, {type(err)}. Retrying once more...')
-            file = session.get(url, verify=False, allow_redirects=True)
-        except Exception as err:
-            raise err
-            
+        file = session.get(url, verify=False, allow_redirects=True)
         with open(dir_path + f"{product['Name'][:-5]}.zip", 'wb') as p:
             p.write(file.content)
+
+    Path(dir_path).mkdir(parents=True, exist_ok=True)
+    for product in products:
+        logger.info(f'Attempting download for product {product["Name"]} with product id {product["Id"]}...')
+    
+        if not session.hooks['response']:
+            logger.info('Appending new session hook')
+            session.hooks['response'].append(auto_refresh)
+
+        try:
+            download(product, session, dir_path)
+        except requests.exceptions.ChunkedEncodingError as err:
+            # retry again
+            logger.info(f'Encountered {err}, {type(err)}. Retrying once more...')
+            download(product, session, dir_path)
+        except Exception as err:
+            logger.info(f'Encountered unexpected {err}, {type(err)}. Not handled, cancelling operations.')
+            raise err
 
         logger.info(f'Download completed for {product["Id"]}.')
         logger.info(f'Total token refreshes: {refresh_count}')
@@ -155,8 +161,22 @@ def download_Sentinel_2(footprint, event_date, date_interval, dir_path, loggerna
     logger = logging.getLogger(loggername + ".rasters")
     logger.info('Beginning catalog search...')
     try:
-        search = requests.get(f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq 'SENTINEL-2' and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' and att/OData.CSC.StringAttribute/Value eq 'S2MSI2A') and OData.CSC.Intersects(area=geography'SRID=4326;{footprint}') and ContentDate/Start ge {date_interval[0]} and ContentDate/Start le {date_interval[1]}&$top=100",
-                            timeout=20).json()
+        response = requests.get(f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq 'SENTINEL-2' and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' and att/OData.CSC.StringAttribute/Value eq 'S2MSI2A') and OData.CSC.Intersects(area=geography'SRID=4326;{footprint}') and ContentDate/Start ge {date_interval[0]} and ContentDate/Start le {date_interval[1]}&$top=100",
+                            timeout=20)
+        search = response.json()
+    except requests.exceptions.JSONDecodeError as err:
+        logger.error(f"The response does not contain valid JSON: {err}, {type(err)}")
+        logger.debug(f"Retrying once...")
+        try:
+            response = requests.get(f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq 'SENTINEL-2' and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' and att/OData.CSC.StringAttribute/Value eq 'S2MSI2A') and OData.CSC.Intersects(area=geography'SRID=4326;{footprint}') and ContentDate/Start ge {date_interval[0]} and ContentDate/Start le {date_interval[1]}&$top=100",
+                                timeout=20)
+            search = response.json()
+        except Exception as err:
+            logger.error(f"Retry failed: {err}, {type(err)}")
+            return None
+    except requests.exceptions.RequestException as err:
+        logger.error(f"Requests error: {err}, {type(err)}")
+        return None
     except Exception as err:
         logger.error(f"Catalog search failed: {err}, {type(err)}")
         return None
@@ -197,22 +217,32 @@ def download_Sentinel_2(footprint, event_date, date_interval, dir_path, loggerna
     
     return products_by_date
 
-def get_state(lon, lat):
+def get_state(minx, miny, maxx, maxy):
     """Fetches the US state corresponding to the longitude and latitude coordinates.
+    Will try different combinations of longitude, latitude if state not found immediately.
 
     Parameters
     ----------
-    lon : float
-    lat : float
-
+    minx : float
+    miny : float
+    maxx : float
+    maxy : float
+    
     Returns
     -------
     str or None
         US State or None if not found
     """
+    combinations = [(miny, minx), (miny, maxx), (maxy, minx), (maxy, maxx)]
     geolocator = Nominatim(user_agent="argonneflood")
-    location = geolocator.reverse((lat, lon), exactly_one=True)
-    return location.raw['address'].get('state')
+    
+    for coord in combinations:
+        location = geolocator.reverse(coord, exactly_one=True)
+        result = location.raw['address'].get('state')
+        if result is not None:
+            break
+
+    return result
 
 def get_date_interval(event_date, days_before, days_after):
     """Returns a date interval made of a tuple of start and end date strings given event date string and 
@@ -522,13 +552,18 @@ def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, 
     # find state shape file
     with fiona.open(f'Roads/{state.strip().upper()}.shp', "r") as shapefile:
         shapes = [transform_geom(shapefile.crs, dst_crs, feature["geometry"]) for feature in shapefile]
+
+    if shapes:
+        rasterize_roads = rasterize(
+            [(line, 1) for line in shapes],
+            out_shape=dst_shape,
+            transform=dst_transform,
+            fill=0,
+            all_touched=True)
+    else:
+        # if no shapes to rasterize
+        rasterize_roads = np.zeros(dst_shape, dtype=int)
         
-    rasterize_roads = rasterize(
-        [(line, 1) for line in shapes],
-        out_shape=dst_shape,
-        transform=dst_transform,
-        fill=0,
-        all_touched=True)
 
     if buffer > 0:
         rasterize_roads = buffer_raster(rasterize_roads, buffer)
@@ -647,17 +682,21 @@ def pipeline_flowlines(dir_path, save_as, dst_shape, dst_crs, dst_transform, bou
                 m = p.match(str(feat.properties['FCode']))
                 if m:
                     shapes.append((transform_geom(src_crs, dst_crs, feat.geometry), 1))
-        
-        flowlines = rasterize(
-            shapes,
-            out_shape=dst_shape,
-            transform=dst_transform,
-            fill=0,
-            all_touched=True)
+
+        if shapes:
+            flowlines = rasterize(
+                shapes,
+                out_shape=dst_shape,
+                transform=dst_transform,
+                fill=0,
+                all_touched=True)
+        else:
+            # if no shapes to rasterize
+            flowlines = np.zeros(dst_shape, dtype=int)
 
         if buffer > 0:
             flowlines = buffer_raster(flowlines, buffer)
-
+        
     with rasterio.open(dir_path + save_as, 'w', driver='Gtiff', count=1, height=flowlines.shape[-2], width=flowlines.shape[-1], 
                        crs=dst_crs, dtype=flowlines.dtype, transform=dst_transform, nodata=0) as dst:
         dst.write(flowlines, 1)
@@ -694,13 +733,17 @@ def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, bou
         for lyr in files:
             for _, feat in lyr.items(bbox=bounds):
                 shapes.append((transform_geom(src_crs, dst_crs, feat.geometry), 1))
-        
-        waterbody = rasterize(
-            shapes,
-            out_shape=dst_shape,
-            transform=dst_transform,
-            fill=0,
-            all_touched=True)
+
+        if shapes:
+            waterbody = rasterize(
+                shapes,
+                out_shape=dst_shape,
+                transform=dst_transform,
+                fill=0,
+                all_touched=True)
+        else:
+            # if no shapes to rasterize
+            waterbody = np.zeros(dst_shape, dtype=int)
 
     with rasterio.open(dir_path + save_as, 'w', driver='Gtiff', count=1, height=waterbody.shape[-2], width=waterbody.shape[-1], 
                        crs=dst_crs, dtype=waterbody.dtype, transform=dst_transform, nodata=0) as dst:

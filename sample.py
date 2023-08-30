@@ -102,6 +102,114 @@ def general_query_PRISM(prism, threshold=300, n=None):
 
     return df
 
+def general_query_filter_PRISM(prism, days_before, days_after, threshold=300, n=None):
+    """
+    Queries contents of PRISM netCDF file given the return value of read_PRISM(). Filters for 
+    precipitation events that meet minimum threshold of precipitation.
+
+    Parameters
+    ----------
+    prism : tuple returned by read_PRISM()
+    threshold : int, optional
+        Minimum cumulative daily precipitation in mm for filtering PRISM tiles.
+    n : int, optional
+        Selects only first n events that meet threshold criteria.
+
+    Returns
+    -------
+    Dataframe
+        pandas dataframe containing events labeled with date, cumulative day precipitation in mm, latitude longitude 
+        bounding box values and a unique event id.
+    """
+    import rasters
+    import shapely as sp
+    from fiona.transform import transform
+    import requests
+    PRISM_CRS = "EPSG:4269"
+    SEARCH_CRS = "EPSG:4326"
+
+    rootLogger = logging.getLogger('main')
+    geotransform, time_info, precip_data = prism
+    events = np.where(precip_data > threshold) #lat indices, lon indices, and time indices for target events
+
+    upper_left_x, x_size, x_rotation, upper_left_y, y_rotation, y_size = geotransform
+    event_dates = []
+    event_precip = []
+    minx = []
+    miny = []
+    maxx = []
+    maxy = []
+    eid = []
+
+    min_date = datetime(2015, 7, 1)
+    count = 0
+    for time, y, x in zip(events[0], events[1], events[2]):
+        if n is not None and count >= n:
+            break
+            
+        event_date = num2date(time, units=time_info[0], calendar=time_info[1])
+
+        # must not be earlier than s2 launch
+        if event_date < min_date:
+            continue
+
+        # filter out events unavailable on copernicus
+        event_date_str = event_date.strftime("%Y%m%d")
+        date_interval = rasters.get_date_interval(event_date_str, days_before, days_after)
+        c_minx = x * x_size + upper_left_x
+        c_miny = (y + 1) * y_size + upper_left_y
+        c_maxx = (x + 1) * x_size + upper_left_x
+        c_maxy = y * y_size + upper_left_y
+        conversion = transform(PRISM_CRS, SEARCH_CRS, (c_minx, c_maxx), (c_miny, c_maxy))
+        box = sp.to_wkt(sp.geometry.box(conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]))
+        
+        try:
+            response = requests.get(f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq 'SENTINEL-2' and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' and att/OData.CSC.StringAttribute/Value eq 'S2MSI2A') and OData.CSC.Intersects(area=geography'SRID=4326;{box}') and ContentDate/Start ge {date_interval[0]} and ContentDate/Start le {date_interval[1]}&$top=100",
+                            timeout=20)
+            search = response.json()
+        except requests.exceptions.JSONDecodeError as err:
+            rootLogger.error(f"The response does not contain valid JSON: {err}, {type(err)}")
+            rootLogger.debug(f"Retrying once...")
+            try:
+                response = requests.get(f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq 'SENTINEL-2' and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' and att/OData.CSC.StringAttribute/Value eq 'S2MSI2A') and OData.CSC.Intersects(area=geography'SRID=4326;{box}') and ContentDate/Start ge {date_interval[0]} and ContentDate/Start le {date_interval[1]}&$top=100",
+                                timeout=20)
+                search = response.json()
+            except Exception as err:
+                rootLogger.error(f"Retry failed: {err}, {type(err)}")
+                continue
+        except requests.exceptions.RequestException as err:
+            rootLogger.error(f"Requests error: {err}, {type(err)}")
+            continue
+        except Exception as err:
+            rootLogger.error(f"Catalog search failed: {err}, {type(err)}")
+            continue
+
+        products = [product for product in search['value'] if product['Online']]
+        if len(products) == 0:
+            continue
+
+        event_dates.append(event_date_str)
+        event_precip.append(precip_data[time, y, x])
+        
+        # convert latitude and longitude to
+        # (minx, miny, maxx, maxy) using the equation
+        minx.append(c_minx)
+        miny.append(c_miny)
+        maxx.append(c_maxx)
+        maxy.append(c_maxy)
+        eid.append(f'{threshold}_{event_date_str}_{y}_{x}')
+        count += 1
+
+    df = pd.DataFrame({"Date": event_dates,
+                       "Precipitation (mm)": event_precip,
+                       "minx": minx,
+                       "miny": miny,
+                       "maxx": maxx,
+                       "maxy": maxy,
+                       "eid": eid})
+
+    return df
+
 def event_completed(dir_path):
     """Returns whether or not event directory contains all generated rasters."""
     logger = logging.getLogger('main')
@@ -175,14 +283,15 @@ def event_download(threshold, days_before, days_after, maxcoverpercentage, event
     PRISM_CRS = "EPSG:4269"
     SEARCH_CRS = "EPSG:4326"
 
-    loggername = f'{event_date}_{eid}'
-    logger = logging.getLogger(loggername)
+    logger = logging.getLogger(eid)
     logger.setLevel(logging.DEBUG)
-    fh = logging.FileHandler(log_file, mode='w')
+    fh = logging.FileHandler(log_file, mode='a')
     fh.setLevel(logging.DEBUG)
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     fh.setFormatter(formatter)
     logger.addHandler(fh)
+    logger.info('**********************************')
+    logger.info('START OF EVENT TASK LOG:')
     logger.info(f'Beginning event {eid} download...')
 
     # need to transform box from EPSG 4269 to EPSG 4326 for OData query
@@ -190,7 +299,7 @@ def event_download(threshold, days_before, days_after, maxcoverpercentage, event
     box = sp.to_wkt(sp.geometry.box(conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]))
     
     dir_path = f'samples_{threshold}_{days_before}_{days_after}_{maxcoverpercentage}/' + eid + '/'
-    products_downloaded = rasters.download_Sentinel_2(box, event_date, rasters.get_date_interval(event_date, days_before, days_after), dir_path, loggername)
+    products_downloaded = rasters.download_Sentinel_2(box, event_date, rasters.get_date_interval(event_date, days_before, days_after), dir_path, eid)
 
     # do not download unless we have the products that we want - i.e. criteria is met
     # only download if products found, products exist during or after precip event, otherwise skip
@@ -220,29 +329,36 @@ def event_download(threshold, days_before, days_after, maxcoverpercentage, event
         shutil.rmtree(dir_path)
         return False
 
-    state = rasters.get_state(minx, miny)
+    state = rasters.get_state(minx, miny, maxx, maxy)
     if state is None:
         logger.warning(f'State not found for {event_date}, at {minx}, {miny}, {maxx}, {maxy}. Id: {eid}. Removing directory and contents.')
         shutil.rmtree(dir_path)
         return False
 
     logger.info('Beginning raster generation...')
-    for dt, filenames in products_downloaded.items():
-        dst_shape, dst_crs, dst_transform = rasters.pipeline_S2(dir_path, f's2_{dt}.tif', filenames, bounds)
-        rasters.pipeline_NDWI(dir_path, f'ndwi_{dt}.tif', filenames, bounds)
-        for filename in filenames:
-            os.remove(dir_path + filename)
-            
     try:
+        for dt, filenames in products_downloaded.items():
+            dst_shape, dst_crs, dst_transform = rasters.pipeline_S2(dir_path, f's2_{dt}.tif', filenames, bounds)
+            rasters.pipeline_NDWI(dir_path, f'ndwi_{dt}.tif', filenames, bounds)
+            for filename in filenames:
+                os.remove(dir_path + filename)
+        logger.debug(f'S2 and NDWI rasters completed successfully.')
+
         rasters.pipeline_roads(dir_path, 'roads.tif', dst_shape, dst_crs, dst_transform, state, buffer=2)
+        logger.debug(f'Roads raster completed successfully.')
         rasters.pipeline_dem_slope(dir_path, ('dem.tif', 'slope.tif'), dst_shape, dst_crs, dst_transform, bounds)
+        logger.debug(f'DEM, slope rasters completed successfully.')
         rasters.pipeline_flowlines(dir_path, 'flowlines.tif', dst_shape, dst_crs, dst_transform, bounds, buffer=2)
+        logger.debug(f'Flowlines raster completed successfully.')
         rasters.pipeline_waterbody(dir_path, 'waterbody.tif', dst_shape, dst_crs, dst_transform, bounds)
+        logger.debug(f'Waterbody raster completed successfully.')
     except Exception as err:
-        logger.error(f'Raster generation of roads, DEM, flowlines, waterbody failed for {event_date}, at {minx}, {miny}, {maxx}, {maxy}. Id: {eid}. Removing directory and contents.')
+        logger.error(f'Raster generation error: {err}, {type(err)}')
+        logger.error(f'Raster generation failed for {event_date}, at {minx}, {miny}, {maxx}, {maxy}. Id: {eid}. Removing directory and contents.')
         shutil.rmtree(dir_path)
         return False
-    
+
+    logger.info('Raster generation completed. Event finished.')
     return True # whether successful or not
 
 @bash_app
@@ -288,7 +404,8 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents):
     
     prism = read_PRISM()
     rootLogger.info("PRISM successfully loaded.")
-    events = general_query_PRISM(prism, threshold=threshold, n=maxevents)
+    events = general_query_filter_PRISM(prism, days_before, days_after, threshold=threshold, n=maxevents)
+    # events = general_query_PRISM(prism, threshold=threshold, n=maxevents)
 
     rootLogger.info("Initializing event downloads...")
 
@@ -330,7 +447,7 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents):
     alr_completed = 0
     print(f'{len(events.index)} possible extreme precipitation events found. Beginning data collection...')
     try:
-        for event_date, minx, miny, maxx, maxy, eid in tqdm(zip(events['Date'], events['minx'], events['miny'], events['maxx'], events['maxy'], events['eid']), total=len(events.index)):
+        for event_date, minx, miny, maxx, maxy, eid in zip(events['Date'], events['minx'], events['miny'], events['maxx'], events['maxy'], events['eid']):
             if Path(dir_path + eid + '/').is_dir():
                 if event_completed(dir_path + eid + '/'):
                     rootLogger.debug('Event has already been processed before. Moving on to the next event...')
@@ -341,13 +458,17 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents):
                 
             log_file = dir_path + f'event_{eid}.log'
             futures.append(event_download(threshold, days_before, days_after, maxcoverpercentage, event_date, minx, miny, maxx, maxy, eid, log_file))
+
+        # progress bar
+        results = [future.result() for future in tqdm(futures)]
         
-        results = [future.result() for future in futures]
         rootLogger.debug(f"Number of events already completed: {alr_completed}")
         rootLogger.debug(f"Number of events skipped from this run: {len(results) - sum(results)} out of {len(results) + alr_completed}")
+    except Exception as err:
+        rootLogger.error(f"Unexpected error: {err}, {type(err)}")
     finally: 
         # concatenate log files here with separator in between using bash script
-        log_files = glob(f'{dir_path}/event_*.log')
+        log_files = glob(dir_path + 'event_*.log')
         if len(log_files) > 0:
             compile_logs(log_files, dir_path, f'events_{start_time}.log').result()
     

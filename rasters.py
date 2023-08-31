@@ -48,7 +48,7 @@ def found_after_images(products, event_date):
 
     return False
 
-def download_all(products, dir_path, loggername):
+def download_all(products, dir_path, loggername, max_retries=3):
     """Downloads all products in catalog returned by OData API. Note that the function will only 
     be able to download for 60 mins before tokens including the refresh expire, which can lead to 
     errors when downloading goes beyond that time frame.
@@ -62,14 +62,14 @@ def download_all(products, dir_path, loggername):
     """
     logger = logging.getLogger(loggername + ".rasters")
     # Token expires in 60 mins, do not request token every time!
-    data = {
+    auth_data = {
                 'grant_type': 'password',
                 'username': 'dma@anl.gov',
                 'password': 'uR29W9Z@q7*GB9n',
                 'client_id': 'cdse-public',
             }
 
-    response = requests.post('https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token', data=data)
+    response = requests.post('https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token', data=auth_data)
     access_token = response.json()['access_token']
     refresh_token = response.json()['refresh_token']
 
@@ -79,20 +79,33 @@ def download_all(products, dir_path, loggername):
     session.headers.update({'Authorization': f'Bearer {access_token}'})
 
     # refresh token - can refresh maximum 6 times
+    # if refresh token expires, must reauthenticate!
     refresh_count = 0
     def auto_refresh(r, *args, **kwargs):
         nonlocal refresh_count
         nonlocal access_token
+        nonlocal refresh_token
+        nonlocal auth_data
         if r.status_code == 401 and r.json()['detail'] == 'Expired signature!' and refresh_count < 6:
             logger.info("Refreshing token as the previous access token expired")
-            data = {
+            refresh_data = {
                 'grant_type': 'refresh_token',
                 'refresh_token': refresh_token,
                 'client_id': 'cdse-public',
             }
 
-            new_response = requests.post('https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token', data=data)
-            access_token = new_response.json()['access_token']
+            try:
+                new_response = requests.post('https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token', data=refresh_data)
+                if new_response.status_code == 400 and 'error' in new_response.json() and new_response.json()['error'] == 'invalid_grant':
+                    # reauth if refresh token expires also
+                    new_response = requests.post('https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token', data=auth_data)
+                access_token = new_response.json()['access_token']
+                refresh_token = new_response.json()['refresh_token']
+            except KeyError as err:
+                logger.error(f'Unexpected json: {new_response.json()}')
+            except Exception as err:
+                raise err
+                
             session.headers.update({"Authorization": f"Bearer {access_token}"})
             r.request.headers["Authorization"] = session.headers["Authorization"]
 
@@ -120,20 +133,28 @@ def download_all(products, dir_path, loggername):
     Path(dir_path).mkdir(parents=True, exist_ok=True)
     for product in products:
         logger.info(f'Attempting download for product {product["Name"]} with product id {product["Id"]}...')
-    
-        if not session.hooks['response']:
-            logger.info('Appending new session hook')
-            session.hooks['response'].append(auto_refresh)
-
-        try:
-            download(product, session, dir_path)
-        except requests.exceptions.ChunkedEncodingError as err:
-            # retry again
-            logger.info(f'Encountered {err}, {type(err)}. Retrying once more...')
-            download(product, session, dir_path)
-        except Exception as err:
-            logger.info(f'Encountered unexpected {err}, {type(err)}. Not handled, cancelling operations.')
-            raise err
+        # check if product already downloaded previously
+        if os.path.isfile(dir_path + f"{product['Name'][:-5]}.zip") :
+            logger.info(f'Product {product["Name"]} with product id {product["Id"]} already downloaded. Skipping download...')
+            continue
+        
+        retries = 0
+        while retries < max_retries:
+            try:
+                if not session.hooks['response']:
+                    logger.info('Appending new session hook')
+                    session.hooks['response'].append(auto_refresh)
+                    
+                download(product, session, dir_path)
+                break
+            except requests.exceptions.ChunkedEncodingError as err:
+                # retry again
+                logger.info(f'Encountered {err}, {type(err)}. Retrying once more...')
+                retries += 1
+                # download(product, session, dir_path)
+            except Exception as err:
+                logger.info(f'Encountered unexpected {err}, {type(err)}. Not handled, cancelling operations.')
+                raise err
 
         logger.info(f'Download completed for {product["Id"]}.')
         logger.info(f'Total token refreshes: {refresh_count}')

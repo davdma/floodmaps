@@ -412,11 +412,12 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents):
     # parallelization
     parsl.set_file_logger(dir_path + f'parsl_{start_time}.log', level=logging.DEBUG)
     config = Config(
-        retries=1,
+        retries=3,
         executors=[
             HighThroughputExecutor(
                 label="bebopslurm",
                 cores_per_worker=36,
+                heartbeat_threshold=180,
                 provider=SlurmProvider(
                     partition='bdwall',
         		    account='STARTUP-DMA',
@@ -460,7 +461,18 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents):
             futures.append(event_download(threshold, days_before, days_after, maxcoverpercentage, event_date, minx, miny, maxx, maxy, eid, log_file))
 
         # progress bar
-        results = [future.result() for future in tqdm(futures)]
+        results = []
+        for future in tqdm(futures):
+            try:
+                results.append(future.result())
+            except parsl.executors.high_throughput.interchange.ManagerLost as err:
+                rootLogger.error(f'Manager lost after 3 retries: {err}, {type(err)}')
+                rootLogger.error(f'Will proceed to skip event.')
+            except Exception as err:
+                rootLogger.error(f'Unexpected error: {err}, {type(err)}')
+                rootLogger.error(f'Will proceed to skip event.')
+        
+        # results = [future.result() for future in tqdm(futures)]
         
         rootLogger.debug(f"Number of events already completed: {alr_completed}")
         rootLogger.debug(f"Number of events skipped from this run: {len(results) - sum(results)} out of {len(results) + alr_completed}")

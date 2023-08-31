@@ -187,6 +187,8 @@ def general_query_filter_PRISM(prism, days_before, days_after, threshold=300, n=
         products = [product for product in search['value'] if product['Online']]
         if len(products) == 0:
             continue
+        elif not rasters.found_after_images(products, event_date_str):
+            continue
 
         event_dates.append(event_date_str)
         event_precip.append(precip_data[time, y, x])
@@ -338,7 +340,8 @@ def event_download(threshold, days_before, days_after, maxcoverpercentage, event
     logger.info('Beginning raster generation...')
     try:
         for dt, filenames in products_downloaded.items():
-            dst_shape, dst_crs, dst_transform = rasters.pipeline_S2(dir_path, f's2_{dt}.tif', filenames, bounds)
+            dst_shape, dst_crs, dst_transform = rasters.pipeline_S2(dir_path, f'tci_{dt}.tif', filenames, bounds)
+            rasters.pipeline_B08(dir_path, f'b08_{dt}.tif', filenames, bounds)
             rasters.pipeline_NDWI(dir_path, f'ndwi_{dt}.tif', filenames, bounds)
             for filename in filenames:
                 os.remove(dir_path + filename)

@@ -387,6 +387,24 @@ def get_B03_B08_filepath(dir_path, filename):
         
     return b03_path, b08_path
 
+def get_B08_filepath(dir_path, filename):
+    """Gets internal B08 band filepath of a SAFE zip file."""
+    archive = ZipFile(dir_path + filename, 'r')
+    files = archive.namelist()
+    p = re.compile(f"{os.path.splitext(filename)[0]}.SAFE/GRANULE/L2A_.*/IMG_DATA/R10m/.*_B08_10m.jp2")
+    b08_path = None
+    
+    for file in files:
+        match = p.search(file)
+        if match:
+            b08_path = file
+            break
+            
+    if b08_path is None:
+        raise Exception("B8 band file not found")
+        
+    return b08_path
+
 def get_SCL20m_filepath(dir_path, filename):
     """Gets internal SCL 20m resolution filepath of a SAFE zip file."""
     archive = ZipFile(dir_path + filename, 'r')
@@ -489,6 +507,46 @@ def pipeline_S2(dir_path, save_as, filenames, bounds):
             dst.write(out_image)
 
     return (out_image.shape[-2], out_image.shape[-1]), img_crs, out_transform
+
+def pipeline_B08(dir_path, save_as, filenames, bounds):
+    """Generates NIR B8 band raster of S2 multispectral file.
+
+    Parameters
+    ----------
+    dir_path : str
+        Path for saving generated raster. 
+    save_as : str
+        Name of file to be saved. Must have .tif extension.
+    filenames : list[str]
+        List of s2 files to stitch together.
+    bounds : (float, float, float, float)
+        Tuple in the order minx, miny, maxx, maxy, representing bounding box.
+    zip : bool, optional
+    """
+    filepaths = []
+    for filename in filenames:
+        filepaths.append(f"zip://{dir_path + filename}!/{get_B08_filepath(dir_path, filename)}")
+
+    with ExitStack() as stack:
+        files = [stack.enter_context(rasterio.open(filepath)) for filepath in filepaths]
+
+        # check if all crs is equal before doing merge
+        files_crs = {file.crs for file in files}
+        if len(files_crs) > 1:
+            raise Exception("CRS of all files must match")
+
+        img_crs = files[0].crs
+
+        # perform transformation on bounds to match crs
+        conversion = transform(PRISM_CRS, img_crs, (bounds[0], bounds[2]), (bounds[1], bounds[3]))
+        cbounds = conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]
+
+        # No data value for TCI is 0
+        out_image, out_transform = rasterio.merge.merge(files, bounds=cbounds, nodata=0)
+
+        with rasterio.open(dir_path + save_as, 'w', driver='Gtiff', count=1, height=out_image.shape[-2], width=out_image.shape[-1], crs=img_crs, dtype=out_image.dtype, 
+                           transform=out_transform, nodata=0) as dst:
+            dst.write(out_image)
 
 def pipeline_NDWI(dir_path, save_as, filenames, bounds):
     """Generates NDWI raster from S2 multispectral files.

@@ -1,7 +1,7 @@
 import requests
 from contextlib import ExitStack
 from osgeo import gdal, ogr
-from rasterio.warp import reproject, Resampling
+from rasterio.warp import calculate_default_transform, reproject, Resampling
 import richdem as rd
 from rasterio.features import rasterize
 from zipfile import ZipFile
@@ -17,7 +17,10 @@ import logging
 import shutil
 import json
 import os
+import sys
+import time
 from fiona.transform import transform, transform_geom
+import sample_exceptions
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 from tensorflow.keras.layers import MaxPooling2D
@@ -67,7 +70,7 @@ def download_all(products, dir_path, loggername, max_retries=3):
                 'username': 'dma@anl.gov',
                 'password': 'uR29W9Z@q7*GB9n',
                 'client_id': 'cdse-public',
-            }
+                }
 
     response = requests.post('https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token', data=auth_data)
     access_token = response.json()['access_token']
@@ -78,15 +81,12 @@ def download_all(products, dir_path, loggername, max_retries=3):
     session = requests.Session()
     session.headers.update({'Authorization': f'Bearer {access_token}'})
 
-    # refresh token - can refresh maximum 6 times
     # if refresh token expires, must reauthenticate!
-    refresh_count = 0
     def auto_refresh(r, *args, **kwargs):
-        nonlocal refresh_count
         nonlocal access_token
         nonlocal refresh_token
         nonlocal auth_data
-        if r.status_code == 401 and r.json()['detail'] == 'Expired signature!' and refresh_count < 6:
+        if r.status_code == 401 and r.json()['detail'] == 'Expired signature!':
             logger.info("Refreshing token as the previous access token expired")
             refresh_data = {
                 'grant_type': 'refresh_token',
@@ -98,6 +98,7 @@ def download_all(products, dir_path, loggername, max_retries=3):
                 new_response = requests.post('https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token', data=refresh_data)
                 if new_response.status_code == 400 and 'error' in new_response.json() and new_response.json()['error'] == 'invalid_grant':
                     # reauth if refresh token expires also
+                    logger.info("Reauthorizing for new access and refresh token.")
                     new_response = requests.post('https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token', data=auth_data)
                 access_token = new_response.json()['access_token']
                 refresh_token = new_response.json()['refresh_token']
@@ -108,25 +109,25 @@ def download_all(products, dir_path, loggername, max_retries=3):
                 
             session.headers.update({"Authorization": f"Bearer {access_token}"})
             r.request.headers["Authorization"] = session.headers["Authorization"]
-
-            refresh_count += 1
             
             # deregister hook to break loop!
             session.hooks['response'] = []
             return session.send(r.request, verify=False)
 
     def download(product, session, dir_path):
+        logger.info(f'Downloading product {product["Name"]} with product id {product["Id"]}...')
         url = f'https://catalogue.dataspace.copernicus.eu/odata/v1/Products({product["Id"]})/$value'
-        response = session.get(url, allow_redirects=False, timeout=180)
+        
+        response = session.get(url, allow_redirects=False)
         while response.status_code in (301, 302, 303, 307):
             url = response.headers['Location']
             response = session.get(url, allow_redirects=False)
     
-        if response.status_code != 200:
-            logger.info(f'Total token refreshes before unexpected status: {refresh_count}')
-            raise Exception(f'Unsuccessful request with status code: {response.status_code}, {response.json()}.')
-
         file = session.get(url, verify=False, allow_redirects=True)
+        if file.status_code != 200:
+            # Do not download if credentials have expired - may need to reauth to retry
+            raise sample_exceptions.BadStatusError(f'Unsuccessful request with status code {file.status_code}')
+            
         with open(dir_path + f"{product['Name'][:-5]}.zip", 'wb') as p:
             p.write(file.content)
 
@@ -147,17 +148,17 @@ def download_all(products, dir_path, loggername, max_retries=3):
                     
                 download(product, session, dir_path)
                 break
-            except requests.exceptions.ChunkedEncodingError as err:
-                # retry again
+            except (requests.exceptions.ChunkedEncodingError, sample_exceptions.BadStatusError) as err:
                 logger.info(f'Encountered {err}, {type(err)}. Retrying once more...')
                 retries += 1
-                # download(product, session, dir_path)
             except Exception as err:
                 logger.info(f'Encountered unexpected {err}, {type(err)}. Not handled, cancelling operations.')
                 raise err
 
+        if retries == max_retries:
+            raise Exception(f'Max retries reached for {product["Name"]} with product id {product["Id"]}.')
+
         logger.info(f'Download completed for {product["Id"]}.')
-        logger.info(f'Total token refreshes: {refresh_count}')
 
 def download_Sentinel_2(footprint, event_date, date_interval, dir_path, loggername):
     """Returns None if search yields no desired results or a dictionary with product filenames grouped by date.
@@ -189,8 +190,7 @@ def download_Sentinel_2(footprint, event_date, date_interval, dir_path, loggerna
         logger.error(f"The response does not contain valid JSON: {err}, {type(err)}")
         logger.debug(f"Retrying once...")
         try:
-            response = requests.get(f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq 'SENTINEL-2' and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' and att/OData.CSC.StringAttribute/Value eq 'S2MSI2A') and OData.CSC.Intersects(area=geography'SRID=4326;{footprint}') and ContentDate/Start ge {date_interval[0]} and ContentDate/Start le {date_interval[1]}&$top=100",
-                                timeout=20)
+            response = requests.get(f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq 'SENTINEL-2' and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' and att/OData.CSC.StringAttribute/Value eq 'S2MSI2A') and OData.CSC.Intersects(area=geography'SRID=4326;{footprint}') and ContentDate/Start ge {date_interval[0]} and ContentDate/Start le {date_interval[1]}&$top=100", timeout=20)
             search = response.json()
         except Exception as err:
             logger.error(f"Retry failed: {err}, {type(err)}")
@@ -418,6 +418,76 @@ def get_SCL20m_filepath(dir_path, filename):
     
     raise Exception("SCL file not found")
 
+def get_TCI10m_crs(dir_path, filename):
+    with rasterio.open(f"zip://{dir_path + filename}!/{get_TCI10m_filepath(dir_path, filename)}") as src:
+        src_crs = src.crs
+    
+    return src_crs
+
+def convert_raster_crs(filepath, new_filepath, dst_crs, resampling=Resampling.nearest):
+    # for SCL we use nearest resampling - otherwise use bilinear
+    with rasterio.open(filepath) as src:
+        transform, width, height = calculate_default_transform(
+            src.crs, dst_crs, src.width, src.height, *src.bounds)
+        kwargs = src.meta.copy()
+        kwargs.update({
+            'crs': dst_crs,
+            'transform': transform,
+            'width': width,
+            'height': height
+        })
+
+        with rasterio.open(new_filepath, 'w', **kwargs) as dst:
+            for i in range(1, src.count + 1):
+                reproject(
+                    source=rasterio.band(src, i),
+                    destination=rasterio.band(dst, i),
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=transform,
+                    dst_crs=dst_crs,
+                    resampling=resampling)
+
+def cloud_null_percentage_dep(dir_path, filenames, bounds):
+    """Calculates percentage of image covered by cloud or no data pixels.
+
+    Parameters
+    ----------
+    dir_path : str
+        Path for saving generated raster. 
+    filenames : list[str]
+        List of s2 zip files for stitching together SCL files.
+    bounds : (float, float, float, float)
+        Tuple in the order minx, miny, maxx, maxy, representing bounding box.
+
+    Returns
+    -------
+    int
+        Percentage of image covered by cloud or no data pixels.
+    """
+    # For cloud null percentage, it could make more sense to not do any merging!
+    filepaths = []
+    for filename in filenames:
+        # stitch together SCL
+        filepaths.append(f"zip://{dir_path + filename}!/{get_SCL20m_filepath(dir_path, filename)}")
+
+    with ExitStack() as stack:
+        files = [stack.enter_context(rasterio.open(filepath)) for filepath in filepaths]
+
+        # check if all crs is equal before doing merge
+        files_crs = {file.crs.to_string() for file in files}
+        if len(files_crs) > 1:
+            raise Exception(f"CRS of all files must match: {', '.join(files_crs)}. Filenames: {', '.join(filenames)}.")
+        
+        img_crs = files[0].crs
+        # perform transformation on bounds to match crs
+        if bounds is not None:
+            conversion = transform(PRISM_CRS, img_crs, (bounds[0], bounds[2]), (bounds[1], bounds[3]))
+            bounds = conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]
+
+        out_image, _ = rasterio.merge.merge(files, bounds=bounds)
+    return int((np.isin(out_image, [0, 8, 9]).sum() / out_image.size) * 100)
+
 def cloud_null_percentage(dir_path, filenames, bounds):
     """Calculates percentage of image covered by cloud or no data pixels.
 
@@ -435,29 +505,45 @@ def cloud_null_percentage(dir_path, filenames, bounds):
     int
         Percentage of image covered by cloud or no data pixels.
     """
+    files_crs = []
     filepaths = []
     for filename in filenames:
         # stitch together SCL
-        filepaths.append(f"zip://{dir_path + filename}!/{get_SCL20m_filepath(dir_path, filename)}")
+        filepath = f"zip://{dir_path + filename}!/{get_SCL20m_filepath(dir_path, filename)}"
+        filepaths.append(filepath)
 
-    with ExitStack() as stack:
-        files = [stack.enter_context(rasterio.open(filepath)) for filepath in filepaths]
+        with rasterio.open(filepath) as src:
+            files_crs.append(src.crs.to_string())
 
-        # check if all crs is equal before doing merge
-        files_crs = {file.crs for file in files}
-        if len(files_crs) > 1:
-            raise Exception("CRS of all files must match")
+    if len(files_crs) == 0:
+        raise Exception(f"No CRS found for files: {', '.join(filenames)}")
         
-        img_crs = files[0].crs
+    img_crs = files_crs[0]
+    if bounds is not None:
+        conversion = transform(PRISM_CRS, img_crs, (bounds[0], bounds[2]), (bounds[1], bounds[3]))
+        bounds = conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]
+        
+    if all(item == files_crs[0] for item in files_crs):
         # perform transformation on bounds to match crs
-        if bounds is not None:
-            conversion = transform(PRISM_CRS, img_crs, (bounds[0], bounds[2]), (bounds[1], bounds[3]))
-            bounds = conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]
+        out_image, _ = rasterio.merge.merge(filepaths, bounds=bounds)
+    else:
+        new_filepaths = []
+        for i, file in enumerate(filepaths[1:]):
+            # write new files, then update stack context
+            new_filepath = dir_path + f'scl_tmp_{i}.tif'
+            convert_raster_crs(file, new_filepath, img_crs)
+            new_filepaths.append(new_filepath)
 
-        out_image, _ = rasterio.merge.merge(files, bounds=bounds)
+        filepaths = [filepaths[0]] + new_filepaths
+        out_image, _ = rasterio.merge.merge(filepaths, bounds=bounds)
+        
+        # then remove new tmp files when done
+        for file in new_filepaths:
+            os.remove(file)
+
     return int((np.isin(out_image, [0, 8, 9]).sum() / out_image.size) * 100)
 
-def pipeline_S2(dir_path, save_as, filenames, bounds):
+def pipeline_S2_dep(dir_path, save_as, filenames, bounds):
     """Generates RGB raster of S2 multispectral file.
 
     Parameters
@@ -508,7 +594,59 @@ def pipeline_S2(dir_path, save_as, filenames, bounds):
 
     return (out_image.shape[-2], out_image.shape[-1]), img_crs, out_transform
 
-def pipeline_B08(dir_path, save_as, filenames, bounds):
+# we will choose a UTM zone CRS already given and stick to it for rest of sample data!
+def pipeline_S2(dir_path, save_as, dst_crs, filenames, bounds):
+    """Generates RGB raster of S2 multispectral file.
+
+    Parameters
+    ----------
+    dir_path : str
+        Path for saving generated raster. 
+    save_as : str
+        Name of file to be saved. Must have .tif extension.
+    dst_crs : obj
+        Coordinate reference system of output raster.
+    filenames : list[str]
+        List of s2 files to stitch together.
+    bounds : (float, float, float, float)
+        Tuple in the order minx, miny, maxx, maxy, representing bounding box.
+    zip : bool, optional
+
+    Returns
+    -------
+    shape : (int, int)
+        Shape of the raster array.
+    transform : rasterio.affine.Affine()
+        Transformation matrix for mapping pixel coordinates in dest to coordinate system.
+    """
+    # iterate through files - if a file does not have same crs as dst_crs, then must reproject and keep track
+    filepaths = []
+    for filename in filenames:
+        filepath = f"zip://{dir_path + filename}!/{get_TCI10m_filepath(dir_path, filename)}"
+        filepaths.append(filepath)
+
+    final_filepaths = []
+    new_filepaths = []
+    for i, filepath in enumerate(filepaths):
+        with rasterio.open(filepath) as src:
+            # check to see if using equality operator works, or can just check string equality
+            if src.crs == dst_crs:
+                final_filepaths.append(filepath)
+            else:
+                new_filepath = dir_path + f's2_tmp_{i}.tif'
+                convert_raster_crs(filepath, new_filepath, dst_crs, resampling=Resampling.bilinear)
+                new_filepaths.append(new_filepath)
+
+    out_image, out_transform = rasterio.merge.merge(final_filepaths + new_filepaths, bounds=bounds, nodata=0)
+    for filepath in new_filepaths:
+        os.remove(filepath)
+
+    with rasterio.open(dir_path + save_as, 'w', driver='Gtiff', count=3, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=0) as dst:
+            dst.write(out_image)
+
+    return (out_image.shape[-2], out_image.shape[-1]), out_transform
+    
+def pipeline_B08_dep(dir_path, save_as, filenames, bounds):
     """Generates NIR B8 band raster of S2 multispectral file.
 
     Parameters
@@ -548,7 +686,50 @@ def pipeline_B08(dir_path, save_as, filenames, bounds):
                            transform=out_transform, nodata=0) as dst:
             dst.write(out_image)
 
-def pipeline_NDWI(dir_path, save_as, filenames, bounds):
+def pipeline_B08(dir_path, save_as, dst_crs, filenames, bounds):
+    """Generates NIR B8 band raster of S2 multispectral file.
+
+    Parameters
+    ----------
+    dir_path : str
+        Path for saving generated raster. 
+    save_as : str
+        Name of file to be saved. Must have .tif extension.
+    dst_crs : obj
+        Coordinate reference system of output raster.
+    filenames : list[str]
+        List of s2 files to stitch together.
+    bounds : (float, float, float, float)
+        Tuple in the order minx, miny, maxx, maxy, representing bounding box.
+    zip : bool, optional
+    """
+    # iterate through files - if a file does not have same crs as dst_crs, then must reproject and keep track
+    filepaths = []
+    for filename in filenames:
+        filepath = f"zip://{dir_path + filename}!/{get_B08_filepath(dir_path, filename)}"
+        filepaths.append(filepath)
+
+    final_filepaths = []
+    new_filepaths = []
+    for i, filepath in enumerate(filepaths):
+        with rasterio.open(filepath) as src:
+            # check to see if using equality operator works, or can just check string equality
+            if src.crs == dst_crs:
+                final_filepaths.append(filepath)
+            else:
+                new_filepath = dir_path + f'b08_tmp_{i}.tif'
+                convert_raster_crs(filepath, new_filepath, dst_crs, resampling=Resampling.bilinear)
+                new_filepaths.append(new_filepath)
+
+    # No data value for TCI is 0
+    out_image, out_transform = rasterio.merge.merge(final_filepaths + new_filepaths, bounds=bounds, nodata=0)
+    for filepath in new_filepaths:
+        os.remove(filepath)
+
+    with rasterio.open(dir_path + save_as, 'w', driver='Gtiff', count=1, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=0) as dst:
+        dst.write(out_image)
+
+def pipeline_NDWI_dep(dir_path, save_as, filenames, bounds):
     """Generates NDWI raster from S2 multispectral files.
 
     Parameters
@@ -608,6 +789,73 @@ def pipeline_NDWI(dir_path, save_as, filenames, bounds):
     with rasterio.open(dir_path + save_as, 'w', driver='Gtiff', count=1, height=ndwi.shape[-2], width=ndwi.shape[-1], crs=img_crs, dtype=ndwi.dtype, transform=out_transform, nodata=-999999) as dst:
         dst.write(ndwi, 1)
 
+def pipeline_NDWI(dir_path, save_as, dst_crs, filenames, bounds):
+    """Generates NDWI raster from S2 multispectral files.
+
+    Parameters
+    ----------
+    dir_path : str
+        Path for saving generated raster. 
+    save_as : str
+        Name of file to be saved. Must have .tif extension.
+    filenames : list[str]
+        List of s2 files to stitch together.
+    bounds : (float, float, float, float)
+        Tuple in the order minx, miny, maxx, maxy, representing bounding box.
+    zip : bool, optional
+    """
+    b03_filepaths = []
+    b08_filepaths = []
+
+    for filename in filenames:
+        b03_path, b08_path = get_B03_B08_filepath(dir_path, filename)
+        b03_filepaths.append(f"zip://{dir_path + filename}!/{b03_path}")
+        b08_filepaths.append(f"zip://{dir_path + filename}!/{b08_path}")
+    
+    # get b03 raster
+    b03_final_filepaths = []
+    b03_new_filepaths = []
+    for i, filepath in enumerate(b03_filepaths):
+        with rasterio.open(filepath) as src:
+            # check to see if using equality operator works, or can just check string equality
+            if src.crs == dst_crs:
+                b03_final_filepaths.append(filepath)
+            else:
+                b03_new_filepath = dir_path + f'ndwi_b03_tmp_{i}.tif'
+                convert_raster_crs(filepath, b03_new_filepath, dst_crs, resampling=Resampling.bilinear)
+                b03_new_filepaths.append(b03_new_filepath)
+
+    out_image1, _ = rasterio.merge.merge(b03_final_filepaths + b03_new_filepaths, bounds=bounds, nodata=0)
+    green = out_image1[0]
+    for filepath in b03_new_filepaths:
+        os.remove(filepath)
+
+    # get b08 raster
+    b08_final_filepaths = []
+    b08_new_filepaths = []
+    for i, filepath in enumerate(b08_filepaths):
+        with rasterio.open(filepath) as src:
+            # check to see if using equality operator works, or can just check string equality
+            if src.crs == dst_crs:
+                b08_final_filepaths.append(filepath)
+            else:
+                b08_new_filepath = dir_path + f'ndwi_b08_tmp_{i}.tif'
+                convert_raster_crs(filepath, b08_new_filepath, dst_crs, resampling=Resampling.bilinear)
+                b08_new_filepaths.append(b08_new_filepath)
+
+    out_image2, out_transform = rasterio.merge.merge(b08_final_filepaths + b08_new_filepaths, bounds=bounds, nodata=0)
+    nir = out_image2[0]
+    for filepath in b08_new_filepaths:
+        os.remove(filepath)
+
+    # calculate ndwi
+    checker = green + nir
+    ndwi = np.empty(green.shape)
+    ndwi[:] = -999999
+    np.divide(green - nir, green + nir, out = ndwi, where = checker != 0)
+    with rasterio.open(dir_path + save_as, 'w', driver='Gtiff', count=1, height=ndwi.shape[-2], width=ndwi.shape[-1], crs=dst_crs, dtype=ndwi.dtype, transform=out_transform, nodata=-999999) as dst:
+        dst.write(ndwi, 1)
+
 def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, buffer=0):
     """Generates raster with burned in geometries of roads given destination raster properties.
 
@@ -619,7 +867,7 @@ def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, 
         Name of file to be saved. Must have .tif extension.
     dst_shape : (int, int)
         Shape of output raster.
-    dst_crs : str
+    dst_crs : obj
         Coordinate reference system of output raster.
     dst_transform : rasterio.affine.Affine()
         Transformation matrix for mapping pixel coordinates to coordinate system of output raster.
@@ -686,6 +934,10 @@ def pipeline_dem_slope(dir_path, save_as, dst_shape, dst_crs, dst_transform, bou
             if tile_bounds[0] < bounds[2] and tile_bounds[2] > bounds[0] and tile_bounds[1] < bounds[3] and tile_bounds[3] > bounds[1]:
                 lst.append('Elevation/' + file)
 
+    # if no dem tile can be found, raise error
+    if not lst:
+        raise Exception(f'No elevation raster can be found for bounds ({bounds[0]}, {bounds[1]}, {bounds[2]}, {bounds[3]}) during generation of dem, slope raster.')
+    
     with ExitStack() as stack:
         files = [stack.enter_context(rasterio.open(filepath)) for filepath in lst]
         
@@ -811,6 +1063,11 @@ def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, bou
         shapes = []
         for lyr in files:
             for _, feat in lyr.items(bbox=bounds):
+                fcode = feat.properties['FCode']
+                # filter out estuary
+                if fcode == 49300: 
+                    continue
+                    
                 shapes.append((transform_geom(src_crs, dst_crs, feat.geometry), 1))
 
         if shapes:

@@ -11,21 +11,13 @@ import numpy as np
 import pandas as pd
 import os
 import re
-
-# parallelization
-import parsl
-from parsl import bash_app, python_app
-from parsl.config import Config
-from parsl.providers import SlurmProvider
-from parsl.executors import HighThroughputExecutor
-from parsl.addresses import address_by_hostname, address_by_interface
-from parsl.channels import LocalChannel
-from parsl.launchers import SrunLauncher, AprunLauncher, MpiRunLauncher
-from parsl.data_provider.files import File
-
-import traceback
 from glob import glob
 import json
+import pickle
+import sample_exceptions
+from fiona.transform import transform, transform_geom
+
+PRISM_CRS = "EPSG:4269"
 
 def read_PRISM():
     """Reads the PRISM netCDF file and return the encoded data."""
@@ -102,7 +94,7 @@ def general_query_PRISM(prism, threshold=300, n=None):
 
     return df
 
-def general_query_filter_PRISM(prism, days_before, days_after, threshold=300, n=None):
+def general_query_filter_PRISM(prism, days_before, days_after, history, threshold=300, n=None, cloudcover=80, max_retries=3):
     """
     Queries contents of PRISM netCDF file given the return value of read_PRISM(). Filters for 
     precipitation events that meet minimum threshold of precipitation.
@@ -110,6 +102,10 @@ def general_query_filter_PRISM(prism, days_before, days_after, threshold=300, n=
     Parameters
     ----------
     prism : tuple returned by read_PRISM()
+    days_before : int
+    days_after : int
+    history : set()
+        Set that holds all eids of previously processed events.
     threshold : int, optional
         Minimum cumulative daily precipitation in mm for filtering PRISM tiles.
     n : int, optional
@@ -143,18 +139,25 @@ def general_query_filter_PRISM(prism, days_before, days_after, threshold=300, n=
 
     min_date = datetime(2015, 7, 1)
     count = 0
+    if n is not None:
+        pbar = tqdm(total = n)
+
+    error_count = {'JSONDecodeError': 0, 'RequestsError': 0, 'GeneralError': 0}
+    rootLogger.debug('Catalog search beginning...')
     for time, y, x in zip(events[0], events[1], events[2]):
         if n is not None and count >= n:
             break
             
         event_date = num2date(time, units=time_info[0], calendar=time_info[1])
-
+        event_date_str = event_date.strftime("%Y%m%d")
+        
         # must not be earlier than s2 launch
         if event_date < min_date:
             continue
+        elif f'{event_date_str}_{y}_{x}' in history:
+            continue
 
         # filter out events unavailable on copernicus
-        event_date_str = event_date.strftime("%Y%m%d")
         date_interval = rasters.get_date_interval(event_date_str, days_before, days_after)
         c_minx = x * x_size + upper_left_x
         c_miny = (y + 1) * y_size + upper_left_y
@@ -162,26 +165,46 @@ def general_query_filter_PRISM(prism, days_before, days_after, threshold=300, n=
         c_maxy = y * y_size + upper_left_y
         conversion = transform(PRISM_CRS, SEARCH_CRS, (c_minx, c_maxx), (c_miny, c_maxy))
         box = sp.to_wkt(sp.geometry.box(conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]))
-        
+
+        query_url = f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq 'SENTINEL-2' and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' and att/OData.CSC.StringAttribute/Value eq 'S2MSI2A') and OData.CSC.Intersects(area=geography'SRID=4326;{box}') and Attributes/OData.CSC.DoubleAttribute/any(att:att/Name eq 'cloudCover' and att/OData.CSC.DoubleAttribute/Value lt {cloudcover}.00) and ContentDate/Start ge {date_interval[0]} and ContentDate/Start le {date_interval[1]}&$top=100"
+
+        # have catalog search just track numbers of errors instead of logging every error
         try:
-            response = requests.get(f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq 'SENTINEL-2' and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' and att/OData.CSC.StringAttribute/Value eq 'S2MSI2A') and OData.CSC.Intersects(area=geography'SRID=4326;{box}') and ContentDate/Start ge {date_interval[0]} and ContentDate/Start le {date_interval[1]}&$top=100",
-                            timeout=20)
-            search = response.json()
-        except requests.exceptions.JSONDecodeError as err:
-            rootLogger.error(f"The response does not contain valid JSON: {err}, {type(err)}")
-            rootLogger.debug(f"Retrying once...")
-            try:
-                response = requests.get(f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq 'SENTINEL-2' and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' and att/OData.CSC.StringAttribute/Value eq 'S2MSI2A') and OData.CSC.Intersects(area=geography'SRID=4326;{box}') and ContentDate/Start ge {date_interval[0]} and ContentDate/Start le {date_interval[1]}&$top=100",
-                                timeout=20)
+            # filter cloud cover here!
+            response = requests.get(query_url, timeout=20)
+            if response.status_code != 200:
+                raise sample_exceptions.BadStatusError(str(response.status_code))
+            else:
                 search = response.json()
+        except sample_exceptions.BadStatusError as err:
+            if 'BadStatusError_' + str(err) in error_count:
+                error_count['BadStatusError_' + str(err)] += 1
+            else:
+                error_count['BadStatusError_' + str(err)] = 1
+    
+            try:
+                response = requests.get(query_url, timeout=20)
+                if response.status_code != 200:
+                    continue
+                else:
+                    search = response.json()
             except Exception as err:
-                rootLogger.error(f"Retry failed: {err}, {type(err)}")
+                continue
+        except requests.exceptions.JSONDecodeError as err:
+            error_count['JSONDecodeError'] += 1
+            try:
+                response = requests.get(query_url, timeout=20)
+                if response.status_code != 200:
+                    continue
+                else:
+                    search = response.json()
+            except Exception as err:
                 continue
         except requests.exceptions.RequestException as err:
-            rootLogger.error(f"Requests error: {err}, {type(err)}")
+            error_count['RequestsError'] += 1
             continue
         except Exception as err:
-            rootLogger.error(f"Catalog search failed: {err}, {type(err)}")
+            error_count['GeneralError'] += 1
             continue
 
         products = [product for product in search['value'] if product['Online']]
@@ -200,8 +223,19 @@ def general_query_filter_PRISM(prism, days_before, days_after, threshold=300, n=
         maxx.append(c_maxx)
         maxy.append(c_maxy)
         eid.append(f'{threshold}_{event_date_str}_{y}_{x}')
-        count += 1
 
+        count += 1
+        if n is not None:
+            pbar.update(1)
+        else:
+            print(f"Extreme precipitation events found: {count}", end='\r')
+
+    if n is not None:
+        pbar.close()
+
+    rootLogger.debug('Catalog search complete.')
+    rootLogger.debug(', '.join(f'{key}: {value}' for key, value in error_count.items()))
+        
     df = pd.DataFrame({"Date": event_dates,
                        "Precipitation (mm)": event_precip,
                        "minx": minx,
@@ -216,8 +250,8 @@ def event_completed(dir_path):
     """Returns whether or not event directory contains all generated rasters."""
     logger = logging.getLogger('main')
     logger.info('Confirming whether event has already been successfully processed before...')
-    regex_patterns = ['dem\.tif', 'flowlines\.tif', 'roads\.tif', 'slope\.tif', 'waterbody\.tif', 's2_\d{8}\.tif', 'ndwi_\d{8}\.tif']
-    pattern_dict = {'dem\.tif': 'DEM', 'flowlines\.tif': 'FLOWLINES', 'roads\.tif': 'ROADS', 'slope\.tif': 'SLOPE', 'waterbody\.tif': 'WATERBODY', 's2_\d{8}\.tif': 'S2 IMAGERY', 'ndwi_\d{8}\.tif': 'NDWI'}
+    regex_patterns = ['dem_.*\.tif', 'flowlines_.*\.tif', 'roads_.*\.tif', 'slope_.*\.tif', 'waterbody_.*\.tif', 'tci_\d{8}.*\.tif', 'ndwi_\d{8}.*\.tif', 'b08_\d{8}.*\.tif']
+    pattern_dict = {'dem_.*\.tif': 'DEM', 'flowlines_.*\.tif': 'FLOWLINES', 'roads_.*\.tif': 'ROADS', 'slope_.*\.tif': 'SLOPE', 'waterbody_.*\.tif': 'WATERBODY', 'tci_\d{8}.*\.tif': 'S2 IMAGERY', 'ndwi_\d{8}.*\.tif': 'NDWI', 'b08_\d{8}.*\.tif': 'B8 NIR'}
     existing_files = os.listdir(dir_path)
     
     # Check if each file name in the list exists in the directory
@@ -239,8 +273,7 @@ def event_completed(dir_path):
         logger.info(f"Prior processed event is missing files: {', '.join([pattern_dict[pattern] for pattern in missing_files])}.")
         return False
 
-@python_app
-def event_download(threshold, days_before, days_after, maxcoverpercentage, event_date, minx, miny, maxx, maxy, eid, log_file):
+def event_download(threshold, days_before, days_after, maxcoverpercentage, event_date, event_precip, minx, miny, maxx, maxy, eid):
     """Downloads S2 imagery for a high precipitation event based on parameters and generates accompanying rasters.
     
     Parameters
@@ -255,6 +288,8 @@ def event_download(threshold, days_before, days_after, maxcoverpercentage, event
         Maximum percentage of combined null data and cloud cover permitted for each sampled cell.
     event_date : str
         Date of high precipitation event in format YYYYMMDD.
+    event_precip: float
+        Cumulative daily precipitation in mm on event date.
     minx : float
         Bounding box value.
     miny : float
@@ -265,8 +300,6 @@ def event_download(threshold, days_before, days_after, maxcoverpercentage, event
         Bounding box value.
     eid : str
         Event id.
-    log_file : str
-        File to use for logging.
 
     Returns
     -------
@@ -280,28 +313,24 @@ def event_download(threshold, days_before, days_after, maxcoverpercentage, event
     import rasters
     import os
     import shutil
+    import json
     from fiona.transform import transform
 
     PRISM_CRS = "EPSG:4269"
     SEARCH_CRS = "EPSG:4326"
 
-    logger = logging.getLogger(eid)
-    logger.setLevel(logging.DEBUG)
-    fh = logging.FileHandler(log_file, mode='a')
-    fh.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    fh.setFormatter(formatter)
-    logger.addHandler(fh)
+    logger = logging.getLogger('events')
     logger.info('**********************************')
     logger.info('START OF EVENT TASK LOG:')
     logger.info(f'Beginning event {eid} download...')
+    logger.info(f'Event on {event_date} at bounds: {minx}, {miny}, {maxx}, {maxy}')
 
     # need to transform box from EPSG 4269 to EPSG 4326 for OData query
     conversion = transform(PRISM_CRS, SEARCH_CRS, (minx, maxx), (miny, maxy))
     box = sp.to_wkt(sp.geometry.box(conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]))
     
     dir_path = f'samples_{threshold}_{days_before}_{days_after}_{maxcoverpercentage}/' + eid + '/'
-    products_downloaded = rasters.download_Sentinel_2(box, event_date, rasters.get_date_interval(event_date, days_before, days_after), dir_path, eid)
+    products_downloaded = rasters.download_Sentinel_2(box, event_date, rasters.get_date_interval(event_date, days_before, days_after), dir_path, 'events')
 
     # do not download unless we have the products that we want - i.e. criteria is met
     # only download if products found, products exist during or after precip event, otherwise skip
@@ -313,17 +342,24 @@ def event_download(threshold, days_before, days_after, maxcoverpercentage, event
     # otherwise remove files and skip to next sample
     bounds = (minx, miny, maxx, maxy)
     has_after = False
+    logger.info(f'Checking cloud null percentage...')
+    
     for dt, filenames in list(products_downloaded.items()):
         # if a date contains high cloud percentage or null data values, toss date out
-        coverpercentage = rasters.cloud_null_percentage(dir_path, filenames, bounds)
-        if coverpercentage > maxcoverpercentage:
-            logger.debug(f'Sample {dt} near event {event_date}, at {minx}, {miny}, {maxx}, {maxy} rejected due to {coverpercentage}% cloud or null cover.')
-            del products_downloaded[dt]
-            for filename in filenames:
-                os.remove(dir_path + filename)
-        else:
-            if datetime.strptime(dt, "%Y%m%d").date() >= datetime.strptime(event_date, "%Y%m%d").date():
-                has_after = True
+        try:
+            coverpercentage = rasters.cloud_null_percentage(dir_path, filenames, bounds)
+            if coverpercentage > maxcoverpercentage:
+                logger.debug(f'Sample {dt} near event {event_date}, at {minx}, {miny}, {maxx}, {maxy} rejected due to {coverpercentage}% cloud or null cover.')
+                del products_downloaded[dt]
+                for filename in filenames:
+                    os.remove(dir_path + filename)
+            else:
+                if datetime.strptime(dt, "%Y%m%d").date() >= datetime.strptime(event_date, "%Y%m%d").date():
+                    has_after = True
+        except Exception as err:
+            logger.error(f'Cloud null percentage calculation error for files at {dt}: {err}, {type(err)}')
+            shutil.rmtree(dir_path)
+            return False
 
     # ensure still has post-event image after filters appplied
     if not has_after:
@@ -339,21 +375,29 @@ def event_download(threshold, days_before, days_after, maxcoverpercentage, event
 
     logger.info('Beginning raster generation...')
     try:
+        # new - choose dst_crs by picking first file from first product
+        dst_crs = rasters.get_TCI10m_crs(dir_path, list(products_downloaded.values())[0][0])
+        conversion = transform(PRISM_CRS, dst_crs, (bounds[0], bounds[2]), (bounds[1], bounds[3]))
+        cbounds = conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]
+        
         for dt, filenames in products_downloaded.items():
-            dst_shape, dst_crs, dst_transform = rasters.pipeline_S2(dir_path, f'tci_{dt}.tif', filenames, bounds)
-            rasters.pipeline_B08(dir_path, f'b08_{dt}.tif', filenames, bounds)
-            rasters.pipeline_NDWI(dir_path, f'ndwi_{dt}.tif', filenames, bounds)
+            dst_shape, dst_transform = rasters.pipeline_S2(dir_path, f'tci_{dt}_{eid}.tif', dst_crs, filenames, cbounds)
+            logger.debug(f'S2 raster completed for {dt}.')
+            rasters.pipeline_B08(dir_path, f'b08_{dt}_{eid}.tif', dst_crs, filenames, cbounds)
+            logger.debug(f'B08 raster completed for {dt}.')
+            rasters.pipeline_NDWI(dir_path, f'ndwi_{dt}_{eid}.tif', dst_crs, filenames, cbounds)
+            logger.debug(f'NDWI raster completed for {dt}.')
             for filename in filenames:
                 os.remove(dir_path + filename)
-        logger.debug(f'S2 and NDWI rasters completed successfully.')
+        logger.debug(f'All S2, B08, NDWI rasters completed successfully.')
 
-        rasters.pipeline_roads(dir_path, 'roads.tif', dst_shape, dst_crs, dst_transform, state, buffer=2)
+        rasters.pipeline_roads(dir_path, f'roads_{eid}.tif', dst_shape, dst_crs, dst_transform, state, buffer=2)
         logger.debug(f'Roads raster completed successfully.')
-        rasters.pipeline_dem_slope(dir_path, ('dem.tif', 'slope.tif'), dst_shape, dst_crs, dst_transform, bounds)
+        rasters.pipeline_dem_slope(dir_path, (f'dem_{eid}.tif', f'slope_{eid}.tif'), dst_shape, dst_crs, dst_transform, bounds)
         logger.debug(f'DEM, slope rasters completed successfully.')
-        rasters.pipeline_flowlines(dir_path, 'flowlines.tif', dst_shape, dst_crs, dst_transform, bounds, buffer=2)
+        rasters.pipeline_flowlines(dir_path, f'flowlines_{eid}.tif', dst_shape, dst_crs, dst_transform, bounds, buffer=2)
         logger.debug(f'Flowlines raster completed successfully.')
-        rasters.pipeline_waterbody(dir_path, 'waterbody.tif', dst_shape, dst_crs, dst_transform, bounds)
+        rasters.pipeline_waterbody(dir_path, f'waterbody_{eid}.tif', dst_shape, dst_crs, dst_transform, bounds)
         logger.debug(f'Waterbody raster completed successfully.')
     except Exception as err:
         logger.error(f'Raster generation error: {err}, {type(err)}')
@@ -361,13 +405,29 @@ def event_download(threshold, days_before, days_after, maxcoverpercentage, event
         shutil.rmtree(dir_path)
         return False
 
-    logger.info('Raster generation completed. Event finished.')
-    return True # whether successful or not
+    # lastly generate metadata file
+    logger.info(f'Generating metadata file...')
+    metadata = {
+        "metadata": {
+            "Sample ID": eid,
+            "Precipitation Event Date": event_date,
+            "Cumulative Daily Precipitation (mm)": event_precip,
+            "Precipitation Threshold (mm)": threshold,
+            "State": state,
+            "Bounding Box": {
+                "minx": minx,
+                "miny": miny,
+                "maxx": maxx,
+                "maxy": maxy
+            }
+        }
+    }
 
-@bash_app
-def compile_logs(log_files, dir_path, filename):
-    """Compiles all listed log files into one single log file."""
-    return "sed -s -e '1i----------------' -e '$a----------------' {0} > {1}{2} && rm {0}".format(' '.join(log_files), dir_path, filename)
+    with open(dir_path + 'metadata.json', "w") as json_file:
+        json.dump(metadata, json_file, indent=4)
+    
+    logger.info('Metadata and raster generation completed. Event finished.')
+    return True
 
 def main(threshold, days_before, days_after, maxcoverpercentage, maxevents):
     """
@@ -375,6 +435,9 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents):
     Downloaded samples will contain multispectral data from within specified interval of event date, their respective
     NDWI rasters. Samples will also have a raster of roads from TIGER roads dataset, DEM raster from USGS, 
     flowlines and waterbody rasters from NHDPlus dataset. All rasters will be 4km x 4km at 10m resolution.
+
+    Note: In the future if more L2A data become available, some previously processed and skipped events become viable.
+    In that case do not use history object during run.
     
     Parameters
     ----------
@@ -397,6 +460,8 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents):
     Path(dir_path).mkdir(parents=True, exist_ok=True)
 
     start_time = datetime.now().strftime("%Y-%m-%d_%H-%M")
+
+    # root logger
     rootLogger = logging.getLogger('main')
     rootLogger.setLevel(logging.DEBUG)
     fh = logging.FileHandler(dir_path + f'main_{start_time}.log', mode='w')
@@ -404,89 +469,71 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents):
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     fh.setFormatter(formatter)
     rootLogger.addHandler(fh)
+
+    # event logger
+    logger = logging.getLogger('events')
+    logger.setLevel(logging.DEBUG)
+    fh = logging.FileHandler(dir_path + f'events_{start_time}.log', mode='a')
+    fh.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
     
     prism = read_PRISM()
     rootLogger.info("PRISM successfully loaded.")
-    events = general_query_filter_PRISM(prism, days_before, days_after, threshold=threshold, n=maxevents)
+
+    if os.path.isfile(dir_path + 'history.pickle'):
+        with open(dir_path + 'history.pickle', "rb") as f:
+            history = pickle.load(f)
+    else:
+        history = set()
+        
+    events = general_query_filter_PRISM(prism, days_before, days_after, history, threshold=threshold, n=maxevents)
     # events = general_query_PRISM(prism, threshold=threshold, n=maxevents)
 
     rootLogger.info("Initializing event downloads...")
-
-    # parallelization
-    parsl.set_file_logger(dir_path + f'parsl_{start_time}.log', level=logging.DEBUG)
-    config = Config(
-        retries=3,
-        executors=[
-            HighThroughputExecutor(
-                label="bebopslurm",
-                cores_per_worker=36,
-                heartbeat_threshold=180,
-                provider=SlurmProvider(
-                    partition='bdwall',
-        		    account='STARTUP-DMA',
-        		    launcher=SrunLauncher(),
-                    scheduler_options='#SBATCH --job-name=flood_samples',
-                    min_blocks=1,
-                    init_blocks=1,
-                    max_blocks=4,
-                    walltime="03:00:00",
-                    nodes_per_block=1,
-                    parallelism=1,
-                    cmd_timeout=60,
-                    worker_init='''
-    cd /lcrc/hydrosm/dma
-    source activate floodmaps
-    export PYTHONPATH=/lcrc/hydrosm/dma/:$PYTHONPATH
-    '''
-                ),
-            )
-        ]
-    )
-    parsl.load(config)
     
     # TEST:
     # events = pd.DataFrame.from_dict({'Date': ['20201010', '20201016', '20201109'], 'minx': [-92.770833, -81.437500, -80.395833], 'miny': [30.062500, 26.104167, 25.937500], 'maxx': [-92.729167, -81.395833, -80.354167], 'maxy': [30.10416, 26.145833, 25.979167], 'eid': ['test1', 'test2', 'test3']})
-    
-    futures = []
+
+    count = 0
     alr_completed = 0
     print(f'{len(events.index)} possible extreme precipitation events found. Beginning data collection...')
     try:
-        for event_date, minx, miny, maxx, maxy, eid in zip(events['Date'], events['minx'], events['miny'], events['maxx'], events['maxy'], events['eid']):
+        pbar = tqdm(total = len(events.index))
+        pbar.set_description(f"Successful samples: {count}")
+        for event_date, event_precip, minx, miny, maxx, maxy, eid in zip(events['Date'], events['Precipitation (mm)'], events['minx'], events['miny'], events['maxx'], events['maxy'], events['eid']):
             if Path(dir_path + eid + '/').is_dir():
                 if event_completed(dir_path + eid + '/'):
                     rootLogger.debug('Event has already been processed before. Moving on to the next event...')
                     alr_completed += 1
+                    history.add(eid)
                     continue
                 else:
                     rootLogger.debug('Event has already been processed before but unsuccessfully. Reprocessing...')
-                
-            log_file = dir_path + f'event_{eid}.log'
-            futures.append(event_download(threshold, days_before, days_after, maxcoverpercentage, event_date, minx, miny, maxx, maxy, eid, log_file))
 
-        # progress bar
-        results = []
-        for future in tqdm(futures):
             try:
-                results.append(future.result())
-            except parsl.executors.high_throughput.interchange.ManagerLost as err:
-                rootLogger.error(f'Manager lost after 3 retries: {err}, {type(err)}')
-                rootLogger.error(f'Will proceed to skip event.')
+                if event_download(threshold, days_before, days_after, maxcoverpercentage, event_date, event_precip, minx, miny, maxx, maxy, eid):
+                    count += 1
             except Exception as err:
-                rootLogger.error(f'Unexpected error: {err}, {type(err)}')
-                rootLogger.error(f'Will proceed to skip event.')
-        
-        # results = [future.result() for future in tqdm(futures)]
+                raise err
+            else:
+                history.add(eid)
+                
+            pbar.set_description(f"Successful samples: {count}")
+            pbar.update(1)
+
+        pbar.close()
         
         rootLogger.debug(f"Number of events already completed: {alr_completed}")
-        rootLogger.debug(f"Number of events skipped from this run: {len(results) - sum(results)} out of {len(results) + alr_completed}")
+        rootLogger.debug(f"Number of events skipped from this run: {len(events.index) - count - alr_completed} out of {len(events.index)}")
     except Exception as err:
         rootLogger.error(f"Unexpected error: {err}, {type(err)}")
-    finally: 
-        # concatenate log files here with separator in between using bash script
-        log_files = glob(dir_path + 'event_*.log')
-        if len(log_files) > 0:
-            compile_logs(log_files, dir_path, f'events_{start_time}.log').result()
-    
+    finally:
+        # store all previously processed events
+        with open(dir_path + 'history.pickle', 'wb') as f:
+            pickle.dump(history, f)
+        
     return 0
 
 if __name__ == '__main__':

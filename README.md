@@ -1,6 +1,6 @@
 # AI Flood Detection
 ### Background
-Floods are common and devestating natural hazards. There is a pressing need to replace traditional flood mapping methods with more accurate and speedier AI-assisted models that harness satellite imagery.
+Floods are common and devestating natural hazards. There is a pressing need to replace traditional flood mapping methods with faster more accurate AI-assisted models that harness satellite imagery.
 
 ### Goals
 The AI-assisted flood detection project aims to build a computer vision workflow for flood detection capable of generating flood observation from radar, satellite and urban imaging systems.

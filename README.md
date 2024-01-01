@@ -19,7 +19,7 @@ To accomplish this task, we want to:
 ## Data Pipeline
 To collect and process satellite imagery, I have created an automated data pipeline implemented in the Python script `sample_mpc.py`. The script is run as a job through a bash script on the Argonne Bebop computing cluster.
 
-Pipeline sequence:
+What it does:
 * Queries extreme precipitation events between 2016-present using the [PRISM dataset](https://prism.oregonstate.edu/).
 * Copernicus Sentinel-2 RGB bands and the B8 near infrared band.
 

@@ -22,6 +22,9 @@ What it does:
 
 However, by themselves these raw satellite images lack the labels we need for modeling. So we must label water pixels ourselves.
 
+![image](https://github.com/davdma/floodmaps/assets/42689743/91799a7d-6fa8-4c04-b3c5-9f1a565b8e59)
+Screenshot: Labeling flood images through GIMP software.
+
 I developed a workflow with step by step instructions that uses Google Open Street View and the supplementary rasters for producing accurate hand labeled water masks from the collected data.
 
 **Instructions can be viewed here:** [pdf](https://1drv.ms/b/s!Aq3V83mBle0dvhMcZAiCh04A59--?e=IdSswS)

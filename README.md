@@ -21,7 +21,7 @@ To collect and process satellite imagery, I have created an automated data pipel
 
 What it does:
 * Queries extreme precipitation events from 2016-present using the [PRISM dataset](https://prism.oregonstate.edu/).
-* Downloads Sentinel-2 RGB and B8 near-infrared bands from [Microsoft Planetary Computer](https://planetarycomputer.microsoft.com/dataset/sentinel-2-l2a) as 4km x 4km geographic tiles with 10m resolution.
+* Downloads Copernicus Sentinel-2 RGB and B8 near-infrared bands from [Microsoft Planetary Computer](https://planetarycomputer.microsoft.com/dataset/sentinel-2-l2a) as 4km x 4km geographic tiles with 10m resolution.
 * Adds supplementary information to each tile - roads, flowlines, waterbodies, slope, elevation (DEM) - as well as calculating the Normalized Difference Water Index (NDWI).
 
 However, by themselves these raw satellite images lack the labels we need for modeling. So we must label water pixels ourselves.

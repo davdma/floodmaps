@@ -8,7 +8,7 @@ The AI-assisted flood detection project aims to build a computer vision workflow
 To accomplish this task, we want to:
 1. Collect and process remote sensing data (visual, infrared, SAR) following extreme precipitation events for flood modeling.
 2. Produce accurate ground truth data by manually labeling images.
-3. Develop a water pixel detection algorithm to detect flood water extent after a flood event.
+3. Develop a water pixel detection algorithm to detect flood water extent after a flood event from satellite imagery.
 
 ## Data Pipeline
 

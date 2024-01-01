@@ -12,10 +12,6 @@ To accomplish this task, we want to:
 2. Produce accurate ground truth data by manually labeling images.
 3. Develop a water pixel detection algorithm to detect flood water extent after a flood event from satellite imagery.
 
-### Code
-* Sentinel-2 data pipeline code can be found in the script `sample_mpc.py`.
-* The water pixel detection model is still in progress, but can be found in the notebook `unet.ipynb`.
-
 ## Data Pipeline
 To collect and process satellite imagery, I have created an automated data pipeline implemented in the Python script `sample_mpc.py`. The script is run on the Argonne Bebop computing cluster and submitted as a job through the bash script `sample_job.sh`.
 
@@ -34,5 +30,6 @@ I developed a workflow with step by step instructions that uses Google Open Stre
 * For our water pixel detection model, we want to test multiple different built-in architectures (UNet, AlexNet, ResNet etc.) to find what works and what doesn't.
 * The model input consists of the RGB image, the NIR B8 band image, and the NDWI calculation.
 * The labeled data is partitioned into 64 x 64 pixel tiles for input.
+* The water pixel detection model is still in progress, but can be found in the notebook `unet.ipynb`.
 
 Model tuning still in progress!

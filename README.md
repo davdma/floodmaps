@@ -20,8 +20,9 @@ To accomplish this task, we want to:
 To collect and process satellite imagery, I have created an automated data pipeline implemented in the Python script `sample_mpc.py`. The script is run on the Argonne Bebop computing cluster and submitted as a job through the bash script `sample_job.sh`.
 
 What it does:
-* Queries extreme precipitation events between 2016-present using the [PRISM dataset](https://prism.oregonstate.edu/).
-* Copernicus Sentinel-2 RGB bands and the B8 near infrared band.
+* Queries extreme precipitation events from 2016-present using the [PRISM dataset](https://prism.oregonstate.edu/).
+* Downloads Sentinel-2 RGB and B8 near-infrared bands from [Microsoft Planetary Computer](https://planetarycomputer.microsoft.com/dataset/sentinel-2-l2a) as 4km x 4km geographic tiles with 10m resolution.
+* Adds supplementary information to each tile - roads, flowlines, waterbodies, slope, elevation (DEM) - as well as calculating the Normalized Difference Water Index (NDWI).
 
 However, by themselves these raw satellite images lack the labels we need for modeling. So we must label water pixels ourselves.
 

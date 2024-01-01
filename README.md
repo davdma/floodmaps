@@ -29,5 +29,8 @@ I developed a ground-truthing workflow with step by step instructions that uses 
 **Ground-Truthing instructions:** [pdf here](https://1drv.ms/b/s!Aq3V83mBle0dvhMcZAiCh04A59--?e=IdSswS)
 
 ## Model
+* For our water pixel detection model, we want to test multiple different built-in architectures (UNet, AlexNet, ResNet etc.) to find what works and what doesn't.
+* The model input consists of the RGB image, the NIR B8 band image, and the NDWI calculation.
+* The labeled data is partitioned into 64 x 64 pixel tiles for input.
 
-Still in progress!
+Model tuning still in progress!

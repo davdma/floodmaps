@@ -5,6 +5,8 @@ Floods are a common and devastating natural hazard. There is a pressing need to 
 ### Goals
 The AI-assisted flood detection project aims to build a computer vision workflow for flood detection capable of generating flood observation from radar, satellite and urban imaging systems.
 
+![image](https://github.com/davdma/floodmaps/assets/42689743/0685799c-7ab7-4640-9ae4-759b797dd13f)
+
 To accomplish this task, we want to:
 1. Collect and process remote sensing data (visual, infrared, SAR) following extreme precipitation events for flood modeling.
 2. Produce accurate ground truth data by manually labeling images.

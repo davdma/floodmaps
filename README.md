@@ -35,5 +35,5 @@ I developed a workflow with step by step instructions that uses Google Open Stre
 ## Model
 * For our water pixel detection model, we want to test multiple different built-in architectures (UNet, AlexNet, ResNet etc.) to find what works and what doesn't.
 * The model input consists of the RGB image, the NIR B8 band image, and the NDWI calculation.
-* The labeled data is partitioned into 64 x 64 pixel tiles for input.
+* The labeled data is partitioned into 64 x 64 pixel tiles for input. First we tried breaking each larger image into patches by imposing a grid, but we found that the model failed to learn from the data this way. A much better way came from using random cropping - randomly sampling thousands of 64 x 64 patches from each image.
 * The water pixel detection model is still being tuned, but can be found in the notebook `unet.ipynb`.

@@ -40,7 +40,7 @@ For our water pixel detection model, we want to test multiple different built-in
 
 Our model input consists of the RGB image, the NIR B8 band image, and the NDWI calculation. However, we cannot take the large images for use immediately. We must first take the labeled data and partition them into digestible 64 x 64 pixel tiles for input. First we tried breaking each larger image into patches by imposing a grid, but we found that the model failed to learn from the data this way. A much better way came from using random cropping - randomly sampling thousands of 64 x 64 patches from each image.
 
-![image](https://github.com/davdma/floodmaps/assets/42689743/54849fd7-77f9-4ed1-8c23-c0fc05c68198)
+![image](https://github.com/davdma/floodmaps/assets/42689743/f33a5723-2a57-4efa-b0dd-fd737d3e2967)
 **Figure 4:** Training and validation plots for UNet model using the random cropping sampling method. We see significant learning taking place, but the model still needs some more tuning.
 
 <img src="https://github.com/davdma/floodmaps/assets/42689743/4a74c50b-34f3-4e47-b089-b27453800571" height="400">

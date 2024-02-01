@@ -1,0 +1,57 @@
+import torch
+from torch.utils.data import Dataset, DataLoader
+import rasterio
+import numpy as np
+from dataset import FloodSampleMeanStd
+
+TRAIN_LABELS = ["label_20150919_20150917_496_811.tif", "label_20150919_20150917_497_812.tif",
+                "label_20151112_20151109_472_940.tif", "label_20151112_20151109_473_939.tif", 
+                "label_20151112_20151109_473_940.tif", "label_20151112_20151109_473_941.tif", 
+                "label_20151112_20151109_474_942.tif", "label_20160314_20160311_451_838.tif", 
+                "label_20160314_20160311_451_839.tif", "label_20160307_20160311_452_846.tif",
+                "label_20160314_20160311_452_845.tif", "label_20160314_20160311_453_845.tif"]
+TEST_LABELS = ["label_20150919_20150917_496_812.tif", "label_20150919_20150917_497_811.tif", 
+               "label_20151112_20151109_474_941.tif", "label_20151112_20151109_485_960.tif", 
+               "label_20160314_20160311_452_843.tif", "label_20160314_20160311_452_846.tif"] 
+
+def water_threshold(image, size, num_pixel=5):
+    # number of water pixels must be > num_pixels in order to get a positive label
+    label = image.view(-1,crop_size**2).gt(TINY).sum(1).gt(num_pixel).float()
+    return label
+
+def trainMeanStd(batch_size=10, sample_dir='../samples_200_5_4_35/', label_dir='../labels/'):
+    """Calculate mean and std across channels of all training tiles used to generate patches."""
+    def channel_collate(batch):
+        # concatenate channel wise for all samples in batch
+        samples = torch.cat(batch, 1)
+        return samples
+
+    train_mean_std = FloodSampleMeanStd(TRAIN_LABELS, sample_dir=sample_dir, label_dir=label_dir)
+    loader = DataLoader(train_mean_std,
+                        batch_size=batch_size,
+                        num_workers=0,
+                        collate_fn=channel_collate,
+                        shuffle=False)
+
+    # random crop - calculate total mean and std for each channel not including missing values
+    pixel_count = 0
+    sum = torch.zeros(5, dtype=torch.float64)
+    for samples in loader:
+        # mask out missing values and calculate mean for each channel
+        channels = samples.size(0)
+        mask = (samples[0] != 0)
+        pixel_count += mask.sum()
+        for i in range(channels):
+            sum[i] += samples[i][mask].sum()
+    mean = sum / pixel_count
+    
+    # add up variance for each channel not including missing values
+    tot_var = torch.zeros(5, dtype=torch.float64)
+    for samples in loader:
+        # first stack all feature values from batch together
+        channels = samples.size(0)
+        mask = (samples[0] != 0)
+        for i in range(channels):
+            tot_var[i] += ((samples[i][mask] - mean[i]) ** 2).sum()
+    std = torch.sqrt(tot_var / (pixel_count - 1))
+    return mean, std

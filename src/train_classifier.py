@@ -7,7 +7,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 from datetime import datetime
 from dataset import FloodSampleDataset
-from utils import trainMeanStd
+from utils import trainMeanStd, EarlyStopper
 from torchvision import transforms
 from torcheval.metrics import BinaryAccuracy
 from architectures.unet import UNet
@@ -16,7 +16,7 @@ from matplotlib.colors import Normalize
 from random import Random
 from PIL import Image
 from glob import glob
-import loss
+from loss import BCEDiceLoss, TverskyLoss
 import numpy as np
 import sys
 
@@ -139,12 +139,19 @@ def train(train_set, val_set, model, device, config, save='model'):
                             drop_last=False)
 
     # TRAIN AND TEST LOOP IS PER EPOCH!!!
+    if config['early_stopping']:
+        early_stopper = EarlyStopper(patience=5)
+        
     for epoch in range(config['epochs']):
         # train loop
         avg_loss = train_loop(train_loader, model, device, loss_fn, optimizer)
 
         # at the end of each training epoch compute validation
         avg_vloss = test_loop(val_loader, model, device, loss_fn)
+
+        if config['early_stopping'] and early_stopper.early_stop(avg_vloss):             
+            break
+
         scheduler.step(avg_vloss)
 
     # Save our model
@@ -252,6 +259,7 @@ if __name__ == '__main__':
     parser.add_argument('-e', '--epochs', type=int, default=30, help='(default: 30)')
     parser.add_argument('-b', '--batch_size', type=int, default=32, help='(default: 32)')
     parser.add_argument('-l', '--learning_rate', type=float, default=0.0001, help='(default: 0.0001)')
+    parser.add_argument('--early_stopping', action='store_true', help='early stopping (default: False)')
 
     # model
     parser.add_argument('--name', default='unet', choices=MODEL_NAMES,

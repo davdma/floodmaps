@@ -2,8 +2,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-ALPHA = 0.5
-BETA = 1
+ALPHA = 0.2
+BETA = 0.8
 
 class BCEDiceLoss(nn.Module):
     def __init__(self, weight=None, size_average=True):

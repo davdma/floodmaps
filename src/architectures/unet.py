@@ -7,23 +7,23 @@ class UNet(nn.Module):
         super().__init__()
         self.n_channels = n_channels
 
-        self.conv1 = (DoubleConv2d(n_channels, 16))
+        self.conv1 = DoubleConv2d(n_channels, 16)
         self.pool1 = nn.MaxPool2d(2)
         self.drop1 = nn.Dropout(p=dropout)
 
-        self.conv2 = (DoubleConv2d(16, 32))
+        self.conv2 = DoubleConv2d(16, 32)
         self.pool2 = nn.MaxPool2d(2)
         self.drop2 = nn.Dropout(p=dropout)
 
-        self.conv3 = (DoubleConv2d(32, 64))
+        self.conv3 = DoubleConv2d(32, 64)
         self.pool3 = nn.MaxPool2d(2)
         self.drop3 = nn.Dropout(p=dropout)
 
-        self.conv4 = (DoubleConv2d(64, 128))
+        self.conv4 = DoubleConv2d(64, 128)
         self.pool4 = nn.MaxPool2d(2)
         self.drop4 = nn.Dropout(p=dropout)
 
-        self.convm = (DoubleConv2d(128, 256))
+        self.convm = DoubleConv2d(128, 256)
 
         self.upconv4 = UpConv2d(256, 128, dropout=dropout)
         self.upconv3 = UpConv2d(128, 64, dropout=dropout)

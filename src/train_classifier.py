@@ -163,7 +163,7 @@ def train(train_set, val_set, model, device, config, save='model'):
 def sample_predictions(model, val_set, table, mean, std, seed=24000):
     model.to('cpu')
     rng = Random(seed)
-    samples = rng.sample(range(0, len(val_set)), 20)
+    samples = rng.sample(range(0, len(val_set)), 40)
     for id, k in enumerate(samples):
         # get all images to shape (H, W, C) with C = 1 or 3 (1 for grayscale, 3 for RGB)
         X, y = val_set[k]
@@ -209,8 +209,6 @@ def run_experiment(config):
             raise Exception("Model not available.")
         
         print(f"Using {device} device")
-        model = model.to(device)
-
         method = config['method']
         size = config['size']
         samples = config['samples']

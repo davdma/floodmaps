@@ -14,9 +14,9 @@ TEST_LABELS = ["label_20150919_20150917_496_812.tif", "label_20150919_20150917_4
                "label_20151112_20151109_474_941.tif", "label_20151112_20151109_485_960.tif", 
                "label_20160314_20160311_452_843.tif", "label_20160314_20160311_452_846.tif"] 
 
-def water_threshold(image, size, num_pixel=5):
+def wet_label(image, crop_size, num_pixel=100):
     # number of water pixels must be > num_pixels in order to get a positive label
-    label = image.view(-1,crop_size**2).gt(TINY).sum(1).gt(num_pixel).float()
+    label = image.view(-1, crop_size**2).sum(1).gt(num_pixel).float()
     return label
 
 def trainMeanStd(batch_size=10, sample_dir='../samples_200_5_4_35/', label_dir='../labels/'):

@@ -52,7 +52,7 @@ Our model input consists of the RGB image, the NIR B8 band image, and the NDWI c
 We then proceeded to add a SrGAN discriminator head to create a two part model. The discriminator would first take the input patch and determine whether the patch has water or not. If the discriminator does not detect water, it does not run the patch through the UNet. If the discriminator detects water in the patch, it proceeds to run the patch through the UNet. This two head model design allows us to skip unnecessary computation if the patch contains no water. The prediction results of this two head model on a large flood raster (the patches are run independently and then stitched together) generates some good results:
 
 <p align="center">
-  <img src="https://github.com/davdma/floodmaps/assets/42689743/78d029d1-2f32-4991-b62f-c5d6d6ca0167" height="600">
+  <img src="https://github.com/davdma/floodmaps/assets/42689743/78d029d1-2f32-4991-b62f-c5d6d6ca0167" height="500">
 <p align="center">
 
 **Figure 6:** Prediction results on a large flood tile. Using our initial model on unlabelled data allows us to automate our ground truthing process.

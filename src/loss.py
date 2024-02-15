@@ -2,8 +2,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-ALPHA = 0.2
-BETA = 0.8
+ALPHA = 0.3
+BETA = 0.7
 
 class BCEDiceLoss(nn.Module):
     def __init__(self, weight=None, size_average=True):
@@ -26,10 +26,12 @@ class BCEDiceLoss(nn.Module):
         return BCEDice
 
 class TverskyLoss(nn.Module):
-    def __init__(self, weight=None, size_average=True):
+    def __init__(self, alpha=ALPHA, beta=BETA, weight=None, size_average=True):
         super().__init__()
+        self.alpha = alpha
+        self.beta = beta
 
-    def forward(self, inputs, targets, smooth=1, alpha=ALPHA, beta=BETA):
+    def forward(self, inputs, targets, smooth=1):
         
         # comment out if your model contains a sigmoid or equivalent activation layer
         inputs = F.sigmoid(inputs)
@@ -43,6 +45,6 @@ class TverskyLoss(nn.Module):
         FP = ((1-targets) * inputs).sum()
         FN = (targets * (1-inputs)).sum()
        
-        Tversky = (TP + smooth) / (TP + alpha * FP + beta * FN + smooth)  
+        Tversky = (TP + smooth) / (TP + self.alpha * FP + self.beta * FN + smooth)  
         
         return 1 - Tversky

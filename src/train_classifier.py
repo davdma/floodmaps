@@ -9,7 +9,7 @@ from datetime import datetime
 from dataset import FloodSampleDataset
 from utils import trainMeanStd, EarlyStopper
 from torchvision import transforms
-from torcheval.metrics import BinaryAccuracy
+from torcheval.metrics import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score
 from architectures.unet import UNet
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
@@ -27,7 +27,10 @@ LOSS_NAMES = ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
 def train_loop(dataloader, model, device, loss_fn, optimizer):
     running_loss = 0.0
     num_batches = len(dataloader)
-    metric = BinaryAccuracy(threshold=0.5)
+    metric_acc = BinaryAccuracy(threshold=0.5)
+    metric_pre = BinaryPrecision(threshold=0.5)
+    metric_rec = BinaryRecall(threshold=0.5)
+    metric_f1 = BinaryF1Score(threshold=0.5)
 
     model.train()
     for X, y in dataloader:
@@ -41,20 +44,32 @@ def train_loop(dataloader, model, device, loss_fn, optimizer):
         loss.backward()
         optimizer.step()
 
-        metric.update(nn.functional.sigmoid(logits).flatten(), y.float().flatten())
+        pred_y = nn.functional.sigmoid(logits).flatten()
+        target = y.int().flatten()
+        metric_acc.update(pred_y, target)
+        metric_pre.update(pred_y, target)
+        metric_rec.update(pred_y, target)
+        metric_f1.update(pred_y, target)
         running_loss += loss.item()
 
     # wandb tracking loss and accuracy per epoch
-    epoch_accuracy = metric.compute()
+    epoch_acc = metric_acc.compute()
+    epoch_pre = metric_pre.compute()
+    epoch_rec = metric_rec.compute()
+    epoch_f1 = metric_f1.compute()
     epoch_loss = running_loss / num_batches
-    wandb.log({"train accuracy": epoch_accuracy, "train loss": epoch_loss})
+    wandb.log({"train accuracy": epoch_acc, "train precision": epoch_pre, 
+               "train recall": epoch_rec, "train f1": epoch_f1, "train loss": epoch_loss})
 
     return epoch_loss
 
 def test_loop(dataloader, model, device, loss_fn):
     running_vloss = 0.0
     num_batches = len(dataloader)
-    metric = BinaryAccuracy(threshold=0.5)
+    metric_acc = BinaryAccuracy(threshold=0.5)
+    metric_pre = BinaryPrecision(threshold=0.5)
+    metric_rec = BinaryRecall(threshold=0.5)
+    metric_f1 = BinaryF1Score(threshold=0.5)
     
     model.eval()
     with torch.no_grad():
@@ -64,11 +79,21 @@ def test_loop(dataloader, model, device, loss_fn):
             
             logits = model(X)
             running_vloss += loss_fn(logits, y.float()).item()
-            metric.update(nn.functional.sigmoid(logits).flatten(), y.float().flatten())
+            
+            pred_y = nn.functional.sigmoid(logits).flatten()
+            target = y.int().flatten()
+            metric_acc.update(pred_y, target)
+            metric_pre.update(pred_y, target)
+            metric_rec.update(pred_y, target)
+            metric_f1.update(pred_y, target)
 
-    epoch_vaccuracy = metric.compute()
+    epoch_vacc = metric_acc.compute()
+    epoch_vpre = metric_pre.compute()
+    epoch_vrec = metric_rec.compute()
+    epoch_vf1 = metric_f1.compute()
     epoch_vloss = running_vloss / num_batches
-    wandb.log({"val accuracy": epoch_vaccuracy, "val loss": epoch_vloss})
+    wandb.log({"val accuracy": epoch_vacc, "val precision": epoch_vpre,
+               "val recall": epoch_vrec, "val f1": epoch_vf1, "val loss": epoch_vloss})
 
     return epoch_vloss
 
@@ -98,6 +123,8 @@ def train(train_set, val_set, model, device, config, save='model'):
         "batch_size": config['batch_size'],
         "optimizer": config['optimizer'],
         "loss_fn": config['loss'],
+        "alpha": config['alpha'],
+        "beta": config['beta'],
         "training_size": len(train_set),
         "validation_size": len(val_set),
         "val_percent": len(val_set) / (len(train_set) + len(val_set)),
@@ -111,7 +138,7 @@ def train(train_set, val_set, model, device, config, save='model'):
     elif config['loss'] == 'BCEDiceLoss':
         loss_fn = BCEDiceLoss()
     elif config['loss'] == 'TverskyLoss':
-        loss_fn = TverskyLoss()
+        loss_fn = TverskyLoss(alpha=config['alpha'], beta=config['beta'])
     else:
         raise Exception('Loss function not found.')
 
@@ -251,7 +278,7 @@ if __name__ == '__main__':
     parser.add_argument('--ldir', dest='label_dir', default='../labels/', help='(default: ../labels/)')
 
     # wandb
-    parser.add_argument('--project', default="FloodSamplesUNetRC", help='Wandb project where run will be logged')
+    parser.add_argument('--project', default="FloodSamplesClassifier", help='Wandb project where run will be logged')
 
     # ml
     parser.add_argument('-e', '--epochs', type=int, default=30, help='(default: 30)')
@@ -266,6 +293,8 @@ if __name__ == '__main__':
     # loss
     parser.add_argument('--loss', default='BCELoss', choices=LOSS_NAMES,
                         help=f"loss: {', '.join(LOSS_NAMES)} (default: BCELoss)")
+    parser.add_argument('--alpha', type=float, default=0.3, help='Tversky Loss alpha value (default: 0.3)')
+    parser.add_argument('--beta', type=float, default=0.7, help='Tversky Loss beta value (default: 0.7)')
 
     # optimizer
     parser.add_argument('--optimizer', default='Adam', choices=['Adam', 'SGD'],

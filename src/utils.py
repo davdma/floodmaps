@@ -16,7 +16,7 @@ TEST_LABELS = ["label_20150919_20150917_496_812.tif", "label_20150919_20150917_4
 
 def wet_label(image, crop_size, num_pixel=100):
     # number of water pixels must be > num_pixels in order to get a positive label
-    label = image.view(-1, crop_size**2).sum(1).gt(num_pixel).float()
+    label = image.view(-1, crop_size**2).sum(1).gt(num_pixel).int()
     return label
 
 def trainMeanStd(batch_size=10, sample_dir='../samples_200_5_4_35/', label_dir='../labels/'):

@@ -9,6 +9,7 @@ from datetime import datetime
 from dataset import FloodSampleDataset
 from utils import trainMeanStd, wet_label, EarlyStopper
 from torchvision import transforms
+from torcheval.metrics import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score
 from architectures.discriminator import Classifier1, Classifier2, Classifier3
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
@@ -26,8 +27,10 @@ LOSS_NAMES = ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
 def train_loop(dataloader, model, device, loss_fn, optimizer, config):
     running_loss = 0.0
     num_batches = len(dataloader)
-    tot_tp = 0
-    tot_count = 0
+    metric_acc = BinaryAccuracy(threshold=0.5)
+    metric_pre = BinaryPrecision(threshold=0.5)
+    metric_rec = BinaryRecall(threshold=0.5)
+    metric_f1 = BinaryF1Score(threshold=0.5)
 
     model.train()
     for X, y in dataloader:
@@ -37,29 +40,35 @@ def train_loop(dataloader, model, device, loss_fn, optimizer, config):
         optimizer.zero_grad()
         pred_y = model(X)
 
-        label = wet_label(y, config['size'], num_pixel=config['size'])
-        loss = loss_fn(pred_y, label)
+        target = wet_label(y, config['size'], num_pixel=config['size']).flatten()
+        loss = loss_fn(pred_y, target.float())
         loss.backward()
         optimizer.step()
 
-        tp = ((pred_y > 0.5).float() == (label).float()).sum()
-        tot_tp += tp
-        tot_count += label.shape[0]
-
+        metric_acc.update(pred_y, target)
+        metric_pre.update(pred_y, target)
+        metric_rec.update(pred_y, target)
+        metric_f1.update(pred_y, target)
         running_loss += loss.item()
 
     # wandb tracking loss and accuracy per epoch
-    epoch_accuracy = tot_tp / tot_count
+    epoch_acc = metric_acc.compute()
+    epoch_pre = metric_pre.compute()
+    epoch_rec = metric_rec.compute()
+    epoch_f1 = metric_f1.compute()
     epoch_loss = running_loss / num_batches
-    wandb.log({"train accuracy": epoch_accuracy, "train loss": epoch_loss})
+    wandb.log({"train accuracy": epoch_acc, "train precision": epoch_pre, 
+               "train recall": epoch_rec, "train f1": epoch_f1, "train loss": epoch_loss})
 
     return epoch_loss
 
 def test_loop(dataloader, model, device, loss_fn, config):
     running_vloss = 0.0
     num_batches = len(dataloader)
-    tot_tp = 0
-    tot_count = 0
+    metric_acc = BinaryAccuracy(threshold=0.5)
+    metric_pre = BinaryPrecision(threshold=0.5)
+    metric_rec = BinaryRecall(threshold=0.5)
+    metric_f1 = BinaryF1Score(threshold=0.5)
     
     model.eval()
     with torch.no_grad():
@@ -69,20 +78,25 @@ def test_loop(dataloader, model, device, loss_fn, config):
             
             pred_y = model(X)
 
-            label = wet_label(y, config['size'], num_pixel=config['size'])
-            tp = ((pred_y > 0.5).float() == (label).float()).sum()
-            tot_tp += tp
-            tot_count += label.shape[0]
-            
-            running_vloss += loss_fn(logits, y.float()).item()
+            target = wet_label(y, config['size'], num_pixel=config['size']).flatten()
 
-    epoch_vaccuracy = tot_tp / tot_count
+            metric_acc.update(pred_y, target)
+            metric_pre.update(pred_y, target)
+            metric_rec.update(pred_y, target)
+            metric_f1.update(pred_y, target)
+            running_vloss += loss_fn(pred_y, target.float()).item()
+
+    epoch_vacc = metric_acc.compute()
+    epoch_vpre = metric_pre.compute()
+    epoch_vrec = metric_rec.compute()
+    epoch_vf1 = metric_f1.compute()
     epoch_vloss = running_vloss / num_batches
-    wandb.log({"val accuracy": epoch_vaccuracy, "val loss": epoch_vloss})
+    wandb.log({"val accuracy": epoch_vacc, "val precision": epoch_vpre,
+               "val recall": epoch_vrec, "val f1": epoch_vf1, "val loss": epoch_vloss})
 
     return epoch_vloss
 
-def train(train_set, val_set, model, device, config, save='model'):
+def train(train_set, val_set, model, device, config, save='discriminator'):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     logging.info(f'''Starting training:
         Date:            {timestamp}
@@ -103,11 +117,14 @@ def train(train_set, val_set, model, device, config, save='model'):
         "patch_size": config['size'],
         "samples": config['samples'],
         "architecture": config['name'],
+        "num_pixels": config['num_pixels'],
         "learning_rate": config['learning_rate'],
         "epochs": config['epochs'],
         "batch_size": config['batch_size'],
         "optimizer": config['optimizer'],
         "loss_fn": config['loss'],
+        "alpha": config['alpha'],
+        "beta": config['beta'],
         "training_size": len(train_set),
         "validation_size": len(val_set),
         "val_percent": len(val_set) / (len(train_set) + len(val_set)),
@@ -121,7 +138,7 @@ def train(train_set, val_set, model, device, config, save='model'):
     elif config['loss'] == 'BCEDiceLoss':
         loss_fn = BCEDiceLoss()
     elif config['loss'] == 'TverskyLoss':
-        loss_fn = TverskyLoss()
+        loss_fn = TverskyLoss(alpha=config['alpha'], beta=config['beta'])
     else:
         raise Exception('Loss function not found.')
 
@@ -180,7 +197,7 @@ def sample_predictions(discriminator, val_set, table, mean, std, config, seed=24
         X, y = val_set[k]
 
         truth = int(wet_label(y, config['size'], num_pixel=config['num_pixels']))
-        prediction = model(X.unsqueeze(0)) # can't do instance because of batch norm?
+        prediction = discriminator(X.unsqueeze(0))
         prediction = int(prediction > 0.5)
 
         X = X.permute(1, 2, 0)
@@ -218,6 +235,7 @@ def run_experiment(config):
             discriminator = Classifier3(5).to(device)
             # Initialize weights
             discriminator.apply(weights_init_normal)
+            raise NotImplementedError("Classifier3 not ready for use.")
         else:
             raise Exception("Model not available.")
         print(f"Using {device} device")
@@ -270,17 +288,19 @@ if __name__ == '__main__':
     # ml
     parser.add_argument('-e', '--epochs', type=int, default=30, help='(default: 30)')
     parser.add_argument('-b', '--batch_size', type=int, default=32, help='(default: 32)')
-    parser.add_argument('-l', '--learning_rate', type=float, default=0.0001, help='(default: 0.0001)')
+    parser.add_argument('-l', '--learning_rate', type=float, default=0.01, help='(default: 0.01)')
     parser.add_argument('--early_stopping', action='store_true', help='early stopping (default: False)')
 
     # model
-    parser.add_argument('--name', default='discriminator', choices=MODEL_NAMES,
-                        help=f"models: {', '.join(MODEL_NAMES)} (default: Classifier1)")
+    parser.add_argument('--name', default='c1', choices=MODEL_NAMES,
+                        help=f"models: {', '.join(MODEL_NAMES)} (default: c1)")
     parser.add_argument('--num_pixels', type=int, default=100, help='(default: 100)')
     
     # loss
     parser.add_argument('--loss', default='BCELoss', choices=LOSS_NAMES,
                         help=f"loss: {', '.join(LOSS_NAMES)} (default: BCELoss)")
+    parser.add_argument('--alpha', type=float, default=0.3, help='Tversky Loss alpha value (default: 0.3)')
+    parser.add_argument('--beta', type=float, default=0.7, help='Tversky Loss beta value (default: 0.7)')
 
     # optimizer
     parser.add_argument('--optimizer', default='Adam', choices=['Adam', 'SGD'],

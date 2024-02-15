@@ -43,15 +43,17 @@ Our model input consists of the RGB image, the NIR B8 band image, and the NDWI c
 ![image](https://github.com/davdma/floodmaps/assets/42689743/f33a5723-2a57-4efa-b0dd-fd737d3e2967)
 **Figure 4:** Training and validation plots for UNet model using the random cropping sampling method. We see significant learning taking place, but the model still needs some more tuning.
 
-<img src="https://github.com/davdma/floodmaps/assets/42689743/4a74c50b-34f3-4e47-b089-b27453800571" height="400">
-
+<p align="center">
+  <img src="https://github.com/davdma/floodmaps/assets/42689743/4a74c50b-34f3-4e47-b089-b27453800571" height="400">
+<p align="center">
+  
 **Figure 5:** Preliminary prediction results on validation set. Can observe that there is some underprediction is some areas, but this can be fixed with more tuning.
 
 We then proceeded to add a SrGAN discriminator head to create a two part model. The discriminator would first take the input patch and determine whether the patch has water or not. If the discriminator does not detect water, it does not run the patch through the UNet. If the discriminator detects water in the patch, it proceeds to run the patch through the UNet. This two head model design allows us to skip unnecessary computation if the patch contains no water. The prediction results of this two head model on a large flood raster (the patches are run independently and then stitched together) generates some good results:
 
 <p align="center">
   <img src="https://github.com/davdma/floodmaps/assets/42689743/78d029d1-2f32-4991-b62f-c5d6d6ca0167" height="600">
-</p>
+<p align="center">
 
 **Figure 6:** Prediction results on a large flood tile. Using our initial model on unlabelled data allows us to automate our ground truthing process.
 

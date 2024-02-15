@@ -38,7 +38,7 @@ For our water pixel detection model, we want to test multiple different built-in
 ![u-net-architecture](https://github.com/davdma/floodmaps/assets/42689743/d91c7627-52f4-4849-b5dc-86c2cc975c0d)
 **Figure 3:** UNet architecture. For our model we also added dropouts after each max pooling layer to regularize the learning process and prevent overfitting.
 
-Our model input consists of the RGB image, the NIR B8 band image, and the NDWI calculation. However, we cannot take the large images for use immediately. We must first take the labeled data and partition them into digestible 64 x 64 pixel tiles for input. First we tried breaking each larger image into patches by imposing a grid, but we found that the model failed to learn from the data this way. A much better way came from using random cropping - randomly sampling thousands of 64 x 64 patches from each image.
+Our model input consists of the RGB image, the NIR B8 band image, and the NDWI calculation. However, we cannot take the large images for use immediately. We must first take the labeled data and partition them into digestible 64 x 64 pixel tiles for input. First we tried breaking each larger image into patches by imposing a grid, but we found that the model failed to learn from the data this way. A much better way came from using random cropping - randomly sampling thousands of 64 x 64 patches from each image. This exploratory work can be found in the notebook `unet.ipynb`.
 
 ![image](https://github.com/davdma/floodmaps/assets/42689743/f33a5723-2a57-4efa-b0dd-fd737d3e2967)
 **Figure 4:** Training and validation plots for UNet model using the random cropping sampling method. We see significant learning taking place, but the model still needs some more tuning.
@@ -47,4 +47,8 @@ Our model input consists of the RGB image, the NIR B8 band image, and the NDWI c
 
 **Figure 5:** Preliminary prediction results on validation set. Can observe that there is some underprediction is some areas, but this can be fixed with more tuning.
 
-Note: The water pixel detection model is still being tuned, but can be found in the notebook `unet.ipynb`.
+We then proceeded to add a SrGAN discriminator head to create a two part model. The discriminator would first take the input patch and determine whether the patch has water or not. If the discriminator does not detect water, it does not run the patch through the UNet. If the discriminator detects water in the patch, it proceeds to run the patch through the UNet. This two head model design allows us to skip unnecessary computation if the patch contains no water. The prediction results of this two head model on a large flood raster (the patches are run independently and then stitched together) generates some good results:
+
+![prediction](https://github.com/davdma/floodmaps/assets/42689743/4bfccc5d-39d7-48c0-9a6c-486e99b7917c)
+**Figure 6:** Prediction results on a large flood tile. Using our initial model on unlabelled data allows us to automate our ground truthing process.
+

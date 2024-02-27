@@ -95,7 +95,7 @@ def test_loop(dataloader, model, device, loss_fn):
     wandb.log({"val accuracy": epoch_vacc, "val precision": epoch_vpre,
                "val recall": epoch_vrec, "val f1": epoch_vf1, "val loss": epoch_vloss})
 
-    return epoch_vloss
+    return epoch_vloss, epoch_vf1
 
 def train(train_set, val_set, model, device, config, save='model'):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -115,6 +115,7 @@ def train(train_set, val_set, model, device, config, save='model'):
         config={
         "dataset": "Sentinel2",
         "method": config['method'],
+        "channels": ''.join('1' if b else '0' for b in config['channels']),
         "patch_size": config['size'],
         "samples": config['samples'],
         "architecture": config['name'],
@@ -174,7 +175,7 @@ def train(train_set, val_set, model, device, config, save='model'):
         avg_loss = train_loop(train_loader, model, device, loss_fn, optimizer)
 
         # at the end of each training epoch compute validation
-        avg_vloss = test_loop(val_loader, model, device, loss_fn)
+        avg_vloss, avg_vf1 = test_loop(val_loader, model, device, loss_fn)
 
         if config['early_stopping'] and early_stopper.early_stop(avg_vloss):             
             break
@@ -185,12 +186,42 @@ def train(train_set, val_set, model, device, config, save='model'):
     PATH = 'models/' + save + '.pth'
     torch.save(model.state_dict(), PATH)
 
-    return run
+    return run, avg_vf1
 
-def sample_predictions(model, val_set, table, mean, std, seed=24000):
+def sample_predictions(model, val_set, mean, std, channels, seed=24000):
+    columns = ["id"]
+    if sum(channels[:3]) == 3:
+        columns.append("image")
+    if channels[4]:
+        columns.append("ndwi")
+        # initialize mappable objects
+        ndwi_norm = Normalize(vmin=-1, vmax=1)
+        ndwi_map = ScalarMappable(norm=ndwi_norm, cmap='seismic_r')
+    if channels[5]:
+        columns.append("dem")
+        dem_map = ScalarMappable(norm=None, cmap='gray')
+    if channels[6]:
+        columns.append("slope")
+        slope_map = ScalarMappable(norm=None, cmap='jet')
+    if channels[7]:
+        columns.append("waterbody")
+    if channels[8]:
+        columns.append("roads")
+    columns += ["truth", "prediction"]
+    table = wandb.Table(columns=columns)
+
+    # get map of each channel to index of resulting tensor
+    n = 0
+    channel_indices = [-1] * 9
+    for i, channel in enumerate(channels):
+        if channel:
+            channel_indices[i] = n
+            n += 1
+    
     model.to('cpu')
     rng = Random(seed)
     samples = rng.sample(range(0, len(val_set)), 40)
+
     for id, k in enumerate(samples):
         # get all images to shape (H, W, C) with C = 1 or 3 (1 for grayscale, 3 for RGB)
         X, y = val_set[k]
@@ -200,26 +231,51 @@ def sample_predictions(model, val_set, table, mean, std, seed=24000):
 
         X = X.permute(1, 2, 0)
         X = std * X + mean
-        
-        tci = X[:, :, :3].mul(255).clamp(0, 255).byte().numpy()
-        ndwi = X[:, :, 4]
-        
-        ndwi_cmap='seismic_r'
-        ndwi_norm = Normalize(vmin=-1, vmax=1)
-        ndwi_map = ScalarMappable(norm=ndwi_norm, cmap=ndwi_cmap)
 
-        ndwi = ndwi_map.to_rgba(ndwi.numpy(), bytes=True)
-        ndwi = np.clip(ndwi, 0, 255).astype(np.uint8)
+        row = [k]
+        if sum(channels[:3]) == 3:
+            tci = X[:, :, :3].mul(255).clamp(0, 255).byte().numpy()
+            tci_img = Image.fromarray(tci, mode="RGB")
+            row.append(wandb.Image(tci_img))
+        if channels[4]:
+            ndwi = X[:, :, channel_indices[4]]
+            ndwi = ndwi_map.to_rgba(ndwi.numpy(), bytes=True)
+            ndwi = np.clip(ndwi, 0, 255).astype(np.uint8)
+            ndwi_img = Image.fromarray(ndwi, mode="RGBA")
+            row.append(wandb.Image(ndwi_img))
+        if channels[5]:
+            dem = X[:, :, channel_indices[5]].numpy()
+            dem_map.set_norm(Normalize(vmin=np.min(dem), vmax=np.max(dem)))
+            dem = dem_map.to_rgba(dem, bytes=True)
+            dem = np.clip(dem, 0, 255).astype(np.uint8)
+            dem_img = Image.fromarray(dem, mode="RGBA")
+            row.append(wandb.Image(dem_img))
+        if channels[6]:
+            slope = X[:, :, channel_indices[6]].numpy()
+            slope_map.set_norm(Normalize(vmin=np.min(slope), vmax=np.max(slope)))
+            slope = slope_map.to_rgba(slope, bytes=True)
+            slope = np.clip(slope, 0, 255).astype(np.uint8)
+            slope_img = Image.fromarray(slope, mode="RGBA")
+            row.append(wandb.Image(slope_img))
+        if channels[7]:
+            waterbody = X[:, :, channel_indices[7]].mul(255).clamp(0, 255).byte().numpy()
+            waterbody_img = Image.fromarray(waterbody, mode="L")
+            row.append(wandb.Image(waterbody_img))
+        if channels[8]:
+            roads = X[:, :, channel_indices[8]].mul(255).clamp(0, 255).byte().numpy()
+            roads_img = Image.fromarray(roads, mode="L")
+            row.append(wandb.Image(roads_img))
 
         y = y.squeeze(0).mul(255).clamp(0, 255).byte().numpy()
         pred_y = pred_y.squeeze(0).mul(255).clamp(0, 255).byte().numpy()
         
-        tci_img = Image.fromarray(tci, mode="RGB")
-        ndwi_img = Image.fromarray(ndwi, mode="RGBA")
         truth_img = Image.fromarray(y, mode="L")
         pred_img = Image.fromarray(pred_y, mode="L")
+        row += [wandb.Image(truth_img), wandb.Image(pred_img)]
 
-        table.add_data(k, wandb.Image(tci_img), wandb.Image(ndwi_img), wandb.Image(truth_img), wandb.Image(pred_img))
+        table.add_data(*row)
+
+    return table
 
 def run_experiment(config):
     if wandb.login():
@@ -230,8 +286,9 @@ def run_experiment(config):
             if torch.backends.mps.is_available()
             else "cpu"
         )
+        n_channels = sum(config['channels'])
         if config['name'] == "unet":
-            model = UNet(5, dropout=0.2).to(device)
+            model = UNet(n_channels, dropout=0.2).to(device)
         else:
             raise Exception("Model not available.")
         
@@ -244,24 +301,26 @@ def run_experiment(config):
         test_label_dir = f'data/{method}/' + f'labels{size}_test_{samples}/'
         test_sample_dir = f'data/{method}/' + f'samples{size}_test_{samples}/'
         
-        train_set = FloodSampleDataset(train_sample_dir, train_label_dir, typ="train")
-        val_set = FloodSampleDataset(test_sample_dir, test_label_dir, typ="test")
+        train_set = FloodSampleDataset(train_sample_dir, train_label_dir, channels=config['channels'], typ="train")
+        val_set = FloodSampleDataset(test_sample_dir, test_label_dir, channels=config['channels'], typ="test")
 
-        train_mean, train_std = trainMeanStd(sample_dir=config['sample_dir'], label_dir=config['label_dir'])
+        train_mean, train_std = trainMeanStd(channels=config['channels'], sample_dir=config['sample_dir'], 
+                                             label_dir=config['label_dir'])
         standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
 
         train_set.transform = standardize
         val_set.transform = standardize
-        run = train(train_set, val_set, model, device, config, save=f"model{len(glob('models/model*.pth'))}")
 
-        # log predictions on validation set using wandb
-        columns = ["id", "image", "ndwi", "truth", "prediction"]
-        pred_table = wandb.Table(columns=columns)
-        
-        # attach images as pytorch tensors
-        sample_predictions(model, val_set, pred_table, train_mean, train_std)
-        run.log({"model_val_predictions": pred_table})
-        run.finish()
+        try:
+            run, vf1 = train(train_set, val_set, model, device, config, save=f"model{len(glob('models/model*.pth'))}")
+            
+            # log predictions on validation set using wandb
+            pred_table = sample_predictions(model, val_set, train_mean, train_std, config['channels'])
+            run.log({"model_val_predictions": pred_table})
+        finally:
+            run.finish()
+
+        return vf1
     else:
         raise Exception("Failed to login to wandb.")
 
@@ -270,10 +329,20 @@ def main(config):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='train_classifier', description='Trains classifier model from patches.')
-    # dataset
+
+    def bool_indices(s):
+        if len(s) == 9 and all(c in '01' for c in s):
+            try:
+                return [bool(int(x)) for x in s]
+            except ValueError:
+                raise argparse.ArgumentTypeError("Invalid boolean string: '{}'".format(s))
+        else:
+            raise argparse.ArgumentTypeError("Boolean string must be of length 9 and have binary digits")
+    
     parser.add_argument('-x', '--size', type=int, default=64, help='pixel width of patch (default: 64)')
     parser.add_argument('-n', '--samples', type=int, default=1000, help='number of samples per image (default: 1000)')
     parser.add_argument('-m', '--method', default='random', choices=['random'], help='sampling method (default: random)')
+    parser.add_argument('-c', '--channels', type=bool_indices, default="111111111", help='string of 9 binary digits for selecting among the 9 available channels (R, G, B, B08, NDWI, DEM, Slope, Water, Roads) (default: 111111111)')
     parser.add_argument('--sdir', dest='sample_dir', default='../samples_200_5_4_35/', help='(default: ../samples_200_5_4_35/)')
     parser.add_argument('--ldir', dest='label_dir', default='../labels/', help='(default: ../labels/)')
 

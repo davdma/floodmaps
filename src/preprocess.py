@@ -42,6 +42,10 @@ def random_crop(label_names, size, num_samples, rng, dir_name, sample_dir, label
         tci_file = sample_dir + f'{eid}/tci_{tile_date}_{eid}.tif'
         b08_file = sample_dir + f'{eid}/b08_{tile_date}_{eid}.tif'
         ndwi_file = sample_dir + f'{eid}/ndwi_{tile_date}_{eid}.tif'
+        dem_file = sample_dir + f'{eid}/dem_{eid}.tif'
+        slope_file = sample_dir + f'{eid}/slope_{eid}.tif'
+        waterbody_file = sample_dir + f'{eid}/waterbody_{eid}.tif'
+        roads_file = sample_dir + f'{eid}/roads_{eid}.tif'
 
         with rasterio.open(tci_file) as src:
             tci_raster = src.read()
@@ -51,6 +55,18 @@ def random_crop(label_names, size, num_samples, rng, dir_name, sample_dir, label
 
         with rasterio.open(ndwi_file) as src:
             ndwi_raster = src.read()
+    
+        with rasterio.open(dem_file) as src:
+            dem_raster = src.read()
+    
+        with rasterio.open(slope_file) as src:
+            slope_raster = src.read()
+
+        with rasterio.open(waterbody_file) as src:
+            waterbody_raster = src.read()
+
+        with rasterio.open(roads_file) as src:
+            roads_raster = src.read()
 
         # choose n random coordinates within the tile
         sampled = 0
@@ -74,14 +90,27 @@ def random_crop(label_names, size, num_samples, rng, dir_name, sample_dir, label
 
             ndwi_tile = ndwi_raster[:, x : x + size, y : y + size]
             ndwi_tile = ndwi_tile.astype(np.float32)
+    
+            dem_tile = dem_raster[:, x : x + size, y : y + size]
+            dem_tile = dem_tile.astype(np.float32)
+    
+            slope_tile = slope_raster[:, x : x + size, y : y + size]
+            slope_tile = slope_tile.astype(np.float32)
+
+            waterbody_tile = waterbody_raster[:, x : x + size, y : y + size]
+            waterbody_tile = waterbody_tile.astype(np.float32)
+
+            roads_tile = roads_raster[:, x : x + size, y : y + size]
+            roads_tile = roads_tile.astype(np.float32)
 
             label_tile = label_binary[x : x + size, y : y + size]
             label_tile = label_tile.astype(np.uint8)
-
-            stacked_tile = np.vstack((tci_tile, b08_tile, ndwi_tile), dtype=np.float32)
+            
+            stacked_tile = np.vstack((tci_tile, b08_tile, ndwi_tile, dem_tile, 
+                                      slope_tile, waterbody_tile, roads_tile), dtype=np.float32)
 
             # save 64 x 64 tile to tif file
-            with rasterio.open(pre_sample_dir + f'sample_{tile_date}_{eid}_{x}_{y}.tif', 'w', driver='Gtiff', count=5, height=size, width=size, dtype=np.float32) as dst:
+            with rasterio.open(pre_sample_dir + f'sample_{tile_date}_{eid}_{x}_{y}.tif', 'w', driver='Gtiff', count=stacked_tile.shape[0], height=size, width=size, dtype=np.float32) as dst:
                 dst.write(stacked_tile)
                     
             with rasterio.open(pre_label_dir + f'label_{tile_date}_{eid}_{x}_{y}.tif', 'w', driver='Gtiff', count=1, height=size, width=size, dtype=np.uint8) as dst:

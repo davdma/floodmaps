@@ -19,41 +19,46 @@ def wet_label(image, crop_size, num_pixel=100):
     label = image.view(-1, crop_size**2).sum(1).gt(num_pixel).int()
     return label
 
-def trainMeanStd(batch_size=10, sample_dir='../samples_200_5_4_35/', label_dir='../labels/'):
+def trainMeanStd(batch_size=10, channels=[True] * 9, sample_dir='../samples_200_5_4_35/', label_dir='../labels/'):
     """Calculate mean and std across channels of all training tiles used to generate patches."""
     def channel_collate(batch):
         # concatenate channel wise for all samples in batch
         samples = torch.cat(batch, 1)
         return samples
 
-    train_mean_std = FloodSampleMeanStd(TRAIN_LABELS, sample_dir=sample_dir, label_dir=label_dir)
+    train_mean_std = FloodSampleMeanStd(TRAIN_LABELS, channels=channels, sample_dir=sample_dir, label_dir=label_dir)
     loader = DataLoader(train_mean_std,
                         batch_size=batch_size,
                         num_workers=0,
                         collate_fn=channel_collate,
                         shuffle=False)
-
+ 
     # random crop - calculate total mean and std for each channel not including missing values
+    n_channels = sum(channels)
+    b_channels = sum(channels[-2:])
     pixel_count = 0
-    sum = torch.zeros(5, dtype=torch.float64)
+    tot_sum = torch.zeros(n_channels, dtype=torch.float64)
     for samples in loader:
         # mask out missing values and calculate mean for each channel
-        channels = samples.size(0)
         mask = (samples[0] != 0)
         pixel_count += mask.sum()
-        for i in range(channels):
-            sum[i] += samples[i][mask].sum()
-    mean = sum / pixel_count
+        for i in range(n_channels - b_channels):
+            tot_sum[i] += samples[i][mask].sum()
+    mean = tot_sum / pixel_count
     
     # add up variance for each channel not including missing values
-    tot_var = torch.zeros(5, dtype=torch.float64)
+    tot_var = torch.zeros(n_channels, dtype=torch.float64)
     for samples in loader:
         # first stack all feature values from batch together
-        channels = samples.size(0)
         mask = (samples[0] != 0)
-        for i in range(channels):
+        for i in range(n_channels - b_channels):
             tot_var[i] += ((samples[i][mask] - mean[i]) ** 2).sum()
     std = torch.sqrt(tot_var / (pixel_count - 1))
+
+    # set mean to 0 and std to 1 for binary channels - roads and waterbody!!  
+    if b_channels > 0:
+        mean[-b_channels:] = 0
+        std[-b_channels:] = 1
     return mean, std
 
 class EarlyStopper:

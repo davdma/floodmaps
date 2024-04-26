@@ -17,6 +17,7 @@ from random import Random
 from PIL import Image
 from glob import glob
 import loss
+from loss import BCEDiceLoss, TverskyLoss
 import numpy as np
 import sys
 
@@ -78,6 +79,7 @@ def test_loop(dataloader, model, device, loss_fn, config):
             
             pred_y = model(X)
 
+            # determine whether the sample patch is considered wet or not
             target = wet_label(y, config['size'], num_pixel=config['size']).flatten()
 
             metric_acc.update(pred_y, target)
@@ -155,18 +157,21 @@ def train(train_set, val_set, model, device, config, save='discriminator'):
     # make DataLoader
     train_loader = DataLoader(train_set,
                              batch_size=config['batch_size'],
-                             num_workers=0,
+                             num_workers=10,
                              shuffle=True,
                              drop_last=False)
     
     val_loader = DataLoader(val_set,
                             batch_size=config['batch_size'],
-                            num_workers=0,
+                            num_workers=10,
                             shuffle=True,
                             drop_last=False)
 
     if config['early_stopping']:
         early_stopper = EarlyStopper(patience=10)
+
+        # best model checkpoint
+        min_model_weights = model.state_dict()
 
     # TRAIN AND TEST LOOP IS PER EPOCH!!!
     for epoch in range(config['epochs']):
@@ -176,18 +181,37 @@ def train(train_set, val_set, model, device, config, save='discriminator'):
         # at the end of each training epoch compute validation
         avg_vloss = test_loop(val_loader, model, device, loss_fn, config)
 
-        if config['early_stopping'] and early_stopper.early_stop(avg_vloss):             
-            break
+        if config['early_stopping']:
+            early_stopper.step(avg_vloss)
+            if early_stopper.is_stopped():
+                break
+                
+            if early_stopper.is_best_epoch():
+                # Model weights are saved at the end of every epoch, if it's the best seen so far:
+                min_model_weights = copy.deepcopy(model.state_dict())
             
         scheduler.step(avg_vloss)
 
+        if epoch == 0:
+            # allows loader to use cache after first epoch
+            train_loader.dataset.set_use_cache(True)
+            val_loader.dataset.set_use_cache(True)
+
     # Save our model
     PATH = 'models/' + save + '.pth'
-    torch.save(model.state_dict(), PATH)
+    if config['early_stopping']:
+        torch.save(min_model_weights, PATH)
+
+        # reset model to checkpoint for later sample prediction
+        model.load_state_dict(min_model_weights)
+        model.eval()
+    else:
+        torch.save(model.state_dict(), PATH)
 
     return run
 
 def sample_predictions(discriminator, val_set, table, mean, std, config, seed=24000):
+    """Generate predictions on a subset of images in the validation set for wandb logging."""
     discriminator.to('cpu')
     discriminator.eval()
     rng = Random(seed)
@@ -200,6 +224,7 @@ def sample_predictions(discriminator, val_set, table, mean, std, config, seed=24
         prediction = discriminator(X.unsqueeze(0))
         prediction = int(prediction > 0.5)
 
+        # Channels are descaled using linear variance scaling
         X = X.permute(1, 2, 0)
         X = std * X + mean
         
@@ -219,6 +244,7 @@ def sample_predictions(discriminator, val_set, table, mean, std, config, seed=24
         table.add_data(k, wandb.Image(tci_img), wandb.Image(ndwi_img), truth, prediction)
 
 def run_experiment(config):
+    """Run a single model experiment given the configuration parameters."""
     if wandb.login():
         device = (
             "cuda"
@@ -227,6 +253,11 @@ def run_experiment(config):
             if torch.backends.mps.is_available()
             else "cpu"
         )
+        
+        # discriminator options
+        # c1: 8 layer CNN
+        # c2: 10 layer CNN
+        # c3: SrGAN not implemented
         if config['name'] == "c1":
             discriminator = Classifier1(5).to(device)
         elif config['name'] == "c2":
@@ -243,10 +274,10 @@ def run_experiment(config):
         method = config['method']
         size = config['size']
         samples = config['samples']
-        train_label_dir = f'data/{method}/' + f'labels{size}_train_{samples}/'
-        train_sample_dir = f'data/{method}/' + f'samples{size}_train_{samples}/'
-        test_label_dir = f'data/{method}/' + f'labels{size}_test_{samples}/'
-        test_sample_dir = f'data/{method}/' + f'samples{size}_test_{samples}/'
+        train_label_dir = f'data/s2/{method}/' + f'labels{size}_train_{samples}/'
+        train_sample_dir = f'data/s2/{method}/' + f'samples{size}_train_{samples}/'
+        test_label_dir = f'data/s2/{method}/' + f'labels{size}_test_{samples}/'
+        test_sample_dir = f'data/s2/{method}/' + f'samples{size}_test_{samples}/'
         
         train_set = FloodSampleDataset(train_sample_dir, train_label_dir, typ="train")
         val_set = FloodSampleDataset(test_sample_dir, test_label_dir, typ="test")
@@ -274,7 +305,7 @@ def main(config):
     run_experiment(config)
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(prog='train_discriminator', description='Trains discriminator from patches.')
+    parser = argparse.ArgumentParser(prog='train_discriminator', description='Trains discriminator from patches. The discriminator inputs a patch with n channels and outputs a single value corresponding to whether the patch is likely to contain water or not.')
     # dataset
     parser.add_argument('-x', '--size', type=int, default=64, help='pixel width of patch (default: 64)')
     parser.add_argument('-n', '--samples', type=int, default=1000, help='number of samples per image (default: 1000)')

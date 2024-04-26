@@ -2,12 +2,13 @@ import wandb
 import torch
 import logging
 import argparse
+import copy
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
 from datetime import datetime
 from dataset import FloodSampleDataset
-from utils import trainMeanStd, EarlyStopper
+from utils import trainMeanStd, EarlyStopper, ChannelIndexer
 from torchvision import transforms
 from torcheval.metrics import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score
 from architectures.unet import UNet
@@ -19,6 +20,9 @@ from glob import glob
 from loss import BCEDiceLoss, TverskyLoss
 import numpy as np
 import sys
+# for debugging purposes
+import logging
+logging.basicConfig(level=logging.INFO)
 
 MODEL_NAMES = ['unet']
 LOSS_NAMES = ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
@@ -119,6 +123,7 @@ def train(train_set, val_set, model, device, config, save='model'):
         "patch_size": config['size'],
         "samples": config['samples'],
         "architecture": config['name'],
+        "dropout": config['dropout'],
         "learning_rate": config['learning_rate'],
         "epochs": config['epochs'],
         "batch_size": config['batch_size'],
@@ -156,59 +161,89 @@ def train(train_set, val_set, model, device, config, save='model'):
     # make DataLoader
     train_loader = DataLoader(train_set,
                              batch_size=config['batch_size'],
-                             num_workers=0,
+                             num_workers=10,
                              shuffle=True,
                              drop_last=False)
     
     val_loader = DataLoader(val_set,
                             batch_size=config['batch_size'],
-                            num_workers=0,
+                            num_workers=10,
                             shuffle=True,
                             drop_last=False)
 
     # TRAIN AND TEST LOOP IS PER EPOCH!!!
     if config['early_stopping']:
         early_stopper = EarlyStopper(patience=5)
-        
+
+        # best model checkpoint
+        min_model_weights = model.state_dict()
+    
+    # best summary params
+    wandb.define_metric("val accuracy", summary="max")
+    wandb.define_metric("val precision", summary="max")
+    wandb.define_metric("val recall", summary="max")
+    wandb.define_metric("val f1", summary="max")
+    wandb.define_metric("val loss", summary="min")
     for epoch in range(config['epochs']):
         # train loop
+        # LOG EACH EPOCH!!!!
+        logging.info(f"Epoch {epoch}...")
         avg_loss = train_loop(train_loader, model, device, loss_fn, optimizer)
 
         # at the end of each training epoch compute validation
         avg_vloss, avg_vf1 = test_loop(val_loader, model, device, loss_fn)
 
-        if config['early_stopping'] and early_stopper.early_stop(avg_vloss):             
-            break
-
+        if config['early_stopping']:
+            early_stopper.step(avg_vloss)
+            if early_stopper.is_stopped():
+                break
+                
+            if early_stopper.is_best_epoch():
+                early_stopper.store_metric(avg_vf1)
+                # Model weights are saved at the end of every epoch, if it's the best seen so far:
+                min_model_weights = copy.deepcopy(model.state_dict())
+            
         scheduler.step(avg_vloss)
+
+        if epoch == 0:
+            # allows loader to use cache after first epoch
+            train_loader.dataset.set_use_cache(True)
+            val_loader.dataset.set_use_cache(True)
 
     # Save our model
     PATH = 'models/' + save + '.pth'
-    torch.save(model.state_dict(), PATH)
+    if config['early_stopping']:
+        final_vf1 = early_stopper.get_metric()
+        # save max vf1 iteration model via checkpointing?
+        torch.save(min_model_weights, PATH)
 
-    return run, avg_vf1
+        # reset model to checkpoint for later sample prediction
+        model.load_state_dict(min_model_weights)
+        model.eval()
+    else:
+        final_vf1 = avg_vf1
+        torch.save(model.state_dict(), PATH)
+
+    wandb.log({"Saved Model F1 Score": final_vf1})
+    return run, final_vf1
 
 def sample_predictions(model, val_set, mean, std, channels, seed=24000):
+    """Generate predictions on a subset of images in the validation set for wandb logging."""
     columns = ["id"]
-    if sum(channels[:3]) == 3:
-        columns.append("image")
-    if channels[4]:
-        columns.append("ndwi")
+    my_channels = ChannelIndexer(channels)
+    # initialize wandb table given the channel settings
+    columns += my_channels.get_channel_names()
+    columns += ["truth", "prediction"]
+    table = wandb.Table(columns=columns)
+    
+    if my_channels.has_ndwi():
         # initialize mappable objects
         ndwi_norm = Normalize(vmin=-1, vmax=1)
         ndwi_map = ScalarMappable(norm=ndwi_norm, cmap='seismic_r')
-    if channels[5]:
-        columns.append("dem")
+    if my_channels.has_dem():
         dem_map = ScalarMappable(norm=None, cmap='gray')
-    if channels[6]:
-        columns.append("slope")
+    if my_channels.has_slope():
         slope_map = ScalarMappable(norm=None, cmap='jet')
-    if channels[7]:
-        columns.append("waterbody")
-    if channels[8]:
-        columns.append("roads")
-    columns += ["truth", "prediction"]
-    table = wandb.Table(columns=columns)
 
     # get map of each channel to index of resulting tensor
     n = 0
@@ -233,35 +268,35 @@ def sample_predictions(model, val_set, mean, std, channels, seed=24000):
         X = std * X + mean
 
         row = [k]
-        if sum(channels[:3]) == 3:
+        if my_channels.has_image():
             tci = X[:, :, :3].mul(255).clamp(0, 255).byte().numpy()
             tci_img = Image.fromarray(tci, mode="RGB")
             row.append(wandb.Image(tci_img))
-        if channels[4]:
+        if my_channels.has_ndwi():
             ndwi = X[:, :, channel_indices[4]]
             ndwi = ndwi_map.to_rgba(ndwi.numpy(), bytes=True)
             ndwi = np.clip(ndwi, 0, 255).astype(np.uint8)
             ndwi_img = Image.fromarray(ndwi, mode="RGBA")
             row.append(wandb.Image(ndwi_img))
-        if channels[5]:
+        if my_channels.has_dem():
             dem = X[:, :, channel_indices[5]].numpy()
             dem_map.set_norm(Normalize(vmin=np.min(dem), vmax=np.max(dem)))
             dem = dem_map.to_rgba(dem, bytes=True)
             dem = np.clip(dem, 0, 255).astype(np.uint8)
             dem_img = Image.fromarray(dem, mode="RGBA")
             row.append(wandb.Image(dem_img))
-        if channels[6]:
+        if my_channels.has_slope():
             slope = X[:, :, channel_indices[6]].numpy()
             slope_map.set_norm(Normalize(vmin=np.min(slope), vmax=np.max(slope)))
             slope = slope_map.to_rgba(slope, bytes=True)
             slope = np.clip(slope, 0, 255).astype(np.uint8)
             slope_img = Image.fromarray(slope, mode="RGBA")
             row.append(wandb.Image(slope_img))
-        if channels[7]:
+        if my_channels.has_waterbody():
             waterbody = X[:, :, channel_indices[7]].mul(255).clamp(0, 255).byte().numpy()
             waterbody_img = Image.fromarray(waterbody, mode="L")
             row.append(wandb.Image(waterbody_img))
-        if channels[8]:
+        if my_channels.has_roads():
             roads = X[:, :, channel_indices[8]].mul(255).clamp(0, 255).byte().numpy()
             roads_img = Image.fromarray(roads, mode="L")
             row.append(wandb.Image(roads_img))
@@ -278,6 +313,7 @@ def sample_predictions(model, val_set, mean, std, channels, seed=24000):
     return table
 
 def run_experiment(config):
+    """Run a single model experiment given the configuration parameters."""
     if wandb.login():
         device = (
             "cuda"
@@ -288,7 +324,7 @@ def run_experiment(config):
         )
         n_channels = sum(config['channels'])
         if config['name'] == "unet":
-            model = UNet(n_channels, dropout=0.2).to(device)
+            model = UNet(n_channels, dropout=config['dropout']).to(device)
         else:
             raise Exception("Model not available.")
         
@@ -296,10 +332,10 @@ def run_experiment(config):
         method = config['method']
         size = config['size']
         samples = config['samples']
-        train_label_dir = f'data/{method}/' + f'labels{size}_train_{samples}/'
-        train_sample_dir = f'data/{method}/' + f'samples{size}_train_{samples}/'
-        test_label_dir = f'data/{method}/' + f'labels{size}_test_{samples}/'
-        test_sample_dir = f'data/{method}/' + f'samples{size}_test_{samples}/'
+        train_label_dir = f'data/s2/{method}/' + f'labels{size}_train_{samples}/'
+        train_sample_dir = f'data/s2/{method}/' + f'samples{size}_train_{samples}/'
+        test_label_dir = f'data/s2/{method}/' + f'labels{size}_test_{samples}/'
+        test_sample_dir = f'data/s2/{method}/' + f'samples{size}_test_{samples}/'
         
         train_set = FloodSampleDataset(train_sample_dir, train_label_dir, channels=config['channels'], typ="train")
         val_set = FloodSampleDataset(test_sample_dir, test_label_dir, channels=config['channels'], typ="test")
@@ -312,7 +348,7 @@ def run_experiment(config):
         val_set.transform = standardize
 
         try:
-            run, vf1 = train(train_set, val_set, model, device, config, save=f"model{len(glob('models/model*.pth'))}")
+            run, final_vf1 = train(train_set, val_set, model, device, config, save=f"model{len(glob('models/model*.pth'))}")
             
             # log predictions on validation set using wandb
             pred_table = sample_predictions(model, val_set, train_mean, train_std, config['channels'])
@@ -320,7 +356,7 @@ def run_experiment(config):
         finally:
             run.finish()
 
-        return vf1
+        return final_vf1
     else:
         raise Exception("Failed to login to wandb.")
 
@@ -328,7 +364,7 @@ def main(config):
     run_experiment(config)
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(prog='train_classifier', description='Trains classifier model from patches.')
+    parser = argparse.ArgumentParser(prog='train_classifier', description='Trains classifier model from patches. The classifier inputs a patch with n channels and outputs a binary patch with water pixels labeled 1.')
 
     def bool_indices(s):
         if len(s) == 9 and all(c in '01' for c in s):
@@ -358,6 +394,7 @@ if __name__ == '__main__':
     # model
     parser.add_argument('--name', default='unet', choices=MODEL_NAMES,
                         help=f"models: {', '.join(MODEL_NAMES)} (default: unet)")
+    parser.add_argument('--dropout', type=float, default=0.2, help=f"(default: 0.2)")
     
     # loss
     parser.add_argument('--loss', default='BCELoss', choices=LOSS_NAMES,

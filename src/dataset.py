@@ -7,16 +7,33 @@ from random import Random
 from torch.utils.data import Dataset
 from torchvision import transforms
 
+import ctypes
+import multiprocessing as mp
+
 class FloodSampleDataset(Dataset):
-    def __init__(self, sample_dir, labels_dir, channels=[True] * 9, typ="train", transform=None, random_flip=True, seed=41000):
+    def __init__(self, sample_dir, labels_dir, channels=[True] * 9, typ="train", transform=None, random_flip=True, seed=41000, size=64):
         self.sample_dir = sample_dir
         self.labels_dir = labels_dir
-        self.labels_path = glob(labels_dir + 'label_*.tif')
+        self.labels_path = glob(labels_dir + 'label_*.npy')
         self.channels = channels
         self.typ = typ
         self.transform = transform
         self.random_flip = random_flip
         self.seed = seed
+        self.size = size
+
+        # cached arrays
+        saved_samples_base = mp.Array(ctypes.c_float, len(self.labels_path)*9*size*size)
+        saved_samples_array = np.ctypeslib.as_array(saved_samples_base.get_obj())
+        saved_samples_array = saved_samples_array.reshape(len(self.labels_path), 9, size, size)
+
+        saved_label_base = mp.Array(ctypes.c_uint8, len(self.labels_path)*size*size)
+        saved_label_array = np.ctypeslib.as_array(saved_label_base.get_obj())
+        saved_label_array = saved_label_array.reshape(len(self.labels_path), 1, size, size)
+        
+        self.saved_samples = torch.from_numpy(saved_samples_array)
+        self.saved_labels = torch.from_numpy(saved_label_array)
+        self.use_cache = False
         
         if random_flip:
             self.random = Random(seed)
@@ -24,24 +41,34 @@ class FloodSampleDataset(Dataset):
     def __len__(self):
         return len(self.labels_path)
 
-    @staticmethod
-    def read_image(filename):
-        """Reads a TIF image into a N x H x W Tensor given N channels."""
-        with rasterio.open(filename) as src:
-            raster = src.read()
+    def set_use_cache(self, use_cache):
+        self.use_cache = use_cache
 
-        tensor = torch.from_numpy(raster)
-        return tensor
+    def read_sample(self, idx, filename):
+        """Reads a NPY array into a N x H x W Tensor given N channels."""
+        if not self.use_cache:
+            # filling cache
+            raster = np.load(filename)
+            self.saved_samples[idx] = torch.from_numpy(raster)
+        return self.saved_samples[idx]
+
+    def read_label(self, idx, filename):
+        """Reads a NPY array into a 1 x H x W Tensor."""
+        if not self.use_cache:
+            raster = np.load(filename)
+            self.saved_labels[idx] = torch.from_numpy(raster)
+        return self.saved_labels[idx]
         
     def __getitem__(self, idx):
         label_path = self.labels_path[idx]
-        p = re.compile('label_(.+\.tif)')
+        p = re.compile('label_(.+\.npy)')
         m = p.search(label_path)
 
         if m:
             sample_path = self.sample_dir + '/sample_' + m.group(1)
-            image = self.read_image(sample_path)[self.channels] # only select the channels we need
-            label = self.read_image(label_path) # ensure label tensor is of type torch.uint8
+            # read from memory if already loaded from disk
+            image = self.read_sample(idx, sample_path)[self.channels] # only select the channels we need
+            label = self.read_label(idx, label_path) # ensure label tensor is of type torch.uint8
         else:
             raise Exception("Improper label path name")
 

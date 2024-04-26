@@ -10,10 +10,10 @@ from random import Random
 import logging
 from utils import TRAIN_LABELS, TEST_LABELS
 
-def random_crop(label_names, size, num_samples, rng, dir_name, sample_dir, label_dir, typ="train"):
+def random_crop(label_names, size, num_samples, rng, method, sample_dir, label_dir, typ="train"):
     """Uniformly samples patches of size x size pixels across the image."""
-    pre_label_dir = f'data/{dir_name}/' + f'labels{size}_{typ}_{num_samples}/'
-    pre_sample_dir = f'data/{dir_name}/' + f'samples{size}_{typ}_{num_samples}/'
+    pre_label_dir = f'data/s2/{method}/' + f'labels{size}_{typ}_{num_samples}/'
+    pre_sample_dir = f'data/s2/{method}/' + f'samples{size}_{typ}_{num_samples}/'
     Path(pre_label_dir).mkdir(parents=True, exist_ok=True)
     Path(pre_sample_dir).mkdir(parents=True, exist_ok=True)
 
@@ -109,13 +109,9 @@ def random_crop(label_names, size, num_samples, rng, dir_name, sample_dir, label
             stacked_tile = np.vstack((tci_tile, b08_tile, ndwi_tile, dem_tile, 
                                       slope_tile, waterbody_tile, roads_tile), dtype=np.float32)
 
-            # save 64 x 64 tile to tif file
-            with rasterio.open(pre_sample_dir + f'sample_{tile_date}_{eid}_{x}_{y}.tif', 'w', driver='Gtiff', count=stacked_tile.shape[0], height=size, width=size, dtype=np.float32) as dst:
-                dst.write(stacked_tile)
-                    
-            with rasterio.open(pre_label_dir + f'label_{tile_date}_{eid}_{x}_{y}.tif', 'w', driver='Gtiff', count=1, height=size, width=size, dtype=np.uint8) as dst:
-                dst.write(label_tile, 1)
-                
+            # save 64 x 64 tile to npy file
+            np.save(pre_sample_dir + f'sample_{tile_date}_{eid}_{x}_{y}.npy', stacked_tile)
+            np.save(pre_label_dir + f'label_{tile_date}_{eid}_{x}_{y}.npy', label_tile)
             sampled += 1
 
 def main(size, samples, seed, method='random', sample_dir='../samples_200_5_4_35/', label_dir='../labels/'):
@@ -130,14 +126,13 @@ def main(size, samples, seed, method='random', sample_dir='../samples_200_5_4_35
     
     rng = Random(seed)
     if method == 'random':
-        dir_name = method
-        random_crop(TRAIN_LABELS, size, samples, rng, dir_name, sample_dir, label_dir, typ="train")
-        random_crop(TEST_LABELS, size, samples, rng, dir_name, sample_dir, label_dir, typ="test")
+        random_crop(TRAIN_LABELS, size, samples, rng, method, sample_dir, label_dir, typ="train")
+        random_crop(TEST_LABELS, size, samples, rng, method, sample_dir, label_dir, typ="test")
 
     logger.debug('Preprocessing complete.')
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(prog='preprocess', description='Preprocesses 4km x 4km PRISM tiles into smaller tiles via random crop method.')
+    parser = argparse.ArgumentParser(prog='preprocess_s2', description='Preprocesses 4km x 4km PRISM tiles into smaller tiles via random crop method.')
     parser.add_argument('-x', '--size', dest='size', type=int, default=64, help='pixel width of patch (default: 64)')
     parser.add_argument('-n', '--samples', dest='samples', type=int, default=1000, help='number of samples per image (default: 1000)')
     parser.add_argument('-s', '--seed', dest='seed', type=int, default=433002, help='random number generator seed (default: 433002)')

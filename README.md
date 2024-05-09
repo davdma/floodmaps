@@ -56,3 +56,10 @@ We then proceeded to add a SrGAN discriminator head to create a two part model. 
 
 **Figure 6:** Prediction results on a large flood tile. Using our initial model on unlabelled data allows us to automate our ground truthing process.
 
+## Quality Control
+
+With our tuned UNet and UNet++ models, we visualized their predictions on unseen flood tiles in QGIS with georeferencing. Overlayed with high resolution satellite images, we were able to identify patterns and see how the model performs in practice.
+
+![QGISUnetPrediction](https://github.com/davdma/floodmaps/assets/42689743/07f27d36-138f-4365-ab8f-b846c7204ce3)
+
+

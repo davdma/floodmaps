@@ -217,7 +217,6 @@ def train(train_set, val_set, model, device, config, save='discriminator'):
         final_vrec = avg_vrec
         torch.save(model.state_dict(), PATH)
 
-    # run.summary["Saved Model Recall Score"] = final_vrec
     return run, final_vmetrics
 
 def sample_predictions(model, val_set, mean, std, config, seed=24330):
@@ -355,14 +354,16 @@ def run_experiment(config):
         try:
             run, (final_vacc, final_vpre, final_vrec, final_vf1) = train(train_set, val_set, discriminator, device, config,
                         save=f"discriminator{len(glob('models/discriminator*.pth'))}")
+
+            # summary metrics
+            run.summary["final_acc"] = final_vacc
+            run.summary["final_pre"] = final_vpre
+            run.summary["final_rec"] = final_vrec
+            run.summary["final_f1"] = final_vf1
     
             # log predictions on validation set using wandb
             pred_table = sample_predictions(discriminator, val_set, train_mean, train_std, config)
-            run.log({"model_val_predictions": pred_table
-                    "final_acc": final_vacc, 
-                     "final_pre": final_vpre, 
-                     "final_rec": final_vrec, 
-                     "final_f1": final_vf1})
+            run.log({"model_val_predictions": pred_table})
         finally:
             run.finish()
 

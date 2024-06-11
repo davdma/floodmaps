@@ -65,7 +65,7 @@ def run_s1(job):
         'alpha': job.parameters['alpha'],
         'beta': 1 - job.parameters['alpha'],
         'optimizer': 'Adam',
-        'seed': 123230
+        'seed': 23930
     }
     final_vacc, final_vpre, final_vrec, final_vf1 = run_experiment_s1(config)
     return final_vf1
@@ -88,7 +88,7 @@ def tuning_s2(file_index, max_evals, experiment_name, early_stopping):
     method_kwargs = {"callbacks": [SearchEarlyStopping(patience=10)]} if early_stopping else dict()
 
     with Evaluator.create(run_s2, method="serial", method_kwargs=method_kwargs) as evaluator:
-        search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=1939)
+        search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=19239)
         
         if int(file_index) >= 1:
             # fit model from previous checkpointed search
@@ -125,7 +125,7 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping):
     method_kwargs = {"callbacks": [SearchEarlyStopping(patience=10)]} if early_stopping else dict()
 
     with Evaluator.create(run_s1, method="serial", method_kwargs=method_kwargs) as evaluator:
-        search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=1939)
+        search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=3739)
         
         if int(file_index) >= 1:
             # fit model from previous checkpointed search

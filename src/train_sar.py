@@ -259,7 +259,6 @@ def train(train_set, val_set, train_loss_fn, val_loss_fn, model, device, config,
         final_vmetrics = avg_vmetrics
         torch.save(model.state_dict(), PATH)
 
-    # run.summary["Saved Model F1 Score"] = final_vmetrics[3]
     return run, final_vmetrics
 
 def sample_predictions(model, val_set, loss_fn, mean, std, config, seed=24330):
@@ -444,15 +443,17 @@ def run_experiment_s1(config):
                 raise Exception('Loss function not found.')
             model_name = config['name']
             run, (final_vacc, final_vpre, final_vrec, final_vf1) = train(train_set, val_set, train_loss_fn, val_loss_fn, model, device, config, save=f"sar_{model_name}_model{len(glob(f'models/sar_{model_name}_model*.pth'))}")
+
+            # summary metrics
+            run.summary["final_acc"] = final_vacc
+            run.summary["final_pre"] = final_vpre
+            run.summary["final_rec"] = final_vrec
+            run.summary["final_f1"] = final_vf1
             
             # log predictions on validation set using wandb
             val_loss_fn.change_device('cpu')
             pred_table = sample_predictions(model, val_set, val_loss_fn, train_mean, train_std, config)
-            run.log({"model_val_predictions": pred_table, 
-                     "final_acc": final_vacc, 
-                     "final_pre": final_vpre, 
-                     "final_rec": final_vrec, 
-                     "final_f1": final_vf1})
+            run.log({"model_val_predictions": pred_table})
         finally:
             run.finish()
 

@@ -1,4 +1,4 @@
-name: floodmaps
+name: floodmaps-sampling
 channels:
   - pytorch
   - conda-forge

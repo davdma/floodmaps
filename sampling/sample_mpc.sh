@@ -13,8 +13,8 @@
 #SBATCH --time=24:00:00
 
 # Set up my environment
-cd /lcrc/project/hydrosm/dma
-source activate floodmaps
+cd /lcrc/project/hydrosm/dma/sampling
+source activate floodmaps-sampling
 export PYTHONPATH=/lcrc/project/hydrosm/dma/:$PYTHONPATH
 
 # Run sampling script

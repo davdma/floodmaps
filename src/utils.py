@@ -13,24 +13,50 @@ TRAIN_LABELS = ["label_20150919_20150917_496_811.tif", "label_20150919_20150917_
                 "label_20160314_20160311_452_845.tif", "label_20160314_20160311_453_845.tif",
                 "label_20170830_20170828_462_695.tif", "label_20170830_20170828_470_694.tif",
                 "label_20170830_20170828_463_695.tif", "label_20170830_20170828_484_696.tif",
-                "label_20190908_20190906_396_1099.tif"]
+                "label_20190908_20190906_396_1099.tif", "label_20170830_20170826_489_703.tif",
+                "label_20170830_20170826_488_695.tif", "label_20170830_20170826_490_704.tif",
+                "label_20170830_20170826_493_708.tif", "label_20180824_20180822_580_1050.tif",
+                "label_20180824_20180822_586_1051.tif", "label_20180918_20180917_389_1098.tif"]
 TEST_LABELS = ["label_20150919_20150917_496_812.tif", "label_20150919_20150917_497_811.tif", 
                "label_20151112_20151109_474_941.tif", "label_20151112_20151109_485_960.tif", 
                "label_20160314_20160311_452_843.tif", "label_20160314_20160311_452_846.tif",
-               "label_20170830_20170826_487_696.tif"] 
+               "label_20170830_20170826_487_696.tif", "label_20170830_20170826_493_695.tif"] 
 
 DAMP_DEFAULT = 1.0
 CU_DEFAULT = 0.523 # 0.447 is sqrt(1/number of looks)
 CMAX_DEFAULT = 1.73 # 1.183 is sqrt(1 + 2/number of looks)
 
 class ChannelIndexer:
+    """Abstract class for wrapping list of S2 dataset channels used for input.
+
+    The 10 available channels in order:
+
+    1. TCI R (0-255)
+    2. TCI G (0-255)
+    3. TCI B (0-255)
+    4. B08 Near Infrared
+    5. NDWI
+    6. DEM
+    7. Slope Y
+    8. Slope X
+    9. Waterbody
+    10. Roads
+
+    Parameters
+    ----------
+    channels : list[bool]
+        List of 10 booleans corresponding to the 10 input channels.
+    """
     def __init__(self, channels):
         self.channels = channels
-        self.names = names = ["images", "ndwi", "dem", "slope", "waterbody", "roads"]
+        self.names = names = ["images", "ndwi", "dem", "slope_y", "slope_x", "waterbody", "roads"]
         self.included = [all(channels[:3])] + channels[4:] # we ignore index 3 = b8 channel
 
     def has_image(self):
         return all(self.channels[:3])
+
+    def has_b08(self):
+        return self.channels[3]
 
     def has_ndwi(self):
         return self.channels[4]
@@ -38,17 +64,66 @@ class ChannelIndexer:
     def has_dem(self):
         return self.channels[5]
 
-    def has_slope(self):
+    def has_slope_y(self):
         return self.channels[6]
 
-    def has_waterbody(self):
+    def has_slope_x(self):
         return self.channels[7]
 
-    def has_roads(self):
+    def has_waterbody(self):
         return self.channels[8]
+
+    def has_roads(self):
+        return self.channels[9]
 
     def get_channel_names(self):
         return [name for name, is_included in zip(self.names, self.included) if is_included]
+
+class SARChannelIndexer:
+    """Abstract class for wrapping list of S1 dataset channels used for input.
+    
+    The 7 available channels in order:
+    
+    1. SAR VV
+    2. SAR VH
+    3. DEM
+    4. Slope Y
+    5. Slope X
+    6. Waterbody
+    7. Roads
+
+    Parameters
+    ----------
+    channels : list[bool]
+        List of 7 booleans corresponding to the 7 input channels.
+    """
+    def __init__(self, channels):
+        self.channels = channels
+        self.names = names = ["vv", "vh", "dem", "slope_y", "slope_x", "waterbody", "roads"]
+
+    def has_vv(self):
+        return self.channels[0]
+
+    def has_vh(self):
+        return self.channels[1]
+
+    def has_dem(self):
+        return self.channels[2]
+
+    def has_slope_y(self):
+        return self.channels[3]
+
+    def has_slope_x(self):
+        return self.channels[4]
+
+    def has_waterbody(self):
+        return self.channels[5]
+
+    def has_roads(self):
+        return self.channels[6]
+
+    def get_channel_names(self):
+        return self.names
 
 def wet_label(image, crop_size, num_pixel=100):
     """
@@ -70,14 +145,37 @@ def wet_label(image, crop_size, num_pixel=100):
     label = image.view(-1, crop_size**2).sum(1).gt(num_pixel).int()
     return label
 
-def trainMeanStd(batch_size=10, channels=[True] * 9, sample_dir='../samples_200_5_4_35/', label_dir='../labels/'):
-    """Calculate mean and std across channels of all training tiles used to generate patches."""
+def trainMeanStd(batch_size=10, channels=[True] * 10, sample_dir='../sampling/samples_200_5_4_35/', label_dir='../sampling/labels/'):
+    """Calculate mean and std across selected channels of all S2 training tiles used to sample patches.
+
+    Note: only use for S2 dataset.
+
+    Parameters
+    ----------
+    batch_size : int
+    channels : list[bool]
+        List of 10 booleans corresponding to the 10 input channels.
+    sample_dir : str
+        Directory containing raw S2 tiles for patch sampling.
+    label_dir : str
+        Directory containing raw S2 tile labels for patch sampling.
+
+    Returns
+    -------
+    mean : Tensor
+        Channel means.
+    std : Tensor
+        Channel stds.
+    """
     def channel_collate(batch):
         # concatenate channel wise for all samples in batch
         samples = torch.cat(batch, 1)
         return samples
 
-    train_mean_std = FloodSampleMeanStd(TRAIN_LABELS, channels=channels, sample_dir=sample_dir, label_dir=label_dir)
+    train_mean_std = FloodSampleMeanStd(TRAIN_LABELS, 
+                                        channels=channels, 
+                                        sample_dir=sample_dir, 
+                                        label_dir=label_dir)
     loader = DataLoader(train_mean_std,
                         batch_size=batch_size,
                         num_workers=0,
@@ -113,7 +211,15 @@ def trainMeanStd(batch_size=10, channels=[True] * 9, sample_dir='../samples_200_
     return mean, std
 
 class EarlyStopper:
-    """Early stops the training if validation loss doesn't improve after a given patience."""
+    """Stops the training early if validation loss doesn't improve after a given number of epochs.
+    
+    Parameters
+    ----------
+    patience : int
+        Number of epochs without improvement before training is stopped.
+    min_delta : float
+        Loss above lowest loss + min_delta counts towards patience.
+    """
     def __init__(self, patience=1, min_delta=0):
         self.patience = patience
         self.min_delta = min_delta
@@ -146,7 +252,16 @@ class EarlyStopper:
         return self.metric
 
 def dbToPower(x):
-    """Convert SAR raster from db scale to power scale."""
+    """Convert SAR raster from db scale to power scale.
+
+    Parameters
+    ----------
+    x : ndarray
+    
+    Returns
+    -------
+    x : ndarray
+    """
     # set all missing values back to zero
     missing_mask = x == -9999
     nonzero_mask = x != -9999
@@ -155,7 +270,16 @@ def dbToPower(x):
     return x
 
 def powerToDb(x):
-    """Convert SAR raster from power scale to db scale. Missing values set to -9999."""
+    """Convert SAR raster from power scale to db scale. Missing values set to -9999.
+    
+    Parameters
+    ----------
+    x : ndarray
+    
+    Returns
+    -------
+    x : ndarray
+    """
     nonzero_mask = x > 0
     missing_mask = x <= 0
     x[nonzero_mask] = 10 * np.log10(x[nonzero_mask], dtype=np.float64)
@@ -171,10 +295,27 @@ def enhanced_lee_filter(image, kernel_size=7, d=DAMP_DEFAULT, cu=CU_DEFAULT,
 
     Missing data will not be used in the calculation, and if the center pixel is missing, then the filter output
     will preserve the missing data.
+
+    Parameters
+    ----------
+    image : ndarray
+    kernel_size : int
+    d : float
+        Enhanced lee damping factor.
+    cu : float
+        Enhanced lee noise variation coefficient.
+    cmax : float
+        Enhanced lee maximum noise variation coefficient
+    
+    Returns
+    -------
+    filtered_image : ndarray
     """
 
     # missing data: if center pixel is missing then do nothing!
     # if neighborhood pixels all missing then do nothing!
+
+    # input should be 400 x 400!
 
     image = np.float64(image) # process image as float64 to avoid overflow
     image = dbToPower(image)

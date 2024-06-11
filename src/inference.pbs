@@ -1,0 +1,18 @@
+#!/bin/bash
+#PBS -A HYDROSM
+#PBS -l select=1:ncpus=128
+#PBS -l walltime=30:00:00
+#PBS -N inference
+#PBS -m bea
+#PBS -M davidma.inspire@outlook.com
+#PBS -o /lcrc/project/hydrosm/dma/src/inference.out
+#PBS -e /lcrc/project/hydrosm/dma/src/inference.err
+
+# Set up my environment
+source ~/.bashrc
+cd /lcrc/project/hydrosm/dma/src
+conda activate floodmaps-sampling
+export PYTHONPATH=/lcrc/project/hydrosm/dma/src:$PYTHONPATH
+
+# Run sampling script
+python inference.py --channels 1111111111 --name unet --dropout 0.2798958158499145 --replace --post --idir ../sampling/samples_200_6_4_10_sar/ --sdir ../sampling/samples_200_5_4_35/ --format tif

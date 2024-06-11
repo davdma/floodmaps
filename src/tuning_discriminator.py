@@ -2,45 +2,52 @@ from deephyper.problem import HpProblem
 from deephyper.search.hps import CBO
 from deephyper.evaluator import Evaluator
 from deephyper.evaluator.callback import SearchEarlyStopping
-from train_classifier import run_experiment
+from train_discriminator import run_experiment
 import pandas as pd
 import argparse
 import os
+import math
 
 def run(job):
     # channels = [bool(int(x)) for x in str(int(job.parameters['channels']))]
     config = {
-        'method': "random", 
+        'method': "random", # random
         'size': 64, 
         'samples': 1000, 
-        'channels': [bool(int(x)) for x in '111111111'],
-        'sample_dir': '../samples_200_5_4_35/',
-        'label_dir': '../labels/',
-        'project': 'FloodSamplesUNetTuning2', 
+        'name': "c1",
+        'channels': [bool(int(x)) for x in '1111111111'],
+        'sample_dir': '../sampling/samples_200_5_4_35/',
+        'label_dir': '../sampling/labels/',
+        'project': 'FloodSamplesDiscriminatorTuning2', 
+        'group': None,
+        'num_sample_predictions': 60,
         'epochs': 100, 
+        "num_pixels": 1,
         'batch_size': job.parameters['batch_size'], 
-        'learning_rate': job.parameters['learning_rate'], 
+        'num_workers': 0,
+        'learning_rate': job.parameters['learning_rate'] * math.sqrt(job.parameters['batch_size'] // 16), # job.parameters['learning_rate'], 
         'early_stopping': True, 
-        'name': 'unet',
-        'dropout': job.parameters['dropout'],
-        'loss': "TverskyLoss",
+        'patience': 10,
+        'loss': 'TverskyLoss', # job.parameters['loss'],
         'alpha': job.parameters['alpha'],
         'beta': 1 - job.parameters['alpha'],
         'optimizer': "Adam"
     }
-    final_vf1 = run_experiment(config).item()
-    return final_vf1
+    final_vacc, final_vpre, final_vrec, final_vf1 = run_experiment(config)
+    return final_vrec
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-i", "--run_index", type=int, default=0)
     parser.add_argument("-e", "--max_evals", type=int, default=1)
-    parser.add_argument("-n", "--experiment-name", type=str, default="unetclassifier")
+    parser.add_argument("-n", "--experiment_name", type=str, default="discriminator_recall")
+    parser.add_argument('--early_stopping', action='store_true', help='early stopping (default: False)')
 
     args = parser.parse_args()
     file_index = args.run_index
     max_evals = args.max_evals
     experiment_name = args.experiment_name
+    early_stopping = args.early_stopping
     search_dir = './tuning/' + experiment_name
 
     if not os.path.exists(search_dir):
@@ -49,18 +56,16 @@ if __name__ == "__main__":
     # define the variable you want to optimize
     # assume channels is 111111111
     problem = HpProblem()
-    # problem.add_hyperparameter([111111111, 111111100, 111110000], "channels") - all_old.csv
-    problem.add_hyperparameter((0.20, 0.40), "alpha")
-    problem.add_hyperparameter([16, 32, 64, 128, 256, 512, 1024], "batch_size")
-    problem.add_hyperparameter((0.00001, 0.01), "learning_rate") # real parameter
-    problem.add_hyperparameter((0.10, 0.30), "dropout")
+    problem.add_hyperparameter((0.1, 0.3), "alpha")
+    problem.add_hyperparameter([16, 32, 64, 128, 256, 512], "batch_size")
+    problem.add_hyperparameter((0.00001, 0.001), "learning_rate") # real parameter
     # problem.add_hyperparameter(["BCELoss", "BCEDiceLoss", "TverskyLoss"], "loss")
 
     # define the evaluator to distribute the computation
-    method_kwargs = {"callbacks": [SearchEarlyStopping(patience=10)]}
+    method_kwargs = {"callbacks": [SearchEarlyStopping(patience=10)]} if early_stopping else dict()
 
     with Evaluator.create(run, method="serial", method_kwargs=method_kwargs) as evaluator:
-        search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=10759)
+        search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=20295)
         
         if int(file_index) >= 1:
             # fit model from previous checkpointed search

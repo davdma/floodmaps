@@ -1,0 +1,23 @@
+name: floodmaps-training
+channels:
+  - pytorch
+  - nvidia
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=11.8
+  - torchmetrics
+  - numpy
+  - matplotlib
+  - scikit-learn=1.2.2
+  - jupyterlab
+  - pip
+  - pip:
+    - rasterio
+    - wandb
+    - torcheval
+    - Pillow

@@ -7,18 +7,19 @@ The AI-assisted flood detection project aims to build a computer vision workflow
 
 ![image](https://github.com/davdma/floodmaps/assets/42689743/0685799c-7ab7-4640-9ae4-759b797dd13f)
 
-To accomplish this task, we want to:
-1. Collect and process remote sensing data (visual, infrared, SAR) following extreme precipitation events for flood modeling.
-2. Produce accurate ground truth data by manually labeling images.
-3. Develop a water pixel detection algorithm to detect flood water extent after a flood event from satellite imagery.
+To accomplish this task, we will:
+1. **Data Collection:** Collect and process remote sensing data (visual, infrared, SAR) following extreme precipitation events for flood modeling.
+2. **Manual Annotation:** Produce accurate ground truth data by manually labeling images.
+3. **Initial Model:** Train an initial Sentinel-2 CNN model to make predictions on unlabelled images, and augment the dataset with new machine labels.
+4. **Final Model:** Develop a Sentinel-1 SAR CNN model from our manual + machine labels to detect flood water extent after a flood event.
 
 ## Data Pipeline
-To collect and process satellite imagery, I have created an automated data pipeline implemented in the Python script `sample_mpc.py`. The script is run on the Argonne Bebop computing cluster and submitted as a job through the bash script `sample_job.sh`.
+To collect and process satellite imagery, I have created an automated data pipeline implemented in the Python script `sample_mpc.py` for Sentinel-2 only and `sample_mpc_v2.py` for Sentinel-2 and Sentinel-1. The scripts are run on an Argonne computing cluster and submitted as a slurm or pbsnodes job.
 
 What it does:
 * Queries extreme precipitation events from 2016-present using the [PRISM dataset](https://prism.oregonstate.edu/).
-* Downloads Copernicus Sentinel-2 RGB and B8 near-infrared bands from [Microsoft Planetary Computer](https://planetarycomputer.microsoft.com/dataset/sentinel-2-l2a) as 4km x 4km geographic tiles with 10m resolution.
-* Adds supplementary information to each tile - roads, flowlines, waterbodies, slope, elevation (DEM) - as well as calculating the Normalized Difference Water Index (NDWI).
+* Downloads Copernicus Sentinel-2 RGB, B8 near-infrared and Sentinel-1 VV, VH bands, from [Microsoft Planetary Computer](https://planetarycomputer.microsoft.com/dataset/sentinel-2-l2a) as 4km x 4km geographic tiles with 10m resolution.
+* Adds supplementary information to each tile - roads, waterbodies, slope, elevation (DEM), as well as a Normalized Difference Water Index (NDWI) layer which is calculated from the green and B8 bands.
 
 ![image](https://github.com/davdma/floodmaps/assets/42689743/7c05362b-3bff-47ac-840d-5484ef0e0f03)
 **Figure 1:** Files collected and processed for each geographic tile.
@@ -28,12 +29,12 @@ However, by themselves these raw satellite images lack the labels we need for mo
 ![image](https://github.com/davdma/floodmaps/assets/42689743/91799a7d-6fa8-4c04-b3c5-9f1a565b8e59)
 **Figure 2:** Labeling flood images through GIMP software.
 
-I developed a workflow with step by step instructions that uses Google Open Street View and the supplementary rasters for producing accurate hand labeled water masks from the collected data.
+I developed a workflow with step by step instructions that uses QGIS, Google Open Street View and the supplementary rasters for producing accurate hand labeled water masks from the collected data.
 
 **Instructions can be viewed here:** [pdf](https://1drv.ms/b/s!Aq3V83mBle0dvhMcZAiCh04A59--?e=IdSswS)
 
 ## Model
-For our water pixel detection model, we want to test multiple different built-in architectures (UNet, AlexNet, ResNet etc.) to find what works and what doesn't. We first explore the UNet model:
+For our water pixel detection model, we wanted to test multiple built-in architectures that have been used in the flood modelling literature extensively, most commonly UNet and UNet++. We first explore the UNet model:
 
 ![u-net-architecture](https://github.com/davdma/floodmaps/assets/42689743/d91c7627-52f4-4849-b5dc-86c2cc975c0d)
 **Figure 3:** UNet architecture. For our model we also added dropouts after each max pooling layer to regularize the learning process and prevent overfitting.

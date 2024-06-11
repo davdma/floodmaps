@@ -7,7 +7,7 @@ The AI-assisted flood detection project aims to build a computer vision workflow
 
 ![image](https://github.com/davdma/floodmaps/assets/42689743/0685799c-7ab7-4640-9ae4-759b797dd13f)
 
-To accomplish this task, we will:
+We aim to accomplish this task through the following process:
 1. **Data Collection:** Collect and process remote sensing data (visual, infrared, SAR) following extreme precipitation events for flood modeling.
 2. **Manual Annotation:** Produce accurate ground truth data by manually labeling images.
 3. **Initial Model:** Train an initial Sentinel-2 CNN model to make predictions on unlabelled images, and augment the dataset with new machine labels.

@@ -10,7 +10,7 @@ The AI-assisted flood detection project aims to build a computer vision workflow
 We aim to accomplish this task through the following process:
 1. **Data Collection:** Collect and process remote sensing data (visual, infrared, SAR) following extreme precipitation events for flood modeling.
 2. **Manual Annotation:** Produce accurate ground truth data by manually labeling images.
-3. **Initial Model:** Train an initial Sentinel-2 CNN model to make predictions on unlabelled images, and augment the dataset with new machine labels.
+3. **Initial Model:** Train an initial Sentinel-2 CNN model to make quality predictions on unlabelled images, and augment the dataset with new machine labels.
 4. **Final Model:** Develop a Sentinel-1 SAR CNN model from our manual + machine labels to detect flood water extent after a flood event.
 
 ## Data Pipeline

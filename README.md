@@ -21,7 +21,7 @@ What it does:
 * Downloads Copernicus Sentinel-2 RGB, B8 near-infrared and Sentinel-1 VV, VH bands from [Microsoft Planetary Computer](https://planetarycomputer.microsoft.com/dataset/sentinel-2-l2a) as 4km x 4km geographic tiles with 10m resolution.
 * Adds supplementary information to each tile - roads, waterbodies, slope, elevation (DEM), as well as a Normalized Difference Water Index (NDWI) layer which is calculated from the green and B8 bands.
 
-![image](https://github.com/davdma/floodmaps/assets/42689743/7c05362b-3bff-47ac-840d-5484ef0e0f03)
+![image]([https://github.com/davdma/floodmaps/assets/42689743/7c05362b-3bff-47ac-840d-5484ef0e0f03](https://github.com/davdma/floodmaps/assets/42689743/a093e010-9299-4a52-aaeb-ef4e971ddaac))
 **Figure 1:** Files collected and processed for each geographic tile.
 
 However, by themselves these raw satellite images lack the labels we need for modeling. So we must label water pixels ourselves.

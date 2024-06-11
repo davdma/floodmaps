@@ -14,7 +14,7 @@ We aim to accomplish this task through the following process:
 4. **Final Model:** Develop a Sentinel-1 SAR CNN model from our manual + machine labels to detect flood water extent after a flood event.
 
 ## Data Pipeline
-To collect and process satellite imagery, I have created an automated data pipeline implemented in the Python script `sample_mpc.py` for Sentinel-2 only and `sample_mpc_v2.py` for Sentinel-2 and Sentinel-1. The scripts are run on an Argonne computing cluster and submitted as a slurm or pbsnodes job.
+To collect and process satellite imagery, I have created an automated data pipeline implemented in the Python script `sample_mpc.py` for Sentinel-2 only and `sample_mpc_v2.py` for Sentinel-2 and Sentinel-1. The scripts are run on an Argonne computing cluster and submitted as slurm or pbsnodes jobs.
 
 What it does:
 * Queries extreme precipitation events from 2016-present using the [PRISM dataset](https://prism.oregonstate.edu/).

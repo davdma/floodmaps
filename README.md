@@ -71,6 +71,11 @@ Using our best initial S2 model, we made predictions on unlabelled data to build
 ![sarworkflow](https://github.com/davdma/floodmaps/assets/42689743/2fdf3016-cc61-4e41-8118-bc3bf460ffa7)
 **Figure 8:** The process for developing the final SAR flood prediction model.
 
+## Results
+
+![sarunet++model](https://github.com/davdma/floodmaps/assets/42689743/6e279d68-4597-4755-914c-532ca61d7206)
+
+
 
 
 

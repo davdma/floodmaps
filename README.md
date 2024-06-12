@@ -62,12 +62,14 @@ We then proceeded to add a discriminator head to our original classifier to crea
 With our tuned UNet and UNet++ models, we visualized their predictions on unseen flood tiles in QGIS with georeferencing. Overlaid on high resolution satellite images, we were able to identify patterns and see how the model performs in practice. In the example below, we see that the model is a very powerful predictor of open water, and has a strong ability to distinguish fine outlines of water bodies. We also see some limitations of our model: due to the 10m resolution of the input channels, water bodies that are <10m have a higher likelihood of going undetected. Another limitation of note is cloud cover. In practice a percentage of the input satellite images will be obscured by clouds, making it hard for the model to see the waterbodies, and in the example below the model performs the worst in areas obscured by cloud cover (top right corner of waterbody - these clouds are not visible in the high res overlaid Google satellite image). 
 
 ![QGISUnetPrediction](https://github.com/davdma/floodmaps/assets/42689743/07f27d36-138f-4365-ab8f-b846c7204ce3)
+**Figure 7:** Prediction results overlaid on high resolution satellite imagery in QGIS.
 
 ## SAR S1 Model
 
-With a powerful
+Using our best initial S2 model, we made predictions on unlabelled data to build a much larger dataset of 400+ flood event tiles across different geographic regions of the United States (including areas impacted by Hurricane Harvey), and then sampled a total of 414,000 64 x 64 patches. These event tiles were deliberately chosen to have coincident S2 and S1 SAR imagery within 12 hours of each other post flood event, so that our machine labels would most accurately reflect the flood water present in the SAR data. With the augmented dataset, we trained and tested different model architectures, and explored the potential advantage of an autodespeckler attachment to a regular segmentation model. The autodespeckler is an autoencoder (CNN, denoising autoencoder, or variational autoencoder) that takes as input the SAR channels of each patch, and extracts the seminal features from the SAR data for the classifier to use, with the aim of reducing the impact of SAR speckle on prediction quality.
 
 ![sarworkflow](https://github.com/davdma/floodmaps/assets/42689743/2fdf3016-cc61-4e41-8118-bc3bf460ffa7)
+**Figure 8:** The process for developing the final SAR flood prediction model.
 
 
 

@@ -73,6 +73,8 @@ Using our best initial S2 model, we made predictions on unlabelled data to build
 
 ## Results
 
+**Our best standalone classifier was a UNet++ SAR model that achieved a F1 score of 92.79, an accuracy of 97.14, precision of 93.82 and recall of 91.78.** The autodespeckler tuning is still TBD. Benchmarking results will also be posted soon.
+
 ![sarunet++model](https://github.com/davdma/floodmaps/assets/42689743/6e279d68-4597-4755-914c-532ca61d7206)
 
 

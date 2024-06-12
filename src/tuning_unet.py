@@ -44,13 +44,13 @@ def run_s1(job):
         'window': 64,
         'samples': 1000, 
         'method': 'minibatch',
-        'filter': 'lee',
-        'channels': [bool(int(x)) for x in '1111111'], # exclude DEM tuning for now
-        'project': 'SARUNetLeeTuning',
-        'group': None,
+        'filter': 'raw',
+        'channels': [bool(int(x)) for x in '1111111'],
+        'project': 'SARUNetDespecklerTuning',
+        'group': 'CNN_autodespeckler',
         'num_sample_predictions': 60,
         'mode': 'val',
-        'epochs': 160, 
+        'epochs': 250, 
         'batch_size': 2048, 
         'subset': 1.0,
         'learning_rate': job.parameters['learning_rate'], 
@@ -58,14 +58,16 @@ def run_s1(job):
         'patience': 10,
         'name': 'unet',
         'dropout': job.parameters['dropout'],
-        'autodespeckler': None, # if not None need to specify additional autodespeckler args
         'deep_supervision': False,
+        'autodespeckler': 'CNN', # if not None need to specify additional autodespeckler args
+        'latent_dim': job.parameters['latent_dim'], # optional
+        'AD_dropout': job.parameters['AD_dropout'], # optional
         'num_workers': 10,
         'loss': job.parameters['loss'],
         'alpha': job.parameters['alpha'],
         'beta': 1 - job.parameters['alpha'],
         'optimizer': "Adam",
-        'seed': 10230
+        'seed': 13200
     }
     final_vacc, final_vpre, final_vrec, final_vf1 = run_experiment_s1(config)
     return final_vf1
@@ -121,6 +123,10 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping):
     problem.add_hyperparameter((0.00001, 0.01), "learning_rate") # real parameter
     problem.add_hyperparameter((0.10, 0.30), "dropout")
     problem.add_hyperparameter(["BCELoss", "BCEDiceLoss", "TverskyLoss"], "loss")
+
+    # optional autodespeckler CNN first
+    problem.add_hyperparameter([50, 100, 150, 200], "latent_dim")
+    problem.add_hyperparameter((0.05, 0.30), "AD_dropout")
 
     # define the evaluator to distribute the computation
     method_kwargs = {"callbacks": [SearchEarlyStopping(patience=10)]} if early_stopping else dict()

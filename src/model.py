@@ -68,9 +68,8 @@ class SARClassifier(nn.Module):
         if config['autodespeckler'] == "CNN":
             self.autodespeckler = ConvAutoencoder(latent_dim=config['latent_dim'], dropout=config['AD_dropout'])
         elif config['autodespeckler'] == "DAE":
-            self.autodespeckler = DenoiseAutoencoder(latent_dim=config['latent_dim'], dropout=config['AD_dropout'], 
-                                                     std=config['normal_noise_std'], coeff=config['masking_noise_coeff'],
-                                                     noise_type=config['noise_type'])
+            self.autodespeckler = DenoiseAutoencoder(latent_dim=config['latent_dim'], dropout=config['AD_dropout'],
+                                                     coeff=config['noise_coeff'], noise_type=config['noise_type'])
         elif config['autodespeckler'] == "VAE":
             self.autodespeckler = VarAutoencoder(latent_dim=config['latent_dim'])
         else:

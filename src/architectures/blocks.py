@@ -124,7 +124,7 @@ class MaskingNoiseLayer(nn.Module):
 
     def forward(self, x):
         if self.training:
-            m = self.coeff * torch.ones(x.shape, device=x.device)
+            m = (1 - self.coeff) * torch.ones(x.shape, device=x.device)
             return x * torch.bernoulli(m)
         else:
             return x

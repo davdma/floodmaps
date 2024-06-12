@@ -66,14 +66,14 @@ class ConvAutoencoder(nn.Module):
 
 # DAE (Denoising AutoEncoder)
 class DenoiseAutoencoder(nn.Module):
-    def __init__(self, in_channels=2, out_channels=2, latent_dim=200, dropout=0.1, std=0.1, coeff=0.8, noise_type='normal'):
+    def __init__(self, in_channels=2, out_channels=2, latent_dim=200, dropout=0.1, coeff=0.1, noise_type='normal'):
         super().__init__()
         if noise_type == 'normal':
-            self.noise_layer = GaussianNoiseLayer(mean=0.0, std=std)
+            self.noise_layer = GaussianNoiseLayer(mean=0.0, std=coeff)
         elif noise_type == 'masking':
             self.noise_layer = MaskingNoiseLayer(coeff=coeff)
         elif noise_type == 'log_gamma':
-            self.noise_layer = LogGammaNoiseLayer()
+            self.noise_layer = LogGammaNoiseLayer(coeff=coeff)
         else:
             raise Exception('Noise not correctly specified')
             
@@ -87,7 +87,7 @@ class DenoiseAutoencoder(nn.Module):
 # VAE (Variational AutoEncoder)
 # source: https://github.com/AntixK/PyTorch-VAE/blob/master/models/vanilla_vae.py
 class VarAutoencoder(nn.Module):
-    def __init__(self, in_channels=2, latent_dim=200, hidden_dims=None):
+    def __init__(self, in_channels=2, out_channels=2, latent_dim=200, hidden_dims=None):
         super().__init__()
         self.latent_dim = latent_dim
 
@@ -142,7 +142,7 @@ class VarAutoencoder(nn.Module):
                                                output_padding=1),
                             nn.BatchNorm2d(hidden_dims[-1]),
                             nn.LeakyReLU(),
-                            nn.Conv2d(hidden_dims[-1], out_channels= 3,
+                            nn.Conv2d(hidden_dims[-1], out_channels=out_channels, # originally 3?
                                       kernel_size= 3, padding= 1),
                             nn.Tanh())
 

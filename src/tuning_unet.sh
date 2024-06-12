@@ -17,4 +17,4 @@ cd /lcrc/project/hydrosm/dma/src
 conda activate floodmaps-tuning
 export PYTHONPATH=/lcrc/project/hydrosm/dma/src:$PYTHONPATH
 
-srun python tuning_unet.py --dataset s1 -i 1 -e 20 --experiment_name leeinitall --early_stopping
+srun python tuning_unet.py --dataset s1 -i 0 -e 5 --experiment_name sarunetcnn

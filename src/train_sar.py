@@ -26,7 +26,7 @@ import pickle
 
 MODEL_NAMES = ['unet', 'unet++']
 AUTODESPECKLER_NAMES = ['CNN', 'DAE', 'VAE']
-NOISE_NAMES = ['normal', 'masking']
+NOISE_NAMES = ['normal', 'masking', 'log_gamma']
 LOSS_NAMES = ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
 
 # get our optimizer and metrics
@@ -513,6 +513,7 @@ if __name__ == '__main__':
                         help=f"models: {', '.join(AUTODESPECKLER_NAMES)} (default: None)")
     parser.add_argument('--noise_type', default=None, choices=NOISE_NAMES,
                         help=f"models: {', '.join(NOISE_NAMES)} (default: None)")
+    parser.add_argument('--noise_coeff', type=float, default=0.1,  help=f"noise coefficient (default: 0.1)")
     parser.add_argument('--latent_dim', default=200, type=int, help='latent dimensions (default: 200)')
     parser.add_argument('--AD_dropout', type=float, default=0.1, help=f"(default: 0.1)")
 

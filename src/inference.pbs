@@ -5,8 +5,8 @@
 #PBS -N inference
 #PBS -m bea
 #PBS -M davidma.inspire@outlook.com
-#PBS -o /lcrc/project/hydrosm/dma/src/inference.out
-#PBS -e /lcrc/project/hydrosm/dma/src/inference.err
+#PBS -o /lcrc/project/hydrosm/dma/src/outputs/inference.out
+#PBS -e /lcrc/project/hydrosm/dma/src/outputs/inference.err
 
 # Set up my environment
 source ~/.bashrc

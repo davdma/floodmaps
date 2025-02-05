@@ -4,6 +4,7 @@ import rasterio
 import numpy as np
 from dataset import FloodSampleMeanStd
 from math import exp
+import json
 
 TRAIN_LABELS = ["label_20150919_20150917_496_811.tif", "label_20150919_20150917_497_812.tif",
                 "label_20151112_20151109_472_940.tif", "label_20151112_20151109_473_939.tif", 
@@ -17,14 +18,48 @@ TRAIN_LABELS = ["label_20150919_20150917_496_811.tif", "label_20150919_20150917_
                 "label_20170830_20170826_488_695.tif", "label_20170830_20170826_490_704.tif",
                 "label_20170830_20170826_493_708.tif", "label_20180824_20180822_580_1050.tif",
                 "label_20180824_20180822_586_1051.tif", "label_20180918_20180917_389_1098.tif"]
-TEST_LABELS = ["label_20150919_20150917_496_812.tif", "label_20150919_20150917_497_811.tif", 
+VAL_LABELS = ["label_20150919_20150917_496_812.tif", "label_20150919_20150917_497_811.tif", 
                "label_20151112_20151109_474_941.tif", "label_20151112_20151109_485_960.tif", 
                "label_20160314_20160311_452_843.tif", "label_20160314_20160311_452_846.tif",
                "label_20170830_20170826_487_696.tif", "label_20170830_20170826_493_695.tif"] 
+TEST_LABELS = ["label_20170830_20170826_487_695.tif",
+               "label_20170830_20170829_497_709.tif",
+               "label_20180818_20180815_304_703.tif",
+               "label_20190908_20190906_375_1133.tif",
+               "label_20170830_20170828_482_695.tif"]
 
 DAMP_DEFAULT = 1.0
 CU_DEFAULT = 0.523 # 0.447 is sqrt(1/number of looks)
 CMAX_DEFAULT = 1.73 # 1.183 is sqrt(1 + 2/number of looks)
+
+class SaveMetrics:
+    """Object interface to handle storing and retrieving shift invariant and non shift invariant metrics."""
+    def __init__(self, shift_invariant=True):
+        self.shift_invariant = shift_invariant
+        self.val_metrics = None
+        self.test_metrics = None
+
+    def save_metrics(self, vmetrics, typ='val'):
+        if typ == 'val':
+            self.val_metrics = vmetrics
+        elif typ == 'test':
+            self.test_metrics = vmetrics
+        else:
+            raise Exception('Invalid argument typ: must be val, test.')
+
+    def get_metrics(self, typ='val'):
+        if typ == 'val':
+            return self.val_metrics
+        elif typ == 'test':
+            return self.test_metrics
+        else:
+            raise Exception('Invalid argument typ: must be val, test.')
+        
+    def get_val_metrics(self):
+        return self.val_metrics
+        
+    def get_test_metrics(self):
+        return self.test_metrics
 
 class ChannelIndexer:
     """Abstract class for wrapping list of S2 dataset channels used for input.
@@ -124,6 +159,60 @@ class SARChannelIndexer:
 
     def get_channel_names(self):
         return self.names
+
+def get_gradient_norm(model):
+    """Calculate global gradient norm during training."""
+    total_norm = 0.0
+    for p in model.parameters():
+        if p.grad is not None:
+            param_norm = p.grad.data.norm(2)  # L2 norm of gradients
+            total_norm += param_norm.item() ** 2
+    return total_norm ** 0.5
+
+def get_model_params(model):
+    """Function to calculate and log parameter sizes."""
+    total_params = sum(p.numel() for p in model.parameters())  # Total parameters
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)  # Trainable parameters
+    param_size_in_mb = total_params * 4 / (1024 ** 2)  # Assuming 32-bit (4 bytes) precision
+
+    return total_params, trainable_params, param_size_in_mb
+
+def print_model_params_and_grads(model, file_name='ad_param_err.json', save_to_file=True):
+    """For checking model gradients are within reasonable bounds."""
+    # Ensure the model is an instance of nn.Module
+    if not isinstance(model, torch.nn.Module):
+        raise TypeError("The input model must be an instance of torch.nn.Module")
+    stats_dict = {}
+    print(f"{'Parameter':>30} | {'Min':^10} | {'Max':^10} | {'Mean':^10} | {'Std':^10} | {'Grad Min':^10} | {'Grad Max':^10} | {'Grad Mean':^10} | {'Grad Std':^10}")
+    print("=" * 130)  # Table separator
+    
+    # Iterate through the model's named parameters
+    for name, param in model.named_parameters():
+        param_data = param.data
+        param_grad = param.grad
+        stats = {
+            'min': param_data.min().item(),
+            'max': param_data.max().item(),
+            'mean': param_data.abs().mean().item(),
+            'std': param_data.std().item(),
+            'grad_min': param_grad.min().item() if param_grad is not None else None,
+            'grad_max': param_grad.max().item() if param_grad is not None else None,
+            'grad_mean': param_grad.abs().mean().item() if param_grad is not None else None,
+            'grad_std': param_grad.std().item() if param_grad is not None else None,
+        }
+        stats_dict[name] = stats
+        print(f"{name:>30} | {'{0:^10.2e}'.format(stats['min'])} | {'{0:^10.2e}'.format(stats['max'])} | {'{0:^10.2e}'.format(stats['mean'])} | {'{0:^10.2e}'.format(stats['std'])} | "
+      f"{'{0:^10.2e}'.format(stats['grad_min']) if stats['grad_min'] is not None else 'None':^10} | "
+      f"{'{0:^10.2e}'.format(stats['grad_max']) if stats['grad_max'] is not None else 'None':^10} | "
+      f"{'{0:^10.2e}'.format(stats['grad_mean']) if stats['grad_mean'] is not None else 'None':^10} | "
+      f"{'{0:^10.2e}'.format(stats['grad_std']) if stats['grad_std'] is not None else 'None':^10}")
+
+    # save stats_dict to pkl
+    if save_to_file:
+        with open(file_name, 'w') as json_file:
+            json.dump(stats_dict, json_file, indent=4)
+        
+    return stats_dict
 
 def wet_label(image, crop_size, num_pixel=100):
     """

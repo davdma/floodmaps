@@ -5,6 +5,122 @@ import torch.nn.functional as F
 ALPHA = 0.3
 BETA = 0.7
 
+class LossConfig():
+    def __init__(self, config, device='cpu'):
+        """Sets up train, validation, test losses."""
+        self.config = config
+        self.uses_autodespeckler = config['autodespeckler'] is not None
+
+        # final logit output losses
+        train_loss_fn, val_loss_fn, test_loss_fn = self.get_losses(config, device)
+        self.train_loss_fn = train_loss_fn
+        self.val_loss_fn = val_loss_fn
+        self.test_loss_fn = test_loss_fn
+
+        # autodespeckler reconstruction losses
+        self.autodespeckler_loss_fn = nn.MSELoss if self.uses_autodespeckler else None
+        
+    def compute_loss(self, out_dict, targets, typ='train'):
+        """For autodespeckler architecture, will add reconstruction loss from output of despeckler to the final loss."""
+        # autodespeckler loss component - calculate reconstruction loss with respect to sar input
+        if self.uses_autodespeckler:
+            recons_loss = nn.functional.mse_loss(out_dict['despeckler_output'], out_dict['despeckler_input'])
+            if self.config['autodespeckler'] == 'VAE':
+                # beta hyperparameter
+                log_var = out_dict['log_var']
+                mu = out_dict['mu']
+                kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
+                recons_loss = recons_loss + self.config['VAE_beta'] * self.config['kld_weight'] * kld_loss
+        else:
+            recons_loss = None
+
+        # final output loss component
+        loss_dict = {}
+        if typ == 'train':
+            main_loss, y_shifted = self.train_loss_fn(out_dict['final_output'], targets)
+        elif typ == 'val':
+            main_loss, y_shifted = self.val_loss_fn(out_dict['final_output'], targets)
+        elif typ == 'test':
+            main_loss, y_shifted = self.test_loss_fn(out_dict['final_output'], targets)
+        else:
+            raise Exception('Invalid argument: typ not equal to one of train, val, test.')
+
+        total_loss = recons_loss + main_loss if recons_loss is not None else main_loss
+        loss_dict = {"total_loss": total_loss, 
+                     "recons_loss": recons_loss, 
+                     "shifted_label": y_shifted}
+        return loss_dict
+
+    def get_label_alignment(self, inputs, targets):
+        _, y_shifted = self.val_loss_fn(inputs, targets)
+        return y_shifted
+
+    def get_losses(self, config, device):
+        """Chooses the loss used for training and validation loop, and also determining whether they are shift invariant."""
+        if config['loss'] == 'BCELoss':
+            if config['shift_invariant']:
+                train_loss_fn = TrainShiftInvariantLoss(InvariantBCELoss(), device=device)
+                val_loss_fn = ShiftInvariantLoss(InvariantBCELoss(), device=device)
+                test_loss_fn = val_loss_fn
+            else:
+                # non shift wrapper
+                train_loss_fn = NonShiftInvariantLoss(nn.BCEWithLogitsLoss(), 
+                                                    size=config['size'],
+                                                    window=config['window'],
+                                                    device=device)
+                val_loss_fn = train_loss_fn
+                test_loss_fn = train_loss_fn
+        elif config['loss'] == 'BCEDiceLoss':
+            if config['shift_invariant']:
+                train_loss_fn = TrainShiftInvariantLoss(InvariantBCEDiceLoss(), device=device)
+                val_loss_fn = ShiftInvariantLoss(InvariantBCEDiceLoss(), device=device)
+                test_loss_fn = val_loss_fn
+            else:
+                train_loss_fn = NonShiftInvariantLoss(BCEDiceLoss(), 
+                                                    size=config['size'],
+                                                    window=config['window'],
+                                                    device=device)
+                val_loss_fn = train_loss_fn
+                test_loss_fn = train_loss_fn
+        elif config['loss'] == 'TverskyLoss':
+            if config['shift_invariant']:
+                train_loss_fn = TrainShiftInvariantLoss(InvariantTverskyLoss(alpha=config['alpha'], beta=config['beta']), device=device)
+                val_loss_fn = ShiftInvariantLoss(InvariantTverskyLoss(alpha=config['alpha'], beta=config['beta']), device=device)
+                test_loss_fn = val_loss_fn
+            else:
+                train_loss_fn = NonShiftInvariantLoss(TverskyLoss(alpha=config['alpha'], beta=config['beta']), 
+                                                    size=config['size'],
+                                                    window=config['window'],
+                                                    device=device)
+                val_loss_fn = train_loss_fn
+                test_loss_fn = train_loss_fn
+        else:
+            raise Exception('Loss function not found.')
+    
+        return train_loss_fn, val_loss_fn, test_loss_fn
+
+    def contains_reconstruction_loss(self):
+        return self.uses_autodespeckler
+
+# loss for AD
+class PseudoHuberLoss(nn.Module):
+    """Defined in the paper: https://arxiv.org/pdf/2310.14189."""
+    def __init__(self, c=0.03):
+        super().__init__()
+        self.register_buffer('c', torch.tensor(c))
+
+    def forward(self, inputs, targets):
+        return torch.sqrt(nn.functional.mse_loss(inputs, targets) + self.c ** 2) - self.c
+
+# loss for AD
+class LogCoshLoss(nn.Module):
+    """Hypothetically can improve VAE performance: https://openreview.net/forum?id=rkglvsC9Ym."""
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, inputs, targets):
+        return torch.mean(torch.log(torch.cosh(inputs - targets + 1e-12)))  # Small constant to prevent log(0)
+
 class BCEDiceLoss(nn.Module):
     def __init__(self, weight=None, size_average=True):
         super().__init__()
@@ -220,6 +336,33 @@ class TrainShiftInvariantLoss(nn.Module):
         adjusted_labels = candidate_shifts[min_ij, torch.arange(len(min_ij), device=self.device)]
         total_loss = self.loss(inputs, adjusted_labels).sum()
         return total_loss, adjusted_labels
+
+    def change_device(self, device):
+        self.loss = self.loss.to(device)
+        self.device = device
+
+class NonShiftInvariantLoss(nn.Module):
+    """Wrapper for regular non shifting loss. Used when target label is larger than predicted label.
+    
+    Parameters
+    ----------
+    loss : obj
+        Instance of BCELoss, BCEDiceLoss, TverskyLoss
+    device : str
+    """
+    def __init__(self, loss, size=68, window=64, device='cpu'):
+        super().__init__()
+        self.loss = loss.to(device)
+        self.device = device
+        center_1 = (size - window) // 2 
+        self.c = (center_1, center_1 + window)
+
+    def forward(self, inputs, targets):
+        """Calculates loss using the current alignment."""
+        # crop central window
+        unadjusted_labels = targets[:, :, self.c[0]:self.c[1], self.c[0]:self.c[1]]
+        loss = self.loss(inputs, unadjusted_labels)
+        return loss, unadjusted_labels
 
     def change_device(self, device):
         self.loss = self.loss.to(device)

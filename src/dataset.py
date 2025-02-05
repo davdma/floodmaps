@@ -10,6 +10,82 @@ from torchvision import transforms
 import ctypes
 import multiprocessing as mp
 
+class DespecklerSARDataset(Dataset):
+    """An abstract class representing the SAR autodespeckler dataset. The entire dataset is
+    lazily loaded into CPU memory at initialization and then retrieved by indexing. Subsetting
+    channels is done during retrieval.
+
+    The class does not have knowledge of the dimensions of the patches of the dataset which are
+    set during preprocessing. The class assumes the data has 4 channels being:
+    
+    1. SAR VV
+    2. SAR VH
+    3. SAR VV (Enhanced Lee)
+    4. SAR VH (Enhanced Lee)
+    
+    The 5th channel though unused for training is DEM, which can be toggled for visualization purposes.
+
+    Parameters
+    ----------
+    sample_dir : str
+        Path to directory containing dataset (in npy file).
+    typ : str
+        The subset of the dataset to load: train, val, test.
+    transform : obj
+        PyTorch transform.
+    """
+    def __init__(self, sample_dir, typ="train", random_flip=False, transform=None, include_dem=False, seed=3200):
+        self.sample_dir = sample_dir
+        self.typ = typ
+        self.random_flip = random_flip
+        self.transform = transform
+        self.include_dem = include_dem
+        self.seed = seed
+
+        # first load data in
+        self.dataset = np.load(sample_dir + f"{typ}_patches.npy")
+        self.sar = self.dataset[:, :4, :, :]
+        self.dem = self.dataset[:, 4:, :, :]
+
+        if random_flip:
+            self.random = Random(seed)
+
+    def __len__(self):
+        return self.dataset.shape[0]
+
+    def __getitem__(self, idx):
+        patch = self.sar[idx]
+        sar_image = torch.from_numpy(patch)
+
+        if self.transform:
+            # for standardization only standardize the non-binary channels!
+            sar_image = self.transform(sar_image)
+
+        if self.include_dem:
+            # add on dem if needed for visual purposes
+            dem = torch.from_numpy(self.dem[idx])
+            sar_image = torch.cat((sar_image, dem), dim=0)
+
+        # add random flips and rotations? Could help prevent learning constant shift...
+        if self.random_flip and self.typ == "train":
+            sar_image = self.hv_random_flip(sar_image)
+            
+        return sar_image
+
+    def hv_random_flip(self, x):
+        # Random horizontal flipping
+        if self.random.random() > 0.5:
+            x = torch.flip(x, [2])
+            
+        # Random vertical flipping
+        if self.random.random() > 0.5:
+            x = torch.flip(x, [1])
+            
+        return x
+
+    def set_include_dem(self, val):
+        self.include_dem = val
+
 class FloodSampleSARDataset(Dataset):
     """An abstract class representing the SAR flood labelling dataset. The entire dataset is
     lazily loaded into CPU memory at initialization and then retrieved by indexing. Subsetting
@@ -27,7 +103,8 @@ class FloodSampleSARDataset(Dataset):
     6. Waterbody
     7. Roads
 
-    And the last channel being the channel with corresponding label.
+    And the last channel is the label. 
+    Note: Currently adding RGB TCI reference channels to dataset.
 
     Parameters
     ----------
@@ -40,14 +117,19 @@ class FloodSampleSARDataset(Dataset):
     transform : obj
         PyTorch transform.
     """
-    def __init__(self, sample_dir, channels=[True] * 7, typ="train", transform=None):
+    def __init__(self, sample_dir, channels=[True] * 7, typ="train", random_flip=False, transform=None, seed=3200):
         self.sample_dir = sample_dir
-        self.channels = channels + [True] # always keep label channel
+        self.channels = channels + [True] # always keep label
         self.typ = typ
+        self.random_flip = random_flip
         self.transform = transform
+        self.seed = seed
 
         # first load data in
         self.dataset = np.load(sample_dir + f"{typ}_patches.npy")
+
+        if random_flip:
+            self.random = Random(seed)
 
     def __len__(self):
         return self.dataset.shape[0]
@@ -60,8 +142,25 @@ class FloodSampleSARDataset(Dataset):
         if self.transform:
             # for standardization only standardize the non-binary channels!
             image = self.transform(image)
+
+        # add random flips and rotations? Could help prevent learning constant shift...
+        if self.random_flip and self.typ == "train":
+            image, label = self.hv_random_flip(image, label)
             
         return image, label
+
+    def hv_random_flip(self, x, y):
+        # Random horizontal flipping
+        if self.random.random() > 0.5:
+            x = torch.flip(x, [2])
+            y = torch.flip(y, [2])
+            
+        # Random vertical flipping
+        if self.random.random() > 0.5:
+            x = torch.flip(x, [1])
+            y = torch.flip(y, [1])
+            
+        return x, y
 
 class FloodSampleDataset(Dataset):
     """An abstract class representing the Sentinel-2 flood labelling dataset. The entire dataset is
@@ -89,29 +188,31 @@ class FloodSampleDataset(Dataset):
     
     Parameters
     ----------
-    sample_dir : str
-        Path to directory containing dataset channels.
-    label_dir : str
-        Path to directory containing dataset labels.
+    dataset_dir : str
+        Path to directory containing dataset channels and labels.
     channels : list[bool]
         List of 10 booleans corresponding to the 10 input channels.
     typ : str
-        The subset of the dataset to load: train, val.
+        The subset of the dataset to load: train, val, test.
     transform : obj
         PyTorch transform.
     random_flip : bool
         Randomly flip patches (vertically or horizontally) for augmentation.
+    seed : int
+    size : int
+    samples : int
     """
-    def __init__(self, sample_dir, labels_dir, channels=[True] * 10, typ="train", transform=None, random_flip=True, seed=41000, size=64):
-        self.sample_dir = sample_dir
-        self.labels_dir = labels_dir
-        self.labels_path = glob(labels_dir + 'label_*.npy')
+    def __init__(self, dataset_dir, channels=[True] * 10, typ="train", transform=None, random_flip=True, seed=41000, size=64, samples=1000):
+        self.sample_dir = dataset_dir +  f'samples{size}_{typ}_{samples}/'
+        self.labels_dir = dataset_dir + f'labels{size}_{typ}_{samples}/'
+        self.labels_path = glob(self.labels_dir + 'label_*.npy')
         self.channels = channels
         self.typ = typ
         self.transform = transform
         self.random_flip = random_flip
         self.seed = seed
         self.size = size
+        self.samples = samples
 
         # cached arrays
         saved_samples_base = mp.Array(ctypes.c_float, len(self.labels_path)*len(channels)*size*size)
@@ -157,7 +258,7 @@ class FloodSampleDataset(Dataset):
         m = p.search(label_path)
 
         if m:
-            sample_path = self.sample_dir + '/sample_' + m.group(1)
+            sample_path = self.sample_dir + 'sample_' + m.group(1)
             # read from memory if already loaded from disk
             image = self.read_sample(idx, sample_path)[self.channels] # only select the channels we need
             label = self.read_label(idx, label_path) # ensure label tensor is of type torch.uint8

@@ -8,7 +8,7 @@ import sys
 import argparse
 from random import Random
 import logging
-from utils import TRAIN_LABELS, TEST_LABELS
+from utils import TRAIN_LABELS, VAL_LABELS, TEST_LABELS
 
 def random_crop(label_names, size, num_samples, rng, method, sample_dir, label_dir, typ="train"):
     """Uniformly samples patches of dimension size x size across each dataset tile.
@@ -30,7 +30,7 @@ def random_crop(label_names, size, num_samples, rng, method, sample_dir, label_d
     label_dir : str
         Directory containing raw S2 tile labels for patch sampling.
     typ : str
-        Subset assigned to the saved patches: train, test.
+        Subset assigned to the saved patches: train, val, test.
     """
     pre_label_dir = f'data/s2/{method}/labels{size}_{typ}_{num_samples}/'
     pre_sample_dir = f'data/s2/{method}/samples{size}_{typ}_{num_samples}/'
@@ -172,6 +172,7 @@ def main(size, samples, seed, method='random', sample_dir='../samples_200_5_4_35
     rng = Random(seed)
     if method == 'random':
         random_crop(TRAIN_LABELS, size, samples, rng, method, sample_dir, label_dir, typ="train")
+        random_crop(VAL_LABELS, size, samples, rng, method, sample_dir, label_dir, typ="val")
         random_crop(TEST_LABELS, size, samples, rng, method, sample_dir, label_dir, typ="test")
 
     logger.debug('Preprocessing complete.')

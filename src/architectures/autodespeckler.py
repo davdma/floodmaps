@@ -3,57 +3,78 @@ from torch import nn
 from .blocks import GaussianNoiseLayer, MaskingNoiseLayer, LogGammaNoiseLayer
 
 # CAE (Convolutional AutoEncoder)
-class ConvAutoencoder(nn.Module):
-    def __init__(self, in_channels=2, out_channels=2, latent_dim=200, dropout=0.1):
+class ConvAutoencoder1(nn.Module):
+    def __init__(self, in_channels=2, out_channels=2, latent_dim=200, dropout=0.1, activation_func='relu'):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.latent_dim = latent_dim
+        self.activation_func = activation_func
+
+        if self.activation_func == 'leaky_relu':
+            activation_func = nn.LeakyReLU()
+        elif self.activation_func == 'relu':
+            activation_func = nn.ReLU()
+        elif self.activation_func == 'softplus':
+            activation_func = nn.Softplus()
+        elif self.activation_func == 'mish':
+            activation_func = nn.Mish()
+        elif self.activation_func == 'gelu':
+            activation_func = nn.GELU()
+        elif self.activation_func == 'elu':
+            activation_func = nn.ELU()
+        else:
+            raise Exception('Unrecognized activation function')
         
         # subset VV and VH and concatenation of other channels in the patches?
         self.encoder = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, 3, padding=1), # (64, 64)
             nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
+            activation_func,
             nn.Conv2d(out_channels, out_channels, 3, padding=1), 
             nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
+            activation_func,
             nn.Dropout(p=dropout),
             nn.Conv2d(out_channels, 2*out_channels, 3, padding=1, stride=2), # (32, 32)
             nn.BatchNorm2d(2*out_channels),
-            nn.ReLU(inplace=True),
+            activation_func,
             nn.Conv2d(2*out_channels, 2*out_channels, 3, padding=1),
             nn.BatchNorm2d(2*out_channels),
-            nn.ReLU(inplace=True),
+            activation_func,
             nn.Dropout(p=dropout),
             nn.Conv2d(2*out_channels, 4*out_channels, 3, padding=1, stride=2), # (16, 16)
             nn.BatchNorm2d(4*out_channels),
-            nn.ReLU(inplace=True),
+            activation_func,
             nn.Conv2d(4*out_channels, 4*out_channels, 3, padding=1),
             nn.BatchNorm2d(4*out_channels),
-            nn.ReLU(inplace=True),
+            activation_func,
             nn.Dropout(p=dropout),
             nn.Flatten(),
             nn.Linear(4*out_channels*16*16, latent_dim),
-            nn.ReLU(inplace=True)
+            activation_func
         )
         self.linear = nn.Sequential(
             nn.Linear(latent_dim, 4*out_channels*16*16),
-            nn.ReLU(inplace=True)
+            activation_func
         )
         self.decoder = nn.Sequential(
             nn.ConvTranspose2d(4*out_channels, 4*out_channels, 3, padding=1), # (16, 16)
-            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(4*out_channels),
+            activation_func,
             nn.ConvTranspose2d(4*out_channels, 2*out_channels, 3, padding=1, 
                                stride=2, output_padding=1), # (32, 32)
-            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(2*out_channels),
+            activation_func,
             nn.ConvTranspose2d(2*out_channels, 2*out_channels, 3, padding=1),
-            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(2*out_channels),
+            activation_func,
             nn.ConvTranspose2d(2*out_channels, out_channels, 3, padding=1, 
                                stride=2, output_padding=1), # (64, 64)
-            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(out_channels),
+            activation_func,
             nn.ConvTranspose2d(out_channels, out_channels, 3, padding=1),
-            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(out_channels),
+            activation_func,
             nn.ConvTranspose2d(out_channels, in_channels, 3, padding=1)
         )
 
@@ -62,11 +83,89 @@ class ConvAutoencoder(nn.Module):
         middle = self.linear(encoded)
         middle = middle.view(-1, 4*self.out_channels, 16, 16)
         decoded = self.decoder(middle)
-        return decoded
+        return {'despeckler_output': decoded, 'despeckler_input': x}
+
+# Modified autoencoder for despeckling
+class ConvAutoencoder2(nn.Module):
+    def __init__(self, in_channels=2, out_channels=2, num_layers=5, kernel_size=3, dropout=0.1, activation_func='leaky_relu'):
+        # ORIGINAL WAS NUM_LAYERS = 5 + RELU
+        # activation can be relu or LeakyReLU
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.num_layers = num_layers
+        self.kernel_size = kernel_size
+        self.dropout = dropout
+        self.activation_func = activation_func
+
+        if self.activation_func == 'leaky_relu':
+            activation_func = nn.LeakyReLU()
+        elif self.activation_func == 'relu':
+            activation_func = nn.ReLU()
+        elif self.activation_func == 'softplus':
+            activation_func = nn.Softplus()
+        elif self.activation_func == 'mish':
+            activation_func = nn.Mish()
+        elif self.activation_func == 'gelu':
+            activation_func = nn.GELU()
+        elif self.activation_func == 'elu':
+            activation_func = nn.ELU()
+        else:
+            raise Exception('Unrecognized activation function')
+
+        # build encoder
+        modules = []
+        modules.append(nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size),
+            nn.BatchNorm2d(out_channels),
+            activation_func,
+        ))
+
+        layer_channels = out_channels
+        for i in range(num_layers):
+            modules.append(nn.Sequential(
+                    nn.Conv2d(layer_channels, 2*layer_channels,
+                              kernel_size),
+                    nn.BatchNorm2d(2*layer_channels),
+                    activation_func
+            ))
+            layer_channels = 2*layer_channels
+
+        self.encoder = nn.Sequential(*modules)
+
+        # build decoder
+        modules = []
+        modules.append(nn.Sequential(
+                nn.ConvTranspose2d(layer_channels, layer_channels, kernel_size),
+                nn.BatchNorm2d(layer_channels),
+                activation_func
+        ))
+                       
+        for i in range(num_layers):
+            if i < num_layers - 1:
+                modules.append(nn.Sequential(
+                    nn.ConvTranspose2d(layer_channels, layer_channels // 2, kernel_size),
+                    nn.BatchNorm2d(layer_channels // 2),
+                    activation_func
+                ))
+            else:
+                # last layer should not have activation to preserve fine details and negatives
+                modules.append(nn.Sequential(
+                    nn.ConvTranspose2d(layer_channels, layer_channels // 2, kernel_size),
+                    nn.BatchNorm2d(layer_channels // 2)
+                )) # no activation function to preserve negative values in output
+            layer_channels = layer_channels // 2
+
+        self.decoder = nn.Sequential(*modules)
+
+    def forward(self, x):
+        encoded = self.encoder(x)
+        decoded = self.decoder(encoded)
+        return {'despeckler_output': decoded, 'despeckler_input': x}
 
 # DAE (Denoising AutoEncoder)
 class DenoiseAutoencoder(nn.Module):
-    def __init__(self, in_channels=2, out_channels=2, latent_dim=200, dropout=0.1, coeff=0.1, noise_type='normal'):
+    def __init__(self, in_channels=2, out_channels=2, kernel_size=3, num_layers=5, dropout=0.1, coeff=0.1, noise_type='normal', activation_func='leaky_relu'):
         super().__init__()
         if noise_type == 'normal':
             self.noise_layer = GaussianNoiseLayer(mean=0.0, std=coeff)
@@ -77,12 +176,12 @@ class DenoiseAutoencoder(nn.Module):
         else:
             raise Exception('Noise not correctly specified')
             
-        self.autoencoder = ConvAutoencoder(in_channels=in_channels, out_channels=out_channels, latent_dim=latent_dim, dropout=dropout)
+        self.autoencoder = ConvAutoencoder2(in_channels=in_channels, out_channels=out_channels, num_layers=num_layers, kernel_size=kernel_size, dropout=dropout, activation_func=activation_func)
         
     def forward(self, x):
-        x = self.noise_layer(x)
-        x = self.autoencoder(x)
-        return x
+        noisy = self.noise_layer(x)
+        decoded_dict = self.autoencoder(noisy)
+        return decoded_dict
 
 # VAE (Variational AutoEncoder)
 # source: https://github.com/AntixK/PyTorch-VAE/blob/master/models/vanilla_vae.py
@@ -125,7 +224,7 @@ class VarAutoencoder(nn.Module):
                     nn.ConvTranspose2d(hidden_dims[i],
                                        hidden_dims[i + 1],
                                        kernel_size=3,
-                                       stride = 2,
+                                       stride=2,
                                        padding=1,
                                        output_padding=1),
                     nn.BatchNorm2d(hidden_dims[i + 1]),
@@ -144,7 +243,7 @@ class VarAutoencoder(nn.Module):
                             nn.LeakyReLU(),
                             nn.Conv2d(hidden_dims[-1], out_channels=out_channels, # originally 3?
                                       kernel_size= 3, padding= 1),
-                            nn.Tanh())
+                            nn.Tanh()) # potentially remove tanh for finer reconstruction detail
 
     def encode(self, input):
         """
@@ -176,7 +275,7 @@ class VarAutoencoder(nn.Module):
         result = self.final_layer(result)
         return result
 
-    def reparameterize(self, mu, logvar):
+    def reparameterize(self, mu, log_var):
         """
         Reparameterization trick to sample from N(mu, var) from
         N(0,1).
@@ -184,11 +283,11 @@ class VarAutoencoder(nn.Module):
         :param logvar: (Tensor) Standard deviation of the latent Gaussian [B x D]
         :return: (Tensor) [B x D]
         """
-        std = torch.exp(0.5 * logvar)
+        std = torch.exp(0.5 * torch.clamp(log_var, min=-10, max=10))
         eps = torch.randn_like(std)
         return eps * std + mu
 
-    def forward(self, input):
-        mu, log_var = self.encode(input)
+    def forward(self, x):
+        mu, log_var = self.encode(x)
         z = self.reparameterize(mu, log_var)
-        return self.decode(z)
+        return {'despeckler_output': self.decode(z), 'despeckler_input': x, 'mu': mu, 'log_var': log_var}

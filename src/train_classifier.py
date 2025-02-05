@@ -15,6 +15,7 @@ from architectures.unet import UNet
 from architectures.unet_plus import NestedUNet
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
+import random
 from random import Random
 from PIL import Image
 from glob import glob
@@ -65,7 +66,7 @@ def train_loop(dataloader, model, device, loss_fn, optimizer):
     
     return epoch_loss
 
-def test_loop(dataloader, model, device, loss_fn):
+def test_loop(dataloader, model, device, loss_fn, logging=True):
     running_vloss = 0.0
     num_batches = len(dataloader)
     metric_acc = BinaryAccuracy(threshold=0.5, device=device)
@@ -96,13 +97,14 @@ def test_loop(dataloader, model, device, loss_fn):
     epoch_vrec = metric_rec.compute().item()
     epoch_vf1 = metric_f1.compute().item()
     epoch_vloss = running_vloss / num_batches
-    wandb.log({"val accuracy": epoch_vacc, "val precision": epoch_vpre,
-               "val recall": epoch_vrec, "val f1": epoch_vf1, "val loss": epoch_vloss})
+    if logging:
+        wandb.log({"val accuracy": epoch_vacc, "val precision": epoch_vpre,
+                   "val recall": epoch_vrec, "val f1": epoch_vf1, "val loss": epoch_vloss})
 
     epoch_vmetrics = (epoch_vacc, epoch_vpre, epoch_vrec, epoch_vf1)
     return epoch_vloss, epoch_vmetrics
 
-def train(train_set, val_set, model, device, config, save='model'):
+def train(train_set, val_set, test_set, model, device, config, save='model'):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     logging.info(f'''Starting training:
         Date:            {timestamp}
@@ -120,13 +122,14 @@ def train(train_set, val_set, model, device, config, save='model'):
         group=config['group'],
         config={
         "dataset": "Sentinel2",
+        "mode": config['mode'],
         "method": config['method'],
         "channels": ''.join('1' if b else '0' for b in config['channels']),
         "patch_size": config['size'],
         "samples": config['samples'],
         "architecture": config['name'],
         "dropout": config['dropout'],
-        "deep_supervision": config['deep_supervision'],
+        "deep_supervision": config['deep_supervision'] if config['name'] == 'unet++' else None,
         "learning_rate": config['learning_rate'],
         "epochs": config['epochs'],
         "early_stopping": config['early_stopping'],
@@ -139,6 +142,7 @@ def train(train_set, val_set, model, device, config, save='model'):
         "beta": config['beta'],
         "training_size": len(train_set),
         "validation_size": len(val_set),
+        "test_size": len(test_set) if config['mode'] == 'test' else None,
         "val_percent": len(val_set) / (len(train_set) + len(val_set)),
         "save_file": save
         }
@@ -181,6 +185,14 @@ def train(train_set, val_set, model, device, config, save='model'):
                             shuffle=True,
                             drop_last=False)
 
+    test_loader = DataLoader(test_set,
+                            batch_size=config['batch_size'],
+                            num_workers=config['num_workers'],
+                            persistent_workers=config['num_workers']>0,
+                            pin_memory=True,
+                            shuffle=True,
+                            drop_last=False) if config['mode'] == 'test' else None
+
     # TRAIN AND TEST LOOP IS PER EPOCH!!!
     if config['early_stopping']:
         early_stopper = EarlyStopper(patience=config['patience'])
@@ -221,16 +233,18 @@ def train(train_set, val_set, model, device, config, save='model'):
     # Save our model
     PATH = 'models/' + save + '.pth'
     if config['early_stopping']:
-        final_vmetrics = early_stopper.get_metric()
-        # save max vf1 iteration model via checkpointing?
         torch.save(min_model_weights, PATH)
 
         # reset model to checkpoint for later sample prediction
         model.load_state_dict(min_model_weights)
-        model.eval()
+        final_vmetrics = early_stopper.get_metric()
     else:
-        final_vmetrics = avg_vmetrics
         torch.save(model.state_dict(), PATH)
+        final_vmetrics = avg_vmetrics
+
+    if config['mode'] == 'test':
+        # test mode
+        _, final_vmetrics = test_loop(test_loader, model, device, loss_fn, logging=False)
 
     return run, final_vmetrics
 
@@ -266,6 +280,7 @@ def sample_predictions(model, val_set, mean, std, config, seed=24330):
             n += 1
     
     model.to('cpu')
+    model.eval()
     rng = Random(seed)
     samples = rng.sample(range(0, len(val_set)), config['num_sample_predictions'])
 
@@ -344,6 +359,11 @@ def sample_predictions(model, val_set, mean, std, config, seed=24330):
 def run_experiment_s2(config):
     """Run a single S2 model experiment given the configuration parameters."""
     if wandb.login():
+        # seeding
+        np.random.seed(config['seed'])
+        random.seed(config['seed'])
+        torch.manual_seed(config['seed'])
+        
         device = (
             "cuda"
             if torch.cuda.is_available()
@@ -356,39 +376,40 @@ def run_experiment_s2(config):
             model = UNet(n_channels, dropout=config['dropout']).to(device)
         else:
             # unet++
-            model = NestedUNet(n_channels, deep_supervision=config['deep_supervision']).to(device)
+            model = NestedUNet(n_channels, dropout=config['dropout'], deep_supervision=config['deep_supervision']).to(device)
         
         print(f"Using {device} device")
         method = config['method']
         size = config['size']
         samples = config['samples']
-        train_label_dir = f'data/s2/{method}/' + f'labels{size}_train_{samples}/'
-        train_sample_dir = f'data/s2/{method}/' + f'samples{size}_train_{samples}/'
-        test_label_dir = f'data/s2/{method}/' + f'labels{size}_test_{samples}/'
-        test_sample_dir = f'data/s2/{method}/' + f'samples{size}_test_{samples}/'
-
+        dataset_dir = f'data/s2/{method}/'
+        
         train_mean, train_std = trainMeanStd(channels=config['channels'], 
                                              sample_dir=config['sample_dir'], 
                                              label_dir=config['label_dir'])
         standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
         
-        train_set = FloodSampleDataset(train_sample_dir, train_label_dir, channels=config['channels'], typ="train",
-                                       transform=standardize)
-        val_set = FloodSampleDataset(test_sample_dir, test_label_dir, channels=config['channels'], typ="test",
-                                     transform=standardize)
+        train_set = FloodSampleDataset(dataset_dir, channels=config['channels'], 
+                                       size=size, samples=samples, typ="train", transform=standardize)
+        val_set = FloodSampleDataset(dataset_dir, channels=config['channels'], 
+                                     size=size, samples=samples, typ="val", transform=standardize)
+        test_set = FloodSampleDataset(dataset_dir, channels=config['channels'], 
+                                      size=size, samples=samples, typ="test", transform=standardize) \
+                                      if config['mode'] == 'test' else None
 
-        try:
-            model_name = config['name']
-            run, (final_vacc, final_vpre, final_vrec, final_vf1) = train(train_set, val_set, model, device, config, save=f"{model_name}_model{len(glob(f'models/{model_name}_model*.pth'))}")
+        model_name = config['name']
+        run, (final_vacc, final_vpre, final_vrec, final_vf1) = train(train_set, val_set, test_set, model, device, config, save=f"{model_name}_model{len(glob(f'models/{model_name}_model*.pth'))}")
 
-            # summary metrics
-            run.summary["final_acc"] = final_vacc
-            run.summary["final_pre"] = final_vpre
-            run.summary["final_rec"] = final_vrec
-            run.summary["final_f1"] = final_vf1
+        # summary metrics
+        run.summary["final_acc"] = final_vacc
+        run.summary["final_pre"] = final_vpre
+        run.summary["final_rec"] = final_vrec
+        run.summary["final_f1"] = final_vf1
             
-            # log predictions on validation set using wandb
-            pred_table = sample_predictions(model, val_set, train_mean, train_std, config)
+        # log predictions on validation set using wandb
+        try:
+            pred_table = sample_predictions(model, test_set if config['mode'] == 'test' else val_set, 
+                                            train_mean, train_std, config)
             run.log({"model_val_predictions": pred_table})
         finally:
             run.finish()
@@ -424,6 +445,9 @@ if __name__ == '__main__':
     parser.add_argument('--group', default=None, help='Optional group name for model experiments (default: None)')
     parser.add_argument('--num_sample_predictions', type=int, default=40, help='number of predictions to visualize (default: 40)')
 
+    # evaluation
+    parser.add_argument('--mode', default='val', choices=['val', 'test'], help=f"dataset used for evaluation metrics (default: val)")
+
     # ml
     parser.add_argument('-e', '--epochs', type=int, default=30, help='(default: 30)')
     parser.add_argument('-b', '--batch_size', type=int, default=32, help='(default: 32)')
@@ -451,6 +475,9 @@ if __name__ == '__main__':
     # optimizer
     parser.add_argument('--optimizer', default='Adam', choices=['Adam', 'SGD'],
                         help=f"optimizer: {', '.join(['Adam', 'SGD'])} (default: Adam)")
+
+    # reproducibility
+    parser.add_argument('--seed', type=int, default=831002, help='seed (default: 831002)')
 
     # config will be dict
     config = vars(parser.parse_args())

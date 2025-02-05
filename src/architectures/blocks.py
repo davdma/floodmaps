@@ -90,7 +90,8 @@ class GaussianNoiseLayer(nn.Module):
 
     def forward(self, x):
         if self.training:
-            noise = torch.normal(self.mean, self.std, x.shape, device=x.device).clip(0, 1)
+            # noise = torch.normal(self.mean, self.std, x.shape, device=x.device).clip(0, 1)
+            noise = torch.normal(self.mean, self.std, x.shape, device=x.device)
             return x + noise
         else:
             return x
@@ -118,7 +119,7 @@ class LogGammaNoiseLayer(nn.Module):
             return x
 
 class MaskingNoiseLayer(nn.Module):
-    def __init__(self, coeff=0.8):
+    def __init__(self, coeff=0.2):
         super().__init__()
         self.coeff = coeff
 

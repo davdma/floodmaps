@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from architectures.unet import UNet
 from architectures.unet_plus import NestedUNet
-from architectures.autodespeckler import ConvAutoencoder, DenoiseAutoencoder, VarAutoencoder
+from architectures.autodespeckler import ConvAutoencoder1, ConvAutoencoder2, DenoiseAutoencoder, VarAutoencoder
 
 class WaterPixelDetector(nn.Module):
     """General S2 water pixel detection model with classifier and optional discriminator.
@@ -56,30 +56,109 @@ class SARClassifier(nn.Module):
     """
     def __init__(self, config, n_channels=7):
         super().__init__()
-        # classifier
+        self.config = config
+        self.classifier = self.get_classifier(config, n_channels)
+        self.autodespeckler = self.get_autodespeckler(config)
+
+    def get_classifier(self, config, n_channels):
         if config['name'] == 'unet':
-            self.classifier = UNet(n_channels, dropout=config['dropout'])
+            return UNet(n_channels, dropout=config['dropout'])
         elif config['name'] == 'unet++':
-            self.classifier = NestedUNet(n_channels, dropout=config['dropout'], deep_supervision=config['deep_supervision'])
+            return NestedUNet(n_channels, dropout=config['dropout'], deep_supervision=config['deep_supervision'])
         else:
             raise Exception('Classifier not specified')
 
-        # autodespeckler
-        if config['autodespeckler'] == "CNN":
-            self.autodespeckler = ConvAutoencoder(latent_dim=config['latent_dim'], dropout=config['AD_dropout'])
+    def get_autodespeckler(self, config):
+        if config['autodespeckler'] == "CNN1":
+            return ConvAutoencoder1(latent_dim=config['latent_dim'], dropout=config['AD_dropout'])
+        elif config['autodespeckler'] == "CNN2":
+            # activation function            
+            return ConvAutoencoder2(num_layers=config['AD_num_layers'], 
+                                    kernel_size=config['AD_kernel_size'], 
+                                    dropout=config['AD_dropout'], 
+                                    activation_func=config['AD_activation_func'])
         elif config['autodespeckler'] == "DAE":
-            self.autodespeckler = DenoiseAutoencoder(latent_dim=config['latent_dim'], dropout=config['AD_dropout'],
-                                                     coeff=config['noise_coeff'], noise_type=config['noise_type'])
+            # need to modify with new AE architecture parameters
+            return DenoiseAutoencoder(num_layers=config['AD_num_layers'], 
+                                      kernel_size=config['AD_kernel_size'],
+                                      dropout=config['AD_dropout'],
+                                      coeff=config['noise_coeff'],
+                                      noise_type=config['noise_type'],
+                                      activation_func=config['AD_activation_func'])
         elif config['autodespeckler'] == "VAE":
-            self.autodespeckler = VarAutoencoder(latent_dim=config['latent_dim'])
+            # need to modify with new AE architecture parametersi
+            return VarAutoencoder(latent_dim=config['latent_dim']) # more hyperparameters
         else:
-            self.autodespeckler = None
+            return None
 
+    def uses_autodespeckler(self):
+        return self.autodespeckler is not None
+
+    def load_autodespeckler_weights(self, weight_path, device):
+        """
+        Load weights for the autodespeckler from a .pth file.
+        
+        Parameters
+        ----------
+        weight_path : str
+            Path to the .pth file containing the autodespeckler weights.
+        device: torch.device
+        """
+        if weight_path is None:
+            return
+            
+        if not self.uses_autodespeckler():
+            raise ValueError("Autodespeckler is not initialized in this model.")
+        
+        state_dict = torch.load(weight_path, map_location=device)
+        try:
+            self.autodespeckler.load_state_dict(state_dict)
+            print("Autodespeckler weights loaded successfully.")
+        except RuntimeError as e:
+            print(f"Error loading autodespeckler weights: {e}")
+            raise e
+
+    def load_classifier_weights(self, weight_path, device):
+        """
+        Load weights for the sar classifier from a .pth file.
+        
+        Parameters
+        ----------
+        weight_path : str
+            Path to the .pth file containing the autodespeckler weights.
+        device: torch.device
+        """
+        if weight_path is None:
+            return
+        
+        state_dict = torch.load(weight_path, map_location=device)
+        try:
+            self.classifier.load_state_dict(state_dict)
+            print("Classifier weights loaded successfully.")
+        except RuntimeError as e:
+            print(f"Error loading classifier weights: {e}")
+            raise e
+
+    def freeze_autodespeckler_weights(self):
+        """Freeze the weights of the autodespeckler during training."""
+        for param in self.autodespeckler.parameters():
+            param.requires_grad = False
+
+    def unfreeze_autodespeckler_weights(self):
+        """Unfreeze the weights of the autodespeckler during training."""
+        for param in self.autodespeckler.parameters():
+            param.requires_grad = True
+        
     def forward(self, x):
-        if self.autodespeckler is not None:
+        """Returns dictionary containing outputs. If autodespeckler architecture used then 
+        output from the autodespeckler head is also included."""
+        if self.uses_autodespeckler():
             sar = x[:, :2, :, :]
-            despeckled = self.autodespeckler(sar)
-            out = self.classifier(torch.cat((despeckled, x[:, 2:, :, :]), 1))
+            despeckler_dict = self.autodespeckler(sar)
+            logits = self.classifier(torch.cat((despeckler_dict['despeckler_output'], x[:, 2:, :, :]), 1))
+            despeckler_dict['final_output'] = logits
+            return despeckler_dict
         else:
-            out = self.classifier(x)
-        return out
+            logits = self.classifier(x)
+            out = {'final_output': logits}
+            return out

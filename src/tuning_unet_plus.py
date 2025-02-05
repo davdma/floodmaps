@@ -16,26 +16,28 @@ def run_s2(job):
         'size': 64, 
         'samples': 1000, 
         'channels': [bool(int(x)) for x in '1111111111'],
-        'sample_dir': '../samples_200_5_4_35/',
-        'label_dir': '../labels/',
-        'project': 'FloodSamplesUNet++Tuning', 
+        'sample_dir': '../sampling/samples_200_5_4_35/',
+        'label_dir': '../sampling/labels/',
+        'project': 'FloodSamplesUNet++Tuning2', 
         'group': None,
         'num_sample_predictions': 60,
-        'epochs': 150, 
+        'mode': 'val',
+        'epochs': 200, 
         'batch_size': job.parameters['batch_size'], 
         'num_workers': 0,
         'learning_rate': job.parameters['learning_rate'] * math.sqrt(job.parameters['batch_size'] // 16), # job.parameters['learning_rate'], 
         'early_stopping': True, 
         'patience': 10,
         'name': 'unet++',
-        'dropout': 0,
-        'deep_supervision': True,
+        'dropout': job.parameters['dropout'],
+        'deep_supervision': job.parameters['deep_supervision'],
         'loss': job.parameters['loss'],
-        'alpha': 0.3563,
-        'beta': 0.6437,
-        'optimizer': "Adam"
+        'alpha': job.parameters['alpha'],
+        'beta': 1 - job.parameters['alpha'],
+        'optimizer': "Adam",
+        'seed': 210200
     }
-    final_vf1 = run_experiment_s2(config)
+    final_vacc, final_vpre, final_vrec, final_vf1 = run_experiment_s2(config)
     return final_vf1
 
 def run_s1(job):
@@ -65,13 +67,13 @@ def run_s1(job):
         'alpha': job.parameters['alpha'],
         'beta': 1 - job.parameters['alpha'],
         'optimizer': 'Adam',
-        'seed': 23930
+        'seed': 209373
     }
     final_vacc, final_vpre, final_vrec, final_vf1 = run_experiment_s1(config)
     return final_vf1
 
 def tuning_s2(file_index, max_evals, experiment_name, early_stopping):
-    search_dir = './tuning/s1/' + experiment_name
+    search_dir = './tuning/s2/' + experiment_name
 
     if not os.path.exists(search_dir):
         os.makedirs(search_dir)
@@ -79,16 +81,18 @@ def tuning_s2(file_index, max_evals, experiment_name, early_stopping):
     # define the variable you want to optimize
     # assume channels is 111111111
     problem = HpProblem()
-    # problem.add_hyperparameter((0.20, 0.40), "alpha")
+    problem.add_hyperparameter((0.25, 0.45), "alpha")
+    problem.add_hyperparameter((0.05, 0.30), "dropout")
     problem.add_hyperparameter([16, 32, 64, 128, 256], "batch_size")
     problem.add_hyperparameter((0.00001, 0.001), "learning_rate")
-    problem.add_hyperparameter(["BCEDiceLoss", "TverskyLoss"], "loss")
+    problem.add_hyperparameter(["BCELoss", "BCEDiceLoss", "TverskyLoss"], "loss")
+    problem.add_hyperparameter([True, False], "deep_supervision")
 
     # define the evaluator to distribute the computation
     method_kwargs = {"callbacks": [SearchEarlyStopping(patience=10)]} if early_stopping else dict()
 
     with Evaluator.create(run_s2, method="serial", method_kwargs=method_kwargs) as evaluator:
-        search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=19239)
+        search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=29239)
         
         if int(file_index) >= 1:
             # fit model from previous checkpointed search
@@ -125,7 +129,7 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping):
     method_kwargs = {"callbacks": [SearchEarlyStopping(patience=10)]} if early_stopping else dict()
 
     with Evaluator.create(run_s1, method="serial", method_kwargs=method_kwargs) as evaluator:
-        search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=3739)
+        search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=123539)
         
         if int(file_index) >= 1:
             # fit model from previous checkpointed search

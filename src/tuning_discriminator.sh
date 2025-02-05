@@ -6,8 +6,8 @@
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1
 #SBATCH --ntasks-per-node=1
-#SBATCH --output=tuningdisc2.out
-#SBATCH --error=tuningdisc2.err
+#SBATCH --output=outputs/tuningdisc2.out
+#SBATCH --error=outputs/tuningdisc2.err
 #SBATCH --mail-user=davidma.inspire@outlook.com
 #SBATCH --mail-type=ALL
 #SBATCH --time=24:00:00

@@ -12,6 +12,7 @@ import sys
 def run_s2(job):
     # channels = [bool(int(x)) for x in str(int(job.parameters['channels']))]
     config = {
+        'mode': 'val',
         'method': "random",
         'size': 64, 
         'samples': 1000, 
@@ -33,7 +34,8 @@ def run_s2(job):
         'loss': "TverskyLoss",
         'alpha': job.parameters['alpha'],
         'beta': 1 - job.parameters['alpha'],
-        'optimizer': "Adam"
+        'optimizer': "Adam",
+        'seed': 12240
     }
     final_vacc, final_vpre, final_vrec, final_vf1 = run_experiment_s2(config)
     return final_vf1
@@ -47,27 +49,28 @@ def run_s1(job):
         'filter': 'raw',
         'channels': [bool(int(x)) for x in '1111111'],
         'project': 'SARUNetDespecklerTuning',
-        'group': 'CNN_autodespeckler',
+        'group': 'CNN2_autodespeckler',
         'num_sample_predictions': 60,
         'mode': 'val',
         'epochs': 250, 
-        'batch_size': 2048, 
-        'subset': 1.0,
+        'batch_size': 1200, 
+        'subset': 0.5,
         'learning_rate': job.parameters['learning_rate'], 
         'early_stopping': True, 
         'patience': 10,
         'name': 'unet',
         'dropout': job.parameters['dropout'],
-        'deep_supervision': False,
-        'autodespeckler': 'CNN', # if not None need to specify additional autodespeckler args
-        'latent_dim': job.parameters['latent_dim'], # optional
+        'autodespeckler': 'CNN2', # if not None need to specify additional autodespeckler args
+        'AD_num_layers': job.parameters['AD_num_layers'],
+        'AD_kernel_size': job.parameters['AD_kernel_size'], # optional
         'AD_dropout': job.parameters['AD_dropout'], # optional
+        'AD_activation_func': job.parameters['AD_activation_func'],
         'num_workers': 10,
         'loss': job.parameters['loss'],
         'alpha': job.parameters['alpha'],
         'beta': 1 - job.parameters['alpha'],
         'optimizer': "Adam",
-        'seed': 13200
+        'seed': 1330935
     }
     final_vacc, final_vpre, final_vrec, final_vf1 = run_experiment_s1(config)
     return final_vf1
@@ -92,7 +95,7 @@ def tuning_s2(file_index, max_evals, experiment_name, early_stopping):
     method_kwargs = {"callbacks": [SearchEarlyStopping(patience=10)]} if early_stopping else dict()
 
     with Evaluator.create(run_s2, method="serial", method_kwargs=method_kwargs) as evaluator:
-        search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=102995)
+        search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=192995)
         
         if int(file_index) >= 1:
             # fit model from previous checkpointed search
@@ -125,14 +128,16 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping):
     problem.add_hyperparameter(["BCELoss", "BCEDiceLoss", "TverskyLoss"], "loss")
 
     # optional autodespeckler CNN first
-    problem.add_hyperparameter([50, 100, 150, 200], "latent_dim")
+    problem.add_hyperparameter([1, 2, 3, 4, 5], "AD_num_layers")
+    problem.add_hyperparameter([3, 5, 7], "AD_kernel_size")
     problem.add_hyperparameter((0.05, 0.30), "AD_dropout")
+    problem.add_hyperparameter(["leaky_relu", "relu"], "AD_activation_func")
 
     # define the evaluator to distribute the computation
     method_kwargs = {"callbacks": [SearchEarlyStopping(patience=10)]} if early_stopping else dict()
 
     with Evaluator.create(run_s1, method="serial", method_kwargs=method_kwargs) as evaluator:
-        search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=17203)
+        search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=599023)
         
         if int(file_index) >= 1:
             # fit model from previous checkpointed search
@@ -146,6 +151,11 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping):
         # save results to collective file
         save_file = search_dir + '/all.csv'
         if os.path.exists(save_file):
+            # note: need to reorder column headers if a bunch of new hyperparameters are added to match csv file
+            existing_df = pd.read_csv(save_file, nrows=0)
+            existing_columns = existing_df.columns.tolist()
+            results = results[existing_columns]
+            
             results.to_csv(save_file, mode='a', index=False, header=False)
         else:
             results.to_csv(save_file, index=False)

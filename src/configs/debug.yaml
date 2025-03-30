@@ -1,0 +1,62 @@
+seed: 1299
+save: False
+save_path:
+
+data:
+    size: 64
+    samples: 500
+    kernel_size: 5
+    use_lee: False
+    random_flip: True
+
+model:
+    autodespeckler: VAE # ['CNN1', 'CNN2', 'DAE', 'VAE']
+    cnn1:
+        latent_dim: 200
+        AD_dropout: 0.1
+        AD_activation_func: leaky_relu # ['leaky_relu', 'relu', 'softplus', 'mish', 'gelu', 'elu']
+    cnn2:
+        AD_num_layers: 5
+        AD_kernel_size: 3
+        AD_dropout: 0.1
+        AD_activation_func: leaky_relu # ['leaky_relu', 'relu', 'softplus', 'mish', 'gelu', 'elu']
+    dae:
+        AD_num_layers: 5
+        AD_kernel_size: 3
+        AD_dropout: 0.1
+        AD_activation_func: leaky_relu # ['leaky_relu', 'relu', 'softplus', 'mish', 'gelu', 'elu']
+        noise_type: log_gamma # ['normal', 'masking', 'log_gamma']
+        noise_coeff: 0.1
+    vae:
+        latent_dim: 200
+        VAE_beta: 1.0
+        beta_annealing: True
+        beta_period: 50
+        beta_cycles: 4
+        beta_proportion: 0.5
+    
+train:
+    epochs: 30
+    batch_size: 32
+    loss: MSELoss # ['L1Loss', 'MSELoss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss', 'JSDLoss']
+    clip: 1.0
+    lr: 0.0001
+    optimizer: Adam # ['Adam', 'SGD']
+    LR_scheduler: Constant # ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR']
+    LR_patience: 5
+    LR_T_max: 200
+    early_stopping: True
+    patience: 5
+    subset: 1.0
+    num_workers: 10
+
+evaluation:
+    mode: val # ['val', 'test'],
+    
+wandb:
+    project: SAR_AD_HEAD
+    group:
+    num_sample_predictions: 40
+
+logging:
+    grad_norm_freq: 10

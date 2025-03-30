@@ -97,7 +97,8 @@ class GaussianNoiseLayer(nn.Module):
             return x
 
 class LogGammaNoiseLayer(nn.Module):
-    def __init__(self, looks=5, coeff=0.5, min_gamma_value=1e-10):
+    # original min_gamma_value=1e-10
+    def __init__(self, looks=5, coeff=0.5, min_gamma_value=torch.finfo(torch.float32).tiny):
         super().__init__()
         self.looks = looks
         self.coeff = coeff

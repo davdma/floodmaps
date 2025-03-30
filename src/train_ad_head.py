@@ -9,8 +9,9 @@ from torch import nn
 from torch.utils.data import DataLoader
 from datetime import datetime
 from dataset import DespecklerSARDataset
-from loss import PseudoHuberLoss, LogCoshLoss
-from utils import EarlyStopper, SaveMetrics, get_gradient_norm, get_model_params, print_model_params_and_grads
+from config import Config
+from loss import PseudoHuberLoss, LogCoshLoss, JSD, PatchMSELoss, PatchL1Loss, PatchHuberLoss
+from utils import ADEarlyStopper, Metrics, get_gradient_norm, get_model_params, print_model_params_and_grads
 from torchvision import transforms
 from architectures.autodespeckler import ConvAutoencoder1, ConvAutoencoder2, DenoiseAutoencoder, VarAutoencoder
 from matplotlib.cm import ScalarMappable
@@ -21,89 +22,108 @@ from random import Random
 from PIL import Image
 from glob import glob
 import numpy as np
+from pathlib import Path
 import sys
-import pickle 
+import pickle
+import yaml
+import json
 
 AUTODESPECKLER_NAMES = ['CNN1', 'CNN2', 'DAE', 'VAE']
 NOISE_NAMES = ['normal', 'masking', 'log_gamma']
-LOSS_NAMES = ['MSELoss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss'] # pseudo huber - https://arxiv.org/pdf/2310.14189
-SCHEDULER_NAMES = ['ReduceLROnPlateau', 'CosAnnealingLR'] # 'CosWarmRestarts'
+LOSS_NAMES = ['L1Loss', 'MSELoss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss', 'JSDLoss']
+SCHEDULER_NAMES = ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR'] # 'CosWarmRestarts'
 
-def get_loss(config):
-    if config['loss'] == 'MSELoss':
-        return nn.MSELoss()
-    elif config['loss'] == 'PseudoHuberLoss':
+def get_loss(cfg):
+    """Note: important to consider scale of losses if summing different components.
+    For our purposes and stability, better to make all losses calculated per patch instead of per pixel."""
+    # SPECKLE OPTIMIZED LOSS? Note: compare between models on same scale
+    # choose universal scale/metric - use dB scale and evaluate using RMSE, MSE, MAE, R^2 (when benchmarking)
+    if cfg.train.loss == 'MSELoss':
+        # scales mseloss to per sample (64 x 64 patch)
+        return PatchMSELoss()
+    elif cfg.train.loss == 'L1Loss':
+        return PatchL1Loss()
+    elif cfg.train.loss == 'PseudoHuberLoss':
+         # pseudo huber - https://arxiv.org/pdf/2310.14189
         return PseudoHuberLoss(c=0.03)
-    elif config['loss'] == 'HuberLoss':
-        return nn.HuberLoss()
-    elif config['loss'] == 'LogCoshLoss':
+    elif cfg.train.loss == 'HuberLoss':
+        return PatchHuberLoss()
+    elif cfg.train.loss == 'LogCoshLoss':
         return LogCoshLoss()
+    elif cfg.train.loss == 'JSDLoss':
+        return JSD()
     else:
         raise Exception(f"Loss must be one of: {', '.join(LOSS_NAMES)}")
 
-def get_model(config):
-    if config['autodespeckler'] == "CNN1":
-        return ConvAutoencoder1(latent_dim=config['latent_dim'],
-                                dropout=config['AD_dropout'],
-                                activation_func=config['AD_activation_func'])
-    elif config['autodespeckler'] == "CNN2":
-        return ConvAutoencoder2(num_layers=config['AD_num_layers'], 
-                                kernel_size=config['AD_kernel_size'], 
-                                dropout=config['AD_dropout'], 
-                                activation_func=config['AD_activation_func'])
-    elif config['autodespeckler'] == "DAE":
+def get_model(cfg):
+    if cfg.model.autodespeckler == "CNN1":
+        return ConvAutoencoder1(latent_dim=cfg.cnn1.latent_dim,
+                                dropout=cfg.cnn1.AD_dropout,
+                                activation_func=cfg.cnn1.AD_activation_func)
+    elif cfg.model.autodespeckler == "CNN2":
+        return ConvAutoencoder2(num_layers=cfg.cnn2.AD_num_layers, 
+                                kernel_size=cfg.cnn2.AD_kernel_size, 
+                                dropout=cfg.cnn2.AD_dropout, 
+                                activation_func=cfg.cnn2.AD_activation_func)
+    elif cfg.model.autodespeckler == "DAE":
         # need to modify with new AE architecture parameters
-        return DenoiseAutoencoder(num_layers=config['AD_num_layers'],
-                                  kernel_size=config['AD_kernel_size'],
-                                  dropout=config['AD_dropout'],
-                                  coeff=config['noise_coeff'],
-                                  noise_type=config['noise_type'],
-                                  activation_func=config['AD_activation_func'])
-    elif config['autodespeckler'] == "VAE":
+        return DenoiseAutoencoder(num_layers=cfg.dae.AD_num_layers,
+                                  kernel_size=cfg.dae.AD_kernel_size,
+                                  dropout=cfg.dae.AD_dropout,
+                                  coeff=cfg.dae.noise_coeff,
+                                  noise_type=cfg.dae.noise_type,
+                                  activation_func=cfg.dae.AD_activation_func)
+    elif cfg.model.autodespeckler == "VAE":
         # need to modify with new AE architecture parametersi
-        return VarAutoencoder(latent_dim=config['latent_dim']) # more hyperparameters
+        return VarAutoencoder(latent_dim=cfg.vae.latent_dim) # more hyperparameters
     else:
         raise Exception('Invalid autodespeckler specified.')
 
-def get_optimizer(model, config):
-    if config['optimizer'] == 'Adam':
-        optimizer = torch.optim.Adam(model.parameters(), lr=config['learning_rate'])
-    elif config['optimizer'] == 'SGD':
-        optimizer = torch.optim.SGD(model.parameters(), lr=config['learning_rate'])
+def get_optimizer(model, cfg):
+    if cfg.train.optimizer == 'Adam':
+        optimizer = torch.optim.Adam(model.parameters(), lr=cfg.train.lr)
+    elif cfg.train.optimizer == 'SGD':
+        optimizer = torch.optim.SGD(model.parameters(), lr=cfg.train.lr)
     else:
         raise Exception('Optimizer not found.')
 
     return optimizer
 
-def get_scheduler(optimizer, config):
+def get_scheduler(optimizer, cfg):
     """Supports epoch stepping schedulers (batch step needs to be implemented)."""
-    if config['LR_scheduler'] == 'ReduceLROnPlateau':
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=config['LR_patience'])
-    elif config['LR_scheduler'] == 'CosAnnealingLR':
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, config['LR_T_max'], eta_min=0.000001)
+    if cfg.train.LR_scheduler is None or cfg.train.LR_scheduler == 'Constant':
+        scheduler = None
+    elif cfg.train.LR_scheduler == 'ReduceLROnPlateau':
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=cfg.train.LR_patience)
+    elif cfg.train.LR_scheduler == 'CosAnnealingLR':
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, cfg.train.LR_T_max, eta_min=0.000001)
     else:
         raise Exception('Scheduler not found.')
-        
-    #     config['scheduler_step'] = 'epoch'
-    # elif config['LR_scheduler'] == 'CosWarmRestarts':
-    #     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, config['LR_T_max'],
-    #                                                                      T_mult=config['LR_T_mult'])
-    #     config['scheduler_step'] = 'batch'
-    # elif config['scheduler'] == 'OneCycle':
-    #     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr, total_steps=None, epochs=None, steps_per_epoch=None, pct_start=0.3, anneal_strategy='cos', cycle_momentum=True, base_momentum=0.85, max_momentum=0.95, div_factor=25.0, final_div_factor=10000.0, three_phase=False)
-    #     config['scheduler_step'] = 'batch'
-    
     return scheduler
 
-def compute_loss(out_dict, targets, loss_fn, config):
+def compute_loss(out_dict, targets, loss_fn, cfg, beta_scheduler=None, debug=False):
     despeckler_output = out_dict['despeckler_output']
     recons_loss = loss_fn(out_dict['despeckler_output'], targets)
-    if config['autodespeckler'] == 'VAE':
-        # beta hyperparameter
+    loss_dict = dict()
+    if cfg.model.autodespeckler == 'VAE':
+        # beta hyperparameter - KL regularization
         log_var = torch.clamp(out_dict['log_var'], min=-6, max=6)
         mu = out_dict['mu']
+        # ensure KLD loss on same scale as recons_loss! Mean over batch vs. element! imbalance = unstable
         kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
-        recons_loss = recons_loss + config['VAE_beta'] * config['kld_weight'] * kld_loss
+
+        # debug ratio between recons_loss and kld_loss
+        if debug:
+            if kld_loss > 0:
+                balance_ratio = recons_loss.item() / kld_loss.item()
+            else:
+                balance_ratio = float('inf')  # Handle division by zero if KLD loss is 0
+            print(f"Reconstruction Loss: {recons_loss.item()}, KLD Loss: {kld_loss.item()}, Balance Ratio: {balance_ratio}")
+            
+        loss_dict['recons_loss'] = recons_loss
+        loss_dict['kld_loss'] = kld_loss
+        beta = beta_scheduler.beta() if cfg.model.vae.beta_annealing else cfg.model.vae.VAE_beta
+        recons_loss = recons_loss + beta * kld_loss # KLD weighting dropped for better regularization
         
         if torch.isnan(recons_loss).any() or torch.isinf(recons_loss).any():
             print(f'min mu: {mu.min().item()}')
@@ -112,23 +132,33 @@ def compute_loss(out_dict, targets, loss_fn, config):
             print(f'max log_var: {log_var.max().item()}')
             raise Exception('recons_loss + kld_loss is nan or inf')
 
-    return recons_loss
+    loss_dict['final_loss'] = recons_loss
+    return loss_dict
 
-def train_loop(dataloader, model, device, optimizer, minibatches, loss_fn, config):
-    running_recons_loss = torch.tensor(0.0, device=device)
+def train_loop(dataloader, model, device, optimizer, minibatches, loss_fn, cfg, epoch, beta_scheduler=None):
+    running_tot_loss = torch.tensor(0.0, device=device)
+    if cfg.model.autodespeckler == 'VAE':
+        running_recons_loss = torch.tensor(0.0, device=device)
+        running_kld_loss = torch.tensor(0.0, device=device)
     epoch_gradient_norm = torch.tensor(0.0, device=device)
     batches_logged = 0
+
+    # for VAE monitoring
+    all_mu = []
+    all_log_var = []
+    
     model.train()
     for batch_i, X in enumerate(dataloader):
         X = X.to(device)
         
-        sar_in = X[:, :2, :, :] if not config['use_lee'] else X[:, 2:, :, :]
+        sar_in = X[:, :2, :, :] if not cfg.data.use_lee else X[:, 2:, :, :]
         out_dict = model(sar_in)
 
         # also pass SAR layers for reconstruction loss
-        loss = compute_loss(out_dict, sar_in, loss_fn, config)
+        loss_dict = compute_loss(out_dict, sar_in, loss_fn, cfg, beta_scheduler=beta_scheduler)
+        loss = loss_dict['final_loss']
         if torch.isnan(loss).any():
-            err_file_name=f"outputs/ad_param_err_train_{config['autodespeckler']}.json"
+            err_file_name=f"outputs/ad_param_err_train_{cfg.model.autodespeckler}.json"
             stats_dict = print_model_params_and_grads(model, file_name=err_file_name)
             raise ValueError(f"Loss became NaN during training loop in batch {batch_i}. \
                                 The input SAR was NaN: {torch.isnan(sar_in).any()}")
@@ -136,60 +166,88 @@ def train_loop(dataloader, model, device, optimizer, minibatches, loss_fn, confi
         optimizer.zero_grad()
         loss.backward()
         # Compute gradient norm, scaled by batch size
-        if batch_i % config['grad_norm_freq'] == 0:
-            scaled_grad_norm = get_gradient_norm(model) / config['batch_size']
+        if batch_i % cfg.logging.grad_norm_freq == 0:
+            scaled_grad_norm = get_gradient_norm(model) / cfg.train.batch_size
             epoch_gradient_norm += scaled_grad_norm
             batches_logged += 1
             
-        nn.utils.clip_grad_norm_(model.parameters(), config['clip'])
+        nn.utils.clip_grad_norm_(model.parameters(), cfg.train.clip)
         optimizer.step()
 
-        running_recons_loss += loss.detach()
+        running_tot_loss += loss.detach()
+
+        # for VAE monitoring only
+        if cfg.model.autodespeckler == 'VAE':
+            # Collect mu and log_var for the whole epoch
+            all_mu.append(out_dict['mu'].detach().cpu())
+            all_log_var.append(out_dict['log_var'].detach().cpu())
+            running_recons_loss += loss_dict['recons_loss'].detach()
+            running_kld_loss += loss_dict['kld_loss'].detach()
+            
         if batch_i >= minibatches:
             break
     
     # calculate metrics    
-    epoch_recons_loss = running_recons_loss.item() / minibatches 
+    epoch_tot_loss = running_tot_loss.item() / minibatches 
     avg_epoch_gradient_norm = epoch_gradient_norm.item() / batches_logged
+    log_dict = {"train loss": epoch_tot_loss, 
+               "train gradient norm": avg_epoch_gradient_norm}
 
-    # wandb tracking loss and metrics per epoch - track recons loss as well
-    wandb.log({"train reconstruction loss": epoch_recons_loss, 
-               "train gradient norm": avg_epoch_gradient_norm})
+    # VAE mu and log_var monitoring
+    if cfg.model.autodespeckler == 'VAE':
+        # full histogram monitoring
+        beta = beta_scheduler.beta() if cfg.model.vae.beta_annealing else cfg.model.vae.VAE_beta
+        all_mu = torch.cat(all_mu, dim=0).numpy()
+        all_log_var = torch.cat(all_log_var, dim=0).numpy()
+        ratio = (running_recons_loss.item()
+                 / (beta * running_kld_loss.item())
+                if beta > 0
+                else 400)
+        log_dict.update({"mu_mean": all_mu.mean(),
+                    "mu_std": all_mu.std(),
+                    "log_var_mean": all_log_var.mean(),
+                    "log_var_std": all_log_var.std(),
+                    "train_recons_loss": running_recons_loss.item() / minibatches,
+                    "train_kld_loss": running_kld_loss.item() / minibatches,
+                    "train_ratio": ratio,
+                    "beta": beta})
+    wandb.log(log_dict, step=epoch)
     
-    return epoch_recons_loss
+    return epoch_tot_loss
 
-def test_loop(dataloader, model, device, loss_fn, config, logging=True):
-    running_recons_vloss = torch.tensor(0.0, device=device)
+def test_loop(dataloader, model, device, loss_fn, cfg, epoch, logging=True):
+    running_tot_vloss = torch.tensor(0.0, device=device)
     num_batches = len(dataloader)
     
     model.eval()
     with torch.no_grad():
         for batch_i, X in enumerate(dataloader):
             X = X.to(device)
-            sar_in = X[:, :2, :, :] if not config['use_lee'] else X[:, 2:, :, :]
+            sar_in = X[:, :2, :, :] if not cfg.data.use_lee else X[:, 2:, :, :]
             out_dict = model(sar_in)
-            loss = compute_loss(out_dict, sar_in, loss_fn, config)
+            loss_dict = compute_loss(out_dict, sar_in, loss_fn, cfg)
+            loss = loss_dict['final_loss']
             if torch.isnan(loss).any():
-                err_file_name=f"outputs/ad_param_err_val_{config['autodespeckler']}.json"
+                err_file_name=f"outputs/ad_param_err_val_{cfg.model.autodespeckler}.json"
                 stats_dict = print_model_params_and_grads(model, file_name=err_file_name)
                 raise ValueError(f"Loss became NaN during validation loop in batch {batch_i}. \
                                 The input SAR was NaN: {torch.isnan(sar_in).any()}")
-            running_recons_vloss += loss.detach()
+            running_tot_vloss += loss.detach()
 
-    epoch_recons_vloss = running_recons_vloss.item() / num_batches
+    epoch_tot_vloss = running_tot_vloss.item() / num_batches
 
     if logging:
-        wandb.log({'val reconstruction loss': epoch_recons_vloss})
+        wandb.log({'val loss': epoch_tot_vloss}, step=epoch)
     
-    return epoch_recons_vloss
+    return epoch_tot_vloss
 
-def train(model, train_set, val_set, test_set, device, config, save_path=None):
+def train(model, train_set, val_set, test_set, device, cfg):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     logging.info(f'''Starting training:
         Date:            {timestamp}
-        Epochs:          {config['epochs']}
-        Batch size:      {config['batch_size']}
-        Learning rate:   {config['learning_rate']}
+        Epochs:          {cfg.train.epochs}
+        Batch size:      {cfg.train.batch_size}
+        Learning rate:   {cfg.train.lr}
         Training size:   {len(train_set)}
         Validation size: {len(val_set)}
         Test size:       {len(test_set) if test_set is not None else 'NA'}
@@ -201,168 +259,153 @@ def train(model, train_set, val_set, test_set, device, config, save_path=None):
     
     # log via wandb
     run = wandb.init(
-        project=config['project'],
-        group=config['group'],
+        project=cfg.wandb.project,
+        group=cfg.wandb.group,
         config={
         "dataset": "Sentinel1",
-        "use_lee": config['use_lee'],
-        "mode": config['mode'],
-        "patch_size": config['size'],
-        "kernel_size": config['kernel_size'],
-        "autodespeckler": config['autodespeckler'],
-        "latent_dim": config.get('latent_dim'),
-        "AD_num_layers": config.get('AD_num_layers'),
-        "AD_kernel_size": config.get('AD_kernel_size'),
-        "AD_dropout": config.get('AD_dropout'),
-        "AD_activation_func": config.get('AD_activation_func'),
-        "noise_type": config.get('noise_type'),
-        "noise_coeff": config.get('noise_coeff'),
-        'VAE_beta': config.get('VAE_beta'),
-        "learning_rate": config['learning_rate'],
-        "LR_scheduler": config['LR_scheduler'],
-        "LR_patience": config['LR_patience'],
-        "LR_T_max": config['LR_patience'],
-        "epochs": config['epochs'],
-        "early_stopping": config['early_stopping'],
-        "patience": config['patience'],
-        "batch_size": config['batch_size'],
-        "random_flip": config['random_flip'],
-        "num_workers": config['num_workers'],
-        "optimizer": config['optimizer'],
-        "loss_fn": config['loss'],
-        "subset": config['subset'],
+        **cfg.to_dict(),
         "training_size": len(train_set),
         "validation_size": len(val_set),
-        "test_size": len(test_set) if config['mode'] == 'test' else None,
+        "test_size": len(test_set) if cfg.eval.mode == 'test' else None,
         "val_percent": len(val_set) / (len(train_set) + len(val_set)),
-        "clip": config['clip'],
-        "grad_norm_freq": config['grad_norm_freq'],
-        "seed": config['seed'],
         "total_parameters": total_params,
         "trainable_parameters": trainable_params,
-        "parameter_size_mb": param_size_in_mb,
-        "save_file": save_path
+        "parameter_size_mb": param_size_in_mb
         }
     )
-    
+    if cfg.save:
+        if save_path is None:
+            default_path = f"experiments/{datetime.today().strftime('%Y-%m-%d')}_{cfg.model.autodespeckler}_{run.id}/"
+            cfg.save_path = default_path
+        print(f'Save path set to: {cfg.save_path}')
+        
+    # silence unnecessary wandb prints
+    logging.getLogger("wandb").setLevel(logging.WARNING)
     # log weights and gradients each epoch
     wandb.watch(model, log="all", log_freq=10)
 
-    # VAE only
-    if config['autodespeckler'] == 'VAE':
-        config['kld_weight'] = config['batch_size'] / len(train_set)
-        
     # optimizer and scheduler for reducing learning rate
-    optimizer = get_optimizer(model, config)
-    scheduler = get_scheduler(optimizer, config)
+    optimizer = get_optimizer(model, cfg)
+    scheduler = get_scheduler(optimizer, cfg)
+    beta_scheduler = BetaScheduler(beta=cfg.model.vae.VAE_beta,
+                                   period=cfg.model.vae.beta_period,
+                                   n_cycle=cfg.model.vae.beta_cycles,
+                                   ratio=cfg.model.vae.beta_proportion) if cfg.model.vae.beta_annealing else None
 
     # make DataLoader
     train_loader = DataLoader(train_set,
-                             batch_size=config['batch_size'],
-                             num_workers=config['num_workers'],
-                             persistent_workers=config['num_workers']>0,
+                             batch_size=cfg.train.batch_size,
+                             num_workers=cfg.train.num_workers,
+                             persistent_workers=cfg.train.num_workers>0,
                              pin_memory=True,
                              shuffle=True,
                              drop_last=False)
     
     val_loader = DataLoader(val_set,
-                            batch_size=config['batch_size'],
-                            num_workers=config['num_workers'],
-                            persistent_workers=config['num_workers']>0,
+                            batch_size=cfg.train.batch_size,
+                            num_workers=cfg.train.num_workers,
+                            persistent_workers=cfg.train.num_workers>0,
                             pin_memory=True,
                             shuffle=True,
                             drop_last=False)
 
     test_loader = DataLoader(test_set,
-                            batch_size=config['batch_size'],
-                            num_workers=config['num_workers'],
-                            persistent_workers=config['num_workers']>0,
+                            batch_size=cfg.train.batch_size,
+                            num_workers=cfg.train.num_workers,
+                            persistent_workers=cfg.train.num_workers>0,
                             pin_memory=True,
                             shuffle=True,
-                            drop_last=False) if config['mode'] == 'test' else None
+                            drop_last=False) if cfg.eval.mode == 'test' else None
 
-    # TRAIN AND TEST LOOP IS PER EPOCH!!!
-    if config['early_stopping']:
-        early_stopper = EarlyStopper(patience=config['patience'])
-
-        # best model checkpoint
-        min_model_weights = model.state_dict()
+    if cfg.train.early_stopping:
+        early_stopper = ADEarlyStopper(patience=cfg.train.patience, beta_annealing=cfg.model.vae.beta_annealing,
+                                      period=cfg.model.vae.beta_period, n_cycle=cfg.model.vae.beta_cycles,
+                                      count_cycles=False)
     
     wandb.define_metric("val reconstruction loss", summary="min")
-    minibatches = int(len(train_loader) * config['subset'])
-    loss_fn = get_loss(config).to(device)
-    for epoch in range(config['epochs']):
-        try:
+    minibatches = int(len(train_loader) * cfg.train.subset)
+    loss_fn = get_loss(cfg).to(device)
+    for epoch in range(cfg.train.epochs):
+        try:    
             # train loop
-            avg_loss = train_loop(train_loader, model, device, optimizer, minibatches, loss_fn, config)
+            avg_loss = train_loop(train_loader, model, device, optimizer, minibatches, loss_fn, cfg, epoch, beta_scheduler=beta_scheduler)
     
             # at the end of each training epoch compute validation
-            avg_vloss = test_loop(val_loader, model, device, loss_fn, config)
+            avg_vloss = test_loop(val_loader, model, device, loss_fn, cfg, epoch)
         except Exception as err:
             raise RuntimeError(f'Error while training occurred at epoch {epoch}.') from err
 
-        if config['early_stopping']:
-            early_stopper.step(avg_vloss)
+        if cfg.train.early_stopping:
+            early_stopper.step(avg_vloss, model, epoch)
             if early_stopper.is_stopped():
                 break
-                
-            if early_stopper.is_best_epoch():
-                early_stopper.store_metric(avg_vloss)
-                # Model weights are saved at the end of every epoch, if it's the best seen so far:
-                min_model_weights = copy.deepcopy(model.state_dict())
 
-        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-            scheduler.step(avg_vloss)
-        else:
-            scheduler.step()
+        if scheduler is not None:
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(avg_vloss)
+            else:
+                scheduler.step()
 
-        wandb.log({"learning_rate": scheduler.get_last_lr()[0], "epoch": epoch})
+        if beta_scheduler is not None:
+            beta_scheduler.step()
 
-    # Save our model
-    final_vmetrics = SaveMetrics()
-    PATH = 'models/' + save_path + '.pth' if save_path is not None else None
-    if config['early_stopping']:
-        if config['save']:
-            torch.save(min_model_weights, PATH) # save only if it is the best model so far
+        wandb.log({"learning_rate": scheduler.get_last_lr()[0] if scheduler is not None else cfg.train.lr,
+                   "epoch": epoch})
 
+    # Save our model, config, and metrics to save_path
+    fmetrics = Metrics(use_partitions=False)
+    model_weights = None
+    if cfg.train.early_stopping:
+        model_weights = early_stopper.get_best_weights()
         # reset model to checkpoint for later sample prediction
-        model.load_state_dict(min_model_weights)
-        final_vmetrics.save_metrics(early_stopper.get_metric(), typ='val')
+        model.load_state_dict(model_weights)
+        fmetrics.save_metrics('val', loss=early_stopper.get_min_validation_loss())
     else:
-        if config['save']:
-            torch.save(model.state_dict(), PATH)
-        final_vmetrics.save_metrics(avg_vloss, typ='val')
+        model_weights = model.state_dict()
+        fmetrics.save_metrics('val', loss=avg_vloss)
 
     # for benchmarking purposes
-    if config['mode'] == 'test':
-        test_loss = test_loop(test_loader, model, device, config, logging=False)
-        final_vmetrics.save_metrics(test_loss, typ='test')
+    if cfg.eval.mode == 'test':
+        test_loss = test_loop(test_loader, model, device, cfg, logging=False)
+        fmetrics.save_metrics('test', loss=test_loss)
 
-    return run, final_vmetrics
+    if cfg.save:
+        save_experiment(model_weights, fmetrics, run, cfg)
 
-# more interactive histogram?
-# def log_histograms(input_image, output_image, id):
-#     """
-#     Logs histograms of the input and output SAR images to compare intensity distributions.
+    return run, fmetrics
+
+def save_experiment(weights, metrics, run, cfg):
+    """Save experiment files to directory specified by config save_path."""
+    path = Path(cfg.save_path).mkdir(parents=True, exist_ok=True)
+    if weights is not None:
+        torch.save(weights, path / "model.pth")
+
+    # save config
+    cfg.save2yaml(path / "config.yaml")
+
+    # save metrics
+    metrics.to_json(path / "metrics.json")
+
+    # save wandb id info to json
+    wandb_info = {
+        "run_id": run.id,
+        "project": run.project,
+        "group": run.group,
+        "name": run.name,
+        "state": run.state,  # "running", "finished", "crashed", etc.
+        "url": run.url
+    }
+    with open(path / f"wandb_info.json", "w") as f:
+        json.dump(wandb_info, f, indent=4)
     
-#     Args:
-#         input_image (np.ndarray): Noisy SAR VV-VH (2, 64, 64) image (before despeckling).
-#         output_image (np.ndarray): Denoised SAR VV-VH (2, 64, 64) image (after despeckling).
-#         id (int): identifier for patch in dataset.
-#     """
-#     # Flatten images to compute histograms
-#     input_values = input_image.flatten()
-#     output_values = output_image.flatten()
-
-#     # Log histograms in WandB
-#     wandb.log({
-#         f"SAR-in Intensity Distribution for Patch {id}": wandb.Histogram(input_values),
-#         f"SAR-out Intensity Distribution for Patch {id}": wandb.Histogram(output_values),
-#     })
 
 def create_histogram_plot(input_values, output_values, min=-2, max=2):
     """
     Creates an overlaid histogram and returns a WandB Image.
+
+    Note: resolution for wandb image is low (except for the matplotlib distribution plots).
+    This is for efficiency sake. During final benchmarking, can use matplotlib fig with dpi=300
+    for high res WandB image. 
     """
     fig, ax = plt.subplots(figsize=(5, 4), dpi=200)
     ax.hist(input_values, bins=50, alpha=0.5, range=(min, max), label="SAR-in", color="blue")
@@ -376,9 +419,9 @@ def create_histogram_plot(input_values, output_values, min=-2, max=2):
     plt.close(fig)  # Close figure to free memory
     return wandb_image
 
-def sample_predictions(model, sample_set, mean, std, config, histogram=True, hist_freq=1, seed=24330):
+def sample_predictions(model, sample_set, mean, std, cfg, histogram=True, hist_freq=1, seed=24330):
     """Generate predictions on a subset of images in the dataset for wandb logging."""
-    if config['num_sample_predictions'] <= 0:
+    if cfg.wandb.num_sample_predictions <= 0:
         return None
 
     # enable dem visualization in dataset
@@ -386,7 +429,7 @@ def sample_predictions(model, sample_set, mean, std, config, histogram=True, his
     columns = ["id", 'input_vv', 'input_vh', 'enhanced_lee_vv', 'enhanced_lee_vh', 'despeckled_vv', 'despeckled_vh', 'dem'] 
 
     # some display options
-    if config['autodespeckler'] == 'DAE':
+    if cfg.model.autodespeckler == 'DAE':
         columns.insert(3, 'noisy_vv')
         columns.insert(4, 'noisy_vh')
     if histogram:
@@ -402,13 +445,13 @@ def sample_predictions(model, sample_set, mean, std, config, histogram=True, his
     model.to('cpu')
     model.eval()
     rng = Random(seed)
-    samples = rng.sample(range(0, len(sample_set)), config['num_sample_predictions'])
+    samples = rng.sample(range(0, len(sample_set)), cfg.wandb.num_sample_predictions)
     for index, k in enumerate(samples):
         # get all images to shape (H, W, C) with C = 1 or 3 (1 for grayscale, 3 for RGB)
         X = sample_set[k]
 
         with torch.no_grad():
-            sar_in = X[:2, :, :] if not config['use_lee'] else X[2:4, :, :]
+            sar_in = X[:2, :, :] if not cfg.data.use_lee else X[2:4, :, :]
             out_dict = model(sar_in.unsqueeze(0))
             despeckler_output = out_dict['despeckler_output'].squeeze(0)
             despeckler_input = out_dict['despeckler_input'].squeeze(0) # tmp
@@ -444,57 +487,48 @@ def sample_predictions(model, sample_set, mean, std, config, histogram=True, his
 
         # VV input images
         vv = vv_map.to_rgba(vv, bytes=True)
-        vv = np.clip(vv, 0, 255).astype(np.uint8)
         vv_img = Image.fromarray(vv, mode="RGBA")
         row.append(wandb.Image(vv_img))
 
         # VH input images
         vh = vh_map.to_rgba(vh, bytes=True)
-        vh = np.clip(vh, 0, 255).astype(np.uint8)
         vh_img = Image.fromarray(vh, mode="RGBA")
         row.append(wandb.Image(vh_img))
 
         # DAE ONLY
-        if config['autodespeckler'] == 'DAE':
+        if cfg.model.autodespeckler == 'DAE':
             # noisy VV
             noisy_vv = dae_vv_map.to_rgba(noisy_vv, bytes=True)
-            noisy_vv = np.clip(noisy_vv, 0, 255).astype(np.uint8)
             noisy_vv_img = Image.fromarray(noisy_vv, mode="RGBA")
             row.append(wandb.Image(noisy_vv_img))
     
             # noisy VH
             noisy_vh = dae_vh_map.to_rgba(noisy_vh, bytes=True)
-            noisy_vh = np.clip(noisy_vh, 0, 255).astype(np.uint8)
             noisy_vh_img = Image.fromarray(noisy_vh, mode="RGBA")
             row.append(wandb.Image(noisy_vh_img))
 
         # Enhanced lee vv
         en_vv = vv_map.to_rgba(en_vv, bytes=True)
-        en_vv = np.clip(en_vv, 0, 255).astype(np.uint8)
         en_vv_img = Image.fromarray(en_vv, mode="RGBA")
         row.append(wandb.Image(en_vv_img))
 
         # Enhanced lee vh
         en_vh = vh_map.to_rgba(en_vh, bytes=True)
-        en_vh = np.clip(en_vh, 0, 255).astype(np.uint8)
         en_vh_img = Image.fromarray(en_vh, mode="RGBA")
         row.append(wandb.Image(en_vh_img))
 
         # reconstruction VV
         recons_vv = vv_map.to_rgba(recons_vv, bytes=True)
-        recons_vv = np.clip(recons_vv, 0, 255).astype(np.uint8)
         recons_vv_img = Image.fromarray(recons_vv, mode="RGBA")
         row.append(wandb.Image(recons_vv_img))
 
         # reconstruction VH
         recons_vh = vh_map.to_rgba(recons_vh, bytes=True)
-        recons_vh = np.clip(recons_vh, 0, 255).astype(np.uint8)
         recons_vh_img = Image.fromarray(recons_vh, mode="RGBA")
         row.append(wandb.Image(recons_vh_img))
 
         # dem
         dem = dem_map.to_rgba(dem, bytes=True)
-        dem = np.clip(dem, 0, 255).astype(np.uint8)
         dem_img = Image.fromarray(dem, mode="RGBA")
         row.append(wandb.Image(dem_img))
 
@@ -503,11 +537,11 @@ def sample_predictions(model, sample_set, mean, std, config, histogram=True, his
             if index % hist_freq == 0:
                 # log_histograms(sar_in.numpy(), despeckler_output.numpy(), k)
                 input_values = sar_in[0].numpy().flatten()
-                output_values = recons_vv.flatten()
+                output_values = despeckler_output[0].numpy().flatten()
                 row.append(create_histogram_plot(input_values, output_values, min=-2, max=2))
     
                 input_values = sar_in[1].numpy().flatten()
-                output_values = recons_vh.flatten()
+                output_values = despeckler_output[1].numpy().flatten()
                 row.append(create_histogram_plot(input_values, output_values, min=-2, max=2))
             else:
                 # skip so add empty cell
@@ -517,13 +551,94 @@ def sample_predictions(model, sample_set, mean, std, config, histogram=True, his
 
     return table
 
-def run_experiment_ad(config):
-    """Run a single autodespeckler model experiment given the configuration parameters."""
+def sample_examples(model, sample_set, cfg, idxs=[14440, 3639, 7866]):
+    """Generate curated examples for model qualitative analysis. Select example cases via dataset indices."""
+    # include dem and create necessary coordinate grids for dem plots
+    sample_set.set_include_dem(True)
+    x = np.linspace(0, 1, 64)  # Adjust the range as needed
+    y = np.linspace(0, 1, 64)
+    X, Y = np.meshgrid(x, y)
+    Y_flipped = np.flipud(Y) # invert y to match imshow
+    
+    vv_map = ScalarMappable(norm=None, cmap='gray')
+    vh_map = ScalarMappable(norm=None, cmap='gray')
+    model.to('cpu')
+    model.eval()
+    examples = []
+    for k in idxs:
+        # get all images to shape (H, W, C) with C = 1 or 3 (1 for grayscale, 3 for RGB)
+        X = sample_set[k]
+
+        with torch.no_grad():
+            sar_in = X[:2, :, :] if not cfg.data.use_lee else X[2:4, :, :]
+            out_dict = model(sar_in.unsqueeze(0))
+            despeckler_output = out_dict['despeckler_output'].squeeze(0)
+            despeckler_input = out_dict['despeckler_input'].squeeze(0) # tmp
+            
+        # Channels are descaled using linear variance scaling
+        X = X.permute(1, 2, 0)
+
+        row = [k]
+        # inputs, outputs and their ranges for converting to grayscale
+        vv = X[:, :, 0].numpy()
+        en_vv = X[:, :, 2].numpy()
+        recons_vv = despeckler_output[0].numpy()
+        min_vv = np.min([np.min(vv), np.min(en_vv), np.min(recons_vv)])
+        max_vv = np.max([np.max(vv), np.max(en_vv), np.max(recons_vv)])
+        vv_map.set_norm(Normalize(vmin=min_vv, vmax=max_vv))
+
+        vh = X[:, :, 1].numpy()
+        en_vh = X[:, :, 3].numpy()
+        recons_vh = despeckler_output[1].numpy()
+        min_vh = np.min([np.min(vh), np.min(en_vh), np.min(recons_vh)])
+        max_vh = np.max([np.max(vh), np.max(en_vh), np.max(recons_vh)])
+        vh_map.set_norm(Normalize(vmin=min_vh, vmax=max_vh))
+
+        dem = X[:, :, 4].numpy()
+
+        # Stitch the VV and VH images into vertical columns
+        stitched_vv = np.vstack([vv, en_vv, recons_vv])
+        stitched_vv = vv_map.to_rgba(stitched_vv, bytes=True)
+        vv_img = Image.fromarray(stitched_vv, mode="RGBA")
+        examples.append(wandb.Image(vv_img, caption=f"({k}VV) Top: In, Middle: Lee, Bottom: Out"))
+
+        # VH input images
+        stitched_vh = np.vstack([vh, en_vh, recons_vh])
+        stitched_vh = vh_map.to_rgba(stitched_vh, bytes=True)
+        vh_img = Image.fromarray(stitched_vh, mode="RGBA")
+        examples.append(wandb.Image(vh_img, caption=f"({k}VH) Top: In, Middle: Lee, Bottom: Out"))
+
+        # DEM column with overlaid contour plots
+        fig, axes = plt.subplots(3, 1, figsize=(6, 18), dpi=200))
+        im = axes[0].imshow(dem, cmap='gray', vmin=np.min(dem), vmax=np.max(dem))
+        axes[0].set_title("DEM")
+        axes[0].axis("off")
+        fig.colorbar(im, ax=axes[0], fraction=0.046, pad=0.04, label="DEM Value")
+        
+        axes[1].imshow(dem, cmap='gray', extent=[0, 1, 0, 1], origin='upper')
+        contour = axes[1].contour(X, Y_flipped, dem, levels=10, cmap='terrain', alpha=1)
+        axes[1].set_title("DEM Contour Plot 1")
+        axes[1].set_aspect('equal')
+        fig.colorbar(contour, ax=axes[1], fraction=0.046, pad=0.04, label="DEM Value")
+        
+        contour = axes[2].contourf(X, Y_flipped, dem, levels=10, cmap='cividis', alpha=1)
+        axes[2].set_title("DEM Contour Plot 2")
+        axes[2].set_aspect('equal')
+        fig.colorbar(contour, ax=axes[2], fraction=0.046, pad=0.04, label="DEM Value")
+        axes[2].axis('off')
+        plt.tight_layout()
+        examples.append(wandb.Image(fig, caption=f"({k}) DEM and Contour Plots"))
+
+    sample_set.set_include_dem(False)
+    return examples
+
+def run_experiment_ad(cfg):
+    """Run a single autodespeckler model experiment given the configuration parameters. Append output and input vv/vh."""
     if wandb.login():
         # seeding
-        np.random.seed(config['seed'])
-        random.seed(config['seed'])
-        torch.manual_seed(config['seed'])
+        np.random.seed(cfg.seed)
+        random.seed(cfg.seed)
+        torch.manual_seed(cfg.seed)
 
         device = (
             "cuda"
@@ -532,16 +647,15 @@ def run_experiment_ad(config):
             if torch.backends.mps.is_available()
             else "cpu"
         )
-        model = get_model(config).to(device)
+        model = get_model(cfg).to(device)
         
         print(f"Using {device} device")
-        model_name = config['autodespeckler']
-        kernel_size = config['kernel_size']
-        size = config['size']
-        samples = config['samples']
+        model_name = cfg.model.autodespeckler
+        kernel_size = cfg.data.kernel_size
+        size = cfg.data.size
+        samples = cfg.data.samples
         sample_dir = f'data/ad/samples_{kernel_size}_{size}_{samples}_dem/'
-        save_file = f"ad/{model_name}_model{len(glob(f'models/ad/{model_name}_model*.pth'))}" if config['save'] else None
-
+        
         # load in mean and std
         with open(f'data/ad/stats/{kernel_size}_{size}_{samples}_dem.pkl', 'rb') as f:
             train_mean, train_std = pickle.load(f)
@@ -550,101 +664,98 @@ def run_experiment_ad(config):
             train_std = torch.from_numpy(train_std)
 
         standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
-        train_set = DespecklerSARDataset(sample_dir, typ="train", transform=standardize, random_flip=config['random_flip'],
-                                          seed=config['seed']+1)
+        train_set = DespecklerSARDataset(sample_dir, typ="train", transform=standardize, random_flip=cfg.data.random_flip,
+                                          seed=cfg.seed+1)
         val_set = DespecklerSARDataset(sample_dir, typ="val", transform=standardize)
-        test_set = DespecklerSARDataset(sample_dir, typ="test", transform=standardize) if config['mode'] == 'test' else None
+        test_set = DespecklerSARDataset(sample_dir, typ="test", transform=standardize) if cfg.eval.mode == 'test' else None
         
         # initialize loss functions - train loss function is optimized for gradient calculations
-        run, final_vmetrics = train(model, train_set, val_set, test_set, device, config, save_path=save_file)
+        run, fmetrics = train(model, train_set, val_set, test_set, device, cfg)
 
         # summary metrics
-        final_vloss = final_vmetrics.get_metrics(typ=config['mode'])
-        run.summary[f"final_{config['mode']}_vloss"] = final_vloss
+        run.summary[f"final_{cfg.eval.mode}_loss"] = fmetrics.get_metrics(split=cfg.eval.mode)['loss']
             
         # log predictions on validation set using wandb
         try:
-            pred_table = sample_predictions(model, test_set if config['mode'] == 'test' else val_set, 
-                                            train_mean, train_std, config)
-            run.log({"model_val_predictions": pred_table})
+            pred_table = sample_predictions(model, test_set if cfg.eval.mode == 'test' else val_set, 
+                                            train_mean, train_std, cfg)
+
+            # pick 3 full res examples
+            examples = sample_examples(model, test_set if cfg.eval.mode == 'test' else val_set, cfg)
+            run.log({"model_val_predictions": pred_table, "examples": examples})
         finally:
             run.finish()
 
-        # if want test metrics calculate model score on test set
-        return final_vmetrics
+        return fmetrics
     else:
         raise Exception("Failed to login to wandb.")
 
-def main(config):
-    run_experiment_ad(config)
+def main(cfg):
+    run_experiment_ad(cfg)
 
-if __name__ == '__main__':
+if __name__ == '__main__':    
     parser = argparse.ArgumentParser(prog='train_ad_head', description='Trains SAR autoencoder head by itself.')
 
-    # preprocessing
-    parser.add_argument('-x', '--size', type=int, default=64, help='pixel width of dataset patches (default: 64)')
-    parser.add_argument('-n', '--samples', type=int, default=500, help='number of patches sampled per image (default: 500)')
-    parser.add_argument('--kernel_size', type=int, default=5, help='kernel size for enhanced lee (default: 5)')
-    
-    # wandb
-    parser.add_argument('--project', default="SAR_AD_HEAD", help='Wandb project where run will be logged')
-    parser.add_argument('--group', default=None, help='Optional group name for model experiments (default: None)')
-    parser.add_argument('--num_sample_predictions', type=int, default=40, help='number of predictions to visualize (default: 40)')
+    # YAML config file
+    parser.add_argument("--config", default="configs/default.yaml", help="Path to YAML config file (default: configs/default.yaml)")
 
-    # evaluation
-    parser.add_argument('--mode', default='val', choices=['val', 'test'], help=f"dataset used for evaluation metrics (default: val)")
+    # save model, config, and wandb run info to folder
+    parser.add_argument('--save', action='store_true', help='save model and configs to file (default: False)')
+    parser.add_argument('--save_path', help='directory path for saving the model')
+
+    # wandb
+    parser.add_argument('--project', help='Wandb project where run will be logged')
+    parser.add_argument('--group', help='Optional group name for model experiments')
+    parser.add_argument('--num_sample_predictions', type=int, help='number of predictions to visualize')
     
     # ml
-    parser.add_argument('-e', '--epochs', type=int, default=30, help='(default: 30)')
-    parser.add_argument('-b', '--batch_size', type=int, default=32, help='(default: 32)')
-    parser.add_argument('-s', '--subset', dest='subset', type=float, default=1.0, help='percentage of training dataset to use per epoch (default: 1.0)')
-    parser.add_argument('-l', '--learning_rate', type=float, default=0.0001, help='(default: 0.0001)')
+    parser.add_argument('-e', '--epochs', type=int)
+    parser.add_argument('-b', '--batch_size', type=int)
+    parser.add_argument('-l', '--learning_rate', type=float)
     parser.add_argument('--early_stopping', action='store_true', help='early stopping (default: False)')
-    parser.add_argument('-p', '--patience', type=int, default=5, help='early stopping patience (default: 5)')
-    parser.add_argument('--LR_scheduler', default='ReduceLROnPlateau', choices=SCHEDULER_NAMES,
-                        help=f"LR schedulers: {', '.join(SCHEDULER_NAMES)} (default: ReduceLROnPlateau)")
-    parser.add_argument('--LR_patience', type=int, default=5, help='Learning rate scheduler patience (default: 5)')
-    parser.add_argument('--LR_T_max', type=int, default=200, help='Learning rate scheduler patience (default: 5)')
+    parser.add_argument('-p', '--patience', type=int, help='early stopping patience')
+    parser.add_argument('--LR_scheduler', choices=SCHEDULER_NAMES,
+                        help=f"LR schedulers: {', '.join(SCHEDULER_NAMES)}")
 
     # autodespeckler
-    parser.add_argument('--autodespeckler', default='VAE', choices=AUTODESPECKLER_NAMES,
-                        help=f"models: {', '.join(AUTODESPECKLER_NAMES)} (default: None)")
-    parser.add_argument('--noise_type', default=None, choices=NOISE_NAMES,
-                        help=f"models: {', '.join(NOISE_NAMES)} (default: None)")
-    parser.add_argument('--noise_coeff', type=float, default=None,  help=f"noise coefficient (default: 0.1)")
-    parser.add_argument('--latent_dim', default=None, type=int, help='latent dimensions (default: 200)')
-    parser.add_argument('--AD_num_layers', default=None, type=int, help='Autoencoder layers (default: 5)')
-    parser.add_argument('--AD_kernel_size', default=None, type=int, help='Autoencoder kernel size (default: 3)')
-    parser.add_argument('--AD_dropout', default=None, type=float, help=f"(default: 0.1)")
-    parser.add_argument('--AD_activation_func', default=None, choices=['leaky_relu', 'relu', 'softplus', 'mish', 'gelu', 'elu'], help=f'activations: leaky_relu, relu, softplus, mish, gelu, elu (default: leaky_relu)')
-    parser.add_argument('--VAE_beta', default=1.0, type=float, help=f"(default: 1.0)")
+    parser.add_argument('--autodespeckler', choices=AUTODESPECKLER_NAMES,
+                        help=f"models: {', '.join(AUTODESPECKLER_NAMES)}")
+    parser.add_argument('--noise_type', choices=NOISE_NAMES,
+                        help=f"models: {', '.join(NOISE_NAMES)}")
+    parser.add_argument('--noise_coeff', type=float, help="noise coefficient")
+    parser.add_argument('--latent_dim', type=int, help='latent dimensions')
+    parser.add_argument('--AD_num_layers', type=int, help='Autoencoder layers')
+    parser.add_argument('--AD_kernel_size', type=int, help='Autoencoder kernel size')
+    parser.add_argument('--AD_dropout', type=float, help='Autoencoder dropout')
+    parser.add_argument('--AD_activation_func', choices=['leaky_relu', 'relu', 'softplus', 'mish', 'gelu', 'elu'], help='activations: leaky_relu, relu, softplus, mish, gelu, elu')
 
-    # data augmentation
+    # VAE Beta
+    parser.add_argument('--VAE_beta', type=float, help="VAE beta for KL divergence term")
+    # new...
+    parser.add_argument('--beta_annealing', action='store_true', help="Use beta annealing for VAE (default: False)")
+    parser.add_argument('--beta_period', type=int, help="Epoch period for beta annealing")
+    parser.add_argument('--beta_cycles', type=int, help="M cycles for beta annealing ")
+    parser.add_argument('--beta_proportion', type=float, help="R proportion used to increase beta within a cycle")
+    
+    # data
     parser.add_argument('--use_lee', action='store_true', help='use enhanced lee filter on ad input (default: False)')
-    parser.add_argument('--random_flip', action='store_true', help='Randomly flip training patches horizontally and vertically (default: False)')
-
-    # data loading
-    parser.add_argument('--num_workers', type=int, default=10, help='(default: 10)')
+    parser.add_argument('--num_workers', type=int)
     
     # loss
-    parser.add_argument('--loss', default='MSELoss', choices=LOSS_NAMES,
-                        help=f"loss: {', '.join(LOSS_NAMES)} (default: MSELoss)")
-    parser.add_argument('--clip', type=float, default=1.0, help=f"Gradient clipping max norm (default: 1.0)")
+    parser.add_argument('--loss', choices=LOSS_NAMES,
+                        help=f"loss: {', '.join(LOSS_NAMES)}")
+    parser.add_argument('--clip', type=float, help="Gradient clipping max norm")
     # print statistics of current gradient and adjust norm used to clip according to the statistics
     # heuristically use 1
     
     # optimizer
-    parser.add_argument('--optimizer', default='Adam', choices=['Adam', 'SGD'],
-                        help=f"optimizer: {', '.join(['Adam', 'SGD'])} (default: Adam)")
+    parser.add_argument('--optimizer', choices=['Adam', 'SGD'],
+                        help=f"optimizer: {', '.join(['Adam', 'SGD'])}")
 
     # reproducibility
-    parser.add_argument('--seed', type=int, default=831002, help='seed (default: 831002)')
+    parser.add_argument('--seed', type=int, help='seeding')
 
-    # save model to file
-    parser.add_argument('--save', action='store_true', help='save model to file (default: False)')
-
-    # logging
-    parser.add_argument('--grad_norm_freq', type=int, default=10, help=f"Grad norm logging batch frequency (default: 10)")
-
-    config = vars(parser.parse_args())
-    sys.exit(main(config))
+    # Load base config
+    _args = parser.parse_args()
+    cfg = Config(**_args.__dict__)
+    sys.exit(main(cfg))

@@ -5,6 +5,7 @@ import numpy as np
 from dataset import FloodSampleMeanStd
 from math import exp
 import json
+import copy
 
 TRAIN_LABELS = ["label_20150919_20150917_496_811.tif", "label_20150919_20150917_497_812.tif",
                 "label_20151112_20151109_472_940.tif", "label_20151112_20151109_473_939.tif", 
@@ -32,6 +33,80 @@ DAMP_DEFAULT = 1.0
 CU_DEFAULT = 0.523 # 0.447 is sqrt(1/number of looks)
 CMAX_DEFAULT = 1.73 # 1.183 is sqrt(1 + 2/number of looks)
 
+class Metrics:
+    """Improved object interface to store validation and/or test metrics during single experiment.
+    Allows for generalized data splits and partitions within splits if enabled.
+    
+    All metrics are organized into one large dictionary with split (val, test, etc.) index first, then
+    partition (shift, non-shift, etc.) as the next available index if enabled."""
+    def __init__(self, use_partitions=False):
+        self.use_partitions=use_partitions
+        self.metrics = {}
+
+    def save_metrics(self, split, partition=None, **kwargs):
+        """Save one or more metrics for a given split (and partition if enabled).
+        
+        - If partitions are enabled, store under {split -> partition -> metric}.
+        - If partitions are disabled, store under {split -> metric}.
+        - Supports multiple metrics at once via **kwargs.
+
+        Parameters
+        ----------
+        split : str
+            The data split to store the metrics under (e.g., "train", "val", "test").
+        partition : str, optional
+            The partition within the split (e.g., "shifted", "non-shifted"). Required if partitions are enabled.
+        **kwargs : dict
+            Key-value pairs representing metric names and their values for the specified split / partition.
+        """
+        if split not in self.metrics:
+            self.metrics[split] = {}  # Initialize split if not present
+
+        if self.use_partitions:
+            if partition is None:
+                raise ValueError("Partition must be specified when partitions are enabled.")
+            if partition not in self.metrics[split]:
+                self.metrics[split][partition] = {}
+            self.metrics[split][partition].update(kwargs)
+        else:
+            if partition is not None:
+                raise ValueError("Partition specified but not enabled.")
+            self.metrics[split].update(kwargs)
+
+    def get_metrics(self, split=None, partition=None):
+        """Retrieve metrics.
+        
+        - If partitions are enabled:
+            - If both `split` & `partition` are specified, return that partition's metrics.
+            - If only `split` is specified, return all partitions within that split.
+        - If partitions are disabled:
+            - If `split` is specified, return that split's metrics directly.
+        - If nothing is specified, return all metrics.
+
+        Parameters
+        ----------
+        split : str, optional
+            The data split of the metrics to retrieve (e.g., "train", "val", "test").
+        partition : str, optional
+            The partition within the split of the metrics to retrieve (e.g., "shifted", "non-shifted").
+        """
+        if split:
+            if self.use_partitions and partition:
+                return self.metrics.get(split, {}).get(partition, {})
+            return self.metrics.get(split, {})
+        return self.metrics
+
+    def to_json(self, filename):
+        """Save the stored metrics to a JSON file.
+
+        Parameters
+        ----------
+        filename : str
+            Path to the file where metrics will be saved.
+        """
+        with open(filename, "w") as f:
+            json.dump(self.metrics, f, indent=4)
+        
 class SaveMetrics:
     """Object interface to handle storing and retrieving shift invariant and non shift invariant metrics."""
     def __init__(self, shift_invariant=True):
@@ -159,6 +234,37 @@ class SARChannelIndexer:
 
     def get_channel_names(self):
         return self.names
+
+def beta_cycle_linear(epoch, beta=1, period=50, n_cycle=4, ratio=0.5):
+    """Beta annealing function as proposed by https://arxiv.org/pdf/1903.10145.
+    After the n cycles of period epochs, the remaining epochs remain at max beta.
+    """
+    if epoch >= n_cycle * period:
+        return beta
+        
+    tao = (epoch % period) / period
+    return beta if tao > ratio else beta * tao / ratio
+
+class BetaScheduler:
+    def __init__(self, beta=1.0, period=50, n_cycle=4, ratio=0.5):
+        """Beta scheduler for cyclic annealing."""
+        self.beta = beta
+        self.period = period
+        self.n_cycle = n_cycle
+        self.ratio = ratio
+        self.epoch = 0
+        self.cur_beta = beta_cycle_linear(0, beta=beta, period=period, n_cycle=n_cycle, ratio=ratio)
+
+    def step(self):
+        self.epoch += 1
+        self.cur_beta = beta_cycle_linear(self.epoch, 
+                                          beta=self.beta, 
+                                          period=self.period, 
+                                          n_cycle=self.n_cycle, 
+                                          ratio=self.ratio)
+
+    def beta(self);
+        return self.cur_beta
 
 def get_gradient_norm(model):
     """Calculate global gradient norm during training."""
@@ -339,6 +445,76 @@ class EarlyStopper:
 
     def get_metric(self):
         return self.metric
+
+class ADEarlyStopper:
+    """This class supports regular early stopping as well as early stopping for VAE cyclical beta annealing
+    training patterns.
+    
+    Parameters
+    ----------
+    patience : int
+        Number of epochs without improvement before training is stopped.
+    min_delta : float
+        Loss above lowest loss + min_delta counts towards patience.
+    beta_annealing : bool
+        Whether to only save and stop at the end of a beta annealing cycle.
+    count_cycles : bool
+        If True, then step at end of each cycle counts towards patience. Otherwise only starts
+        counter when all cycles are done - forcing model to use all cycles before any early stopping.
+    """
+    def __init__(self, patience=1, min_delta=0, beta_annealing=False, period=None, n_cycle=None, count_cycles=False):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best = True
+        self.min_validation_loss = float('inf')
+        self.best_model_weights = None
+
+        # beta annealing
+        self.beta_annealing = beta_annealing
+        self.period = period
+        self.n_cycle = n_cycle
+        self.count_cycles = count_cycles
+
+    def step(self, validation_loss, model, epoch):
+        """
+        Note: For beta annealing scheduling at the end of n_cycles,
+        we revert to normal early stopping with fixed beta.
+        
+        Args:
+        - val_loss: Current validation loss.
+        - model: Model to save weights from.
+        - epoch: Current epoch.
+        """
+        # if beta annealing check if end of cycle or past end of last cycle
+        if self.beta_annealing and (epoch + 1) % self.period != 0 and epoch < self.n_cycle * self.period:
+            return  # Do nothing
+            
+        if validation_loss < self.min_validation_loss:
+            self.min_validation_loss = validation_loss
+            self.counter = 0
+            self.best = True
+            self.best_model_weights = copy.deepcopy(model.state_dict())
+        elif validation_loss > (self.min_validation_loss + self.min_delta):
+            if self.beta_annealing and not self.count_cycles:
+                if epoch >= self.n_cycle * self.period:
+                    self.counter += 1
+            else:
+                self.counter += 1
+            self.best = False
+        else:
+            self.best = False
+
+    def is_stopped(self):
+        """Check whether training has stopped."""
+        return self.counter >= self.patience
+
+    def get_min_validation_loss(self):
+        return self.min_validation_loss
+
+    def get_best_weights(self):
+        """Return the best model weights."""
+        return self.best_model_weights
 
 def dbToPower(x):
     """Convert SAR raster from db scale to power scale.

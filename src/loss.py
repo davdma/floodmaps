@@ -102,6 +102,43 @@ class LossConfig():
     def contains_reconstruction_loss(self):
         return self.uses_autodespeckler
 
+class PatchMSELoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, inputs, targets):
+        # return F.mse_loss(inputs, targets, reduction='sum') / inputs.size(0)
+        # Compute element-wise MSE loss
+        loss = (inputs - targets) ** 2
+        # Sum over each patch, then average over the batch
+        patch_loss = loss.view(loss.size(0), -1).sum(dim=1)  # Sum over patch elements
+        return patch_loss.mean()  # Average over the batch
+
+class PatchL1Loss(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, inputs, targets):
+        # return F.l1_loss(inputs, targets, reduction='sum') / inputs.size(0)
+        # Compute element-wise L1 loss
+        loss = torch.abs(inputs - targets)
+        # Sum over each patch, then average over the batch
+        patch_loss = loss.view(loss.size(0), -1).sum(dim=1)  # Sum over patch elements
+        return patch_loss.mean()  # Average over the batch
+
+class PatchHuberLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, inputs, targets):
+        # return F.huber_loss(inputs, targets, reduction='sum') / inputs.size(0)
+        diff = inputs - targets
+        abs_diff = torch.abs(diff)
+        loss = torch.where(abs_diff < 1, 0.5 * diff**2, abs_diff - 0.5)
+        # Sum over each patch, then average over the batch
+        patch_loss = loss.view(loss.size(0), -1).sum(dim=1)  # Sum over patch elements
+        return patch_loss.mean()  # Average over the batch
+
 # loss for AD
 class PseudoHuberLoss(nn.Module):
     """Defined in the paper: https://arxiv.org/pdf/2310.14189."""
@@ -110,7 +147,11 @@ class PseudoHuberLoss(nn.Module):
         self.register_buffer('c', torch.tensor(c))
 
     def forward(self, inputs, targets):
-        return torch.sqrt(nn.functional.mse_loss(inputs, targets) + self.c ** 2) - self.c
+        loss = torch.sqrt((inputs - targets) ** 2 + self.c ** 2) - self.c  
+
+        # Per patch loss
+        patch_loss = loss.view(loss.size(0), -1).sum(dim=1)
+        return patch_loss.mean()
 
 # loss for AD
 class LogCoshLoss(nn.Module):
@@ -119,7 +160,44 @@ class LogCoshLoss(nn.Module):
         super().__init__()
 
     def forward(self, inputs, targets):
-        return torch.mean(torch.log(torch.cosh(inputs - targets + 1e-12)))  # Small constant to prevent log(0)
+        loss = torch.log(torch.cosh(inputs - targets + 1e-12))  # Compute element-wise log-cosh loss
+        
+        # Sum over all pixels per patch
+        patch_loss = loss.view(loss.size(0), -1).sum(dim=1)
+        return patch_loss.mean()
+
+# JSD divergence https://arxiv.org/pdf/1511.01844
+class JSD(nn.Module):
+    """Calculate and sum JSD Divergence across both VV and VH channels.
+    Since it uses KL Divergence, need the input and target to be probability distributions
+    i.e. they sum to one. Thus need to use softmax and also target should be log.
+    Input should also be distribution in log space!"""
+    def __init__(self):
+        super().__init__()
+        self.kl = nn.KLDivLoss(reduction='batchmean', log_target=True)
+
+    def forward(self, p: torch.tensor, q: torch.tensor):
+        # assume that normalized SAR data target and model output is passed in
+        # need to call softmax on both to turn into data distribution!
+        b, c, h, w = p.shape  # (batch, 2, 64, 64)
+
+        # Normalize each SAR channel independently over all pixels (64x64)
+        p = F.softmax(p.view(b, c, -1), dim=2)
+        q = F.softmax(q.view(b, c, -1), dim=2)
+
+        p_vv = p[:, 0, :]
+        p_vh = p[:, 1, :]
+        q_vv = q[:, 0, :]
+        q_vh = q[:, 1, :]
+
+        # Compute the mean distribution
+        m1 = (0.5 * (p_vv + q_vv)).log()
+        m2 = (0.5 * (p_vh + q_vh)).log()
+
+        # Compute Jensen-Shannon Divergence
+        jsd_vv = 0.5 * (self.kl(m1, p_vv.log()) + self.kl(m1, q_vv.log()))
+        jsd_vh = 0.5 * (self.kl(m2, p_vh.log()) + self.kl(m2, q_vh.log()))
+        return jsd_vv + jsd_vh
 
 class BCEDiceLoss(nn.Module):
     def __init__(self, weight=None, size_average=True):

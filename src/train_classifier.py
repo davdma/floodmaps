@@ -27,7 +27,7 @@ MODEL_NAMES = ['unet', 'unet++']
 LOSS_NAMES = ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
 
 # get our optimizer and metrics
-def train_loop(dataloader, model, device, loss_fn, optimizer):
+def train_loop(dataloader, model, device, loss_fn, optimizer, epoch):
     running_loss = 0.0
     num_batches = len(dataloader)
     metric_acc = BinaryAccuracy(threshold=0.5, device=device)
@@ -62,11 +62,11 @@ def train_loop(dataloader, model, device, loss_fn, optimizer):
     epoch_f1 = metric_f1.compute().item()
     epoch_loss = running_loss / num_batches
     wandb.log({"train accuracy": epoch_acc, "train precision": epoch_pre, 
-               "train recall": epoch_rec, "train f1": epoch_f1, "train loss": epoch_loss})
+               "train recall": epoch_rec, "train f1": epoch_f1, "train loss": epoch_loss}, step=epoch)
     
     return epoch_loss
 
-def test_loop(dataloader, model, device, loss_fn, logging=True):
+def test_loop(dataloader, model, device, loss_fn, epoch, logging=True):
     running_vloss = 0.0
     num_batches = len(dataloader)
     metric_acc = BinaryAccuracy(threshold=0.5, device=device)
@@ -99,7 +99,7 @@ def test_loop(dataloader, model, device, loss_fn, logging=True):
     epoch_vloss = running_vloss / num_batches
     if logging:
         wandb.log({"val accuracy": epoch_vacc, "val precision": epoch_vpre,
-                   "val recall": epoch_vrec, "val f1": epoch_vf1, "val loss": epoch_vloss})
+                   "val recall": epoch_vrec, "val f1": epoch_vf1, "val loss": epoch_vloss}, step=epoch)
 
     epoch_vmetrics = (epoch_vacc, epoch_vpre, epoch_vrec, epoch_vf1)
     return epoch_vloss, epoch_vmetrics
@@ -208,10 +208,10 @@ def train(train_set, val_set, test_set, model, device, config, save='model'):
     wandb.define_metric("val loss", summary="min")
     for epoch in range(config['epochs']):
         # train loop
-        avg_loss = train_loop(train_loader, model, device, loss_fn, optimizer)
+        avg_loss = train_loop(train_loader, model, device, loss_fn, optimizer, epoch)
 
         # at the end of each training epoch compute validation
-        avg_vloss, avg_vmetrics = test_loop(val_loader, model, device, loss_fn)
+        avg_vloss, avg_vmetrics = test_loop(val_loader, model, device, loss_fn, epoch)
 
         if config['early_stopping']:
             early_stopper.step(avg_vloss)

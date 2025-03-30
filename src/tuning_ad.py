@@ -4,6 +4,7 @@ from deephyper.evaluator import Evaluator
 from deephyper.evaluator.callback import SearchEarlyStopping
 from train_sar import run_experiment_s1
 from train_ad_head import run_experiment_ad
+from config import Config
 from datetime import datetime
 import pandas as pd
 import argparse
@@ -113,43 +114,16 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping, random_sta
 
 # tuning autodespeckler alone
 def run_ad(job):
-    config = {
-        'size': 64, 
-        'samples': 500, 
-        'kernel_size': 5,
-        'project': 'SAR_AD_Tuning_Head_Only',
-        'group': 'DAE_mult_mse',
-        'num_sample_predictions': 40,
-        'mode': 'val',
-        'epochs': 840,
-        'batch_size': 1024,
-        'subset': 1.0,
-        'learning_rate': job.parameters['learning_rate'], 
-        'clip': 1.0,
-        'early_stopping': True,
-        'patience': 30,
+    override = {
+        'project': 'SAR_AD_Tuning_Head_2',
+        'group': 'VAE_L1',
+        'learning_rate': job.parameters['learning_rate'],
         'LR_scheduler': job.parameters['LR_scheduler'],
-        'LR_patience': 10,
-        'LR_T_max': 200,
-        'autodespeckler': 'DAE',
-        'latent_dim': None,
-        'noise_type': 'log_gamma',
-        'noise_coeff': job.parameters['noise_coeff'],
-        'AD_num_layers': job.parameters['AD_num_layers'],
-        'AD_kernel_size': job.parameters['AD_kernel_size'],
-        'AD_dropout': job.parameters['AD_dropout'],
-        'AD_activation_func': job.parameters['AD_activation_func'],
-        'VAE_beta': None,
-        'use_lee': job.parameters['use_lee'],
-        'random_flip': True,
-        'num_workers': 10,
-        'loss': 'MSELoss', # change loss for dif tuning
-        'optimizer': "Adam",
-        'seed': 9290,
-        'save': False,
-        'grad_norm_freq': 10
+        'latent_dim': job.parameters['latent_dim'],
+        'VAE_beta': job.parameters['VAE_beta']
     }
-    final_vmetrics = run_experiment_ad(config)
+    cfg = Config("configs/VAE_tuning.yaml", **override)
+    final_vmetrics = run_experiment_ad(cfg)
     final_vloss = final_vmetrics.get_val_metrics()
     return 0 - final_vloss
 
@@ -160,24 +134,31 @@ def tuning_ad(file_index, max_evals, experiment_name, early_stopping, random_sta
     print("Running tuning script on:", hostname)
     print("Current timestamp:", timestamp)
     print(f'Beginning tuning for experiment {experiment_name} for {max_evals} max evals using random seed {random_state}.')
-    search_dir = './tuning/ad/' + experiment_name
+    search_dir = './tuning/ad_fixed/' + experiment_name
 
     if not os.path.exists(search_dir):
         os.makedirs(search_dir)
 
     # define the variable you want to optimize
     # We want to create model w dem and model wo dem
+
+    # General params
     problem = HpProblem()
-    problem.add_hyperparameter([True, False], "use_lee")
+    # problem.add_hyperparameter([True, False], "use_lee")
     problem.add_hyperparameter((0.00001, 0.01), "learning_rate") # real parameter
-    problem.add_hyperparameter(["ReduceLROnPlateau", "CosAnnealingLR"], "LR_scheduler")
+    problem.add_hyperparameter(["Constant", "ReduceLROnPlateau", "CosAnnealingLR"], "LR_scheduler")
+
+    # VAE
+    problem.add_hyperparameter([0.0001, 0.001, 0.01, 0.1, 1, 2], "VAE_beta")
+    problem.add_hyperparameter([128, 256, 512, 768, 1024, 1280, 1536], "latent_dim")
+    
     # DAE
-    problem.add_hyperparameter([2, 3, 5, 7], "AD_num_layers")
-    problem.add_hyperparameter([3, 5, 7], "AD_kernel_size")
-    problem.add_hyperparameter((0.05, 1.0), "noise_coeff") # change interval for dif noise funcs
-    problem.add_hyperparameter(['leaky_relu', 'relu', 'softplus', 'mish', 'gelu', 'elu'], "AD_activation_func")
+    # problem.add_hyperparameter([2, 3, 5, 7], "AD_num_layers")
+    # problem.add_hyperparameter([3, 5, 7], "AD_kernel_size")
+    # problem.add_hyperparameter((0.05, 1.0), "noise_coeff") # change interval for dif noise funcs
+    # problem.add_hyperparameter(['leaky_relu', 'relu', 'softplus', 'mish', 'gelu', 'elu'], "AD_activation_func")
     # problem.add_hyperparameter(["MSELoss", "PseudoHuberLoss", "HuberLoss", "LogCoshLoss"], "loss")
-    problem.add_hyperparameter((0.0001, 0.30), "AD_dropout")
+    # problem.add_hyperparameter((0.0001, 0.30), "AD_dropout")
 
     # define the evaluator to distribute the computation
     method_kwargs = {"callbacks": [SearchEarlyStopping(patience=10)]} if early_stopping else dict()

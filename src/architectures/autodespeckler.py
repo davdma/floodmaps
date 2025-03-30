@@ -242,8 +242,7 @@ class VarAutoencoder(nn.Module):
                             nn.BatchNorm2d(hidden_dims[-1]),
                             nn.LeakyReLU(),
                             nn.Conv2d(hidden_dims[-1], out_channels=out_channels, # originally 3?
-                                      kernel_size= 3, padding= 1),
-                            nn.Tanh()) # potentially remove tanh for finer reconstruction detail
+                                      kernel_size=3, padding= 1))
 
     def encode(self, input):
         """
@@ -283,7 +282,7 @@ class VarAutoencoder(nn.Module):
         :param logvar: (Tensor) Standard deviation of the latent Gaussian [B x D]
         :return: (Tensor) [B x D]
         """
-        std = torch.exp(0.5 * torch.clamp(log_var, min=-10, max=10))
+        std = torch.exp(0.5 * torch.clamp(log_var, min=-10, max=10)) # clamp at -3 maybe?
         eps = torch.randn_like(std)
         return eps * std + mu
 

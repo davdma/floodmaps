@@ -30,7 +30,7 @@ NOISE_NAMES = ['normal', 'masking', 'log_gamma']
 LOSS_NAMES = ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
 
 # get our optimizer and metrics
-def train_loop(dataloader, model, device, loss_config, optimizer, minibatches, c):
+def train_loop(dataloader, model, device, loss_config, optimizer, minibatches, c, epoch):
     running_loss = torch.tensor(0.0, device=device)
     running_recons_loss = torch.tensor(0.0, device=device)
     metric_collection = MetricCollection([
@@ -92,12 +92,12 @@ def train_loop(dataloader, model, device, loss_config, optimizer, minibatches, c
                "train recall": epoch_rec, "train f1": epoch_f1, "train loss": epoch_loss}
     if loss_config.contains_reconstruction_loss():
         loss_log['train reconstruction loss'] = running_recons_loss.item() / minibatches
-    wandb.log(loss_log)
+    wandb.log(loss_log, step=epoch)
     metric_collection.reset()
     
     return epoch_loss
 
-def test_loop(dataloader, model, device, loss_config, c, logging=True):
+def test_loop(dataloader, model, device, loss_config, c, epoch, logging=True):
     running_vloss = torch.tensor(0.0, device=device)
     running_recons_vloss = torch.tensor(0.0, device=device)
     num_batches = len(dataloader)
@@ -153,7 +153,7 @@ def test_loop(dataloader, model, device, loss_config, c, logging=True):
                     "val recall": epoch_vrec, "val f1": epoch_vf1, "val loss": epoch_vloss}
         if loss_config.contains_reconstruction_loss():
             loss_log['val reconstruction loss'] = running_recons_vloss.item() / num_batches
-        wandb.log(loss_log)
+        wandb.log(loss_log, step=epoch)
         
     metric_collection.reset()
     epoch_vmetrics = (epoch_vacc, epoch_vpre, epoch_vrec, epoch_vf1)
@@ -281,10 +281,10 @@ def train(model, train_set, val_set, test_set, device, loss_config, config, save
     c = (center_1, center_2)
     for epoch in range(config['epochs']):
         # train loop
-        avg_loss = train_loop(train_loader, model, device, loss_config, optimizer, minibatches, c)
+        avg_loss = train_loop(train_loader, model, device, loss_config, optimizer, minibatches, c, epoch)
 
         # at the end of each training epoch compute validation
-        avg_vloss, avg_vmetrics = test_loop(val_loader, model, device, loss_config, c)
+        avg_vloss, avg_vmetrics = test_loop(val_loader, model, device, loss_config, c, epoch)
 
         if config['early_stopping']:
             early_stopper.step(avg_vloss)

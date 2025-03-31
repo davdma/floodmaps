@@ -263,7 +263,7 @@ class BetaScheduler:
                                           n_cycle=self.n_cycle, 
                                           ratio=self.ratio)
 
-    def beta(self);
+    def beta(self):
         return self.cur_beta
 
 def get_gradient_norm(model):

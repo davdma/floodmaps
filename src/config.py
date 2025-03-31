@@ -25,7 +25,9 @@ class Struct:
         return self.__dict__[index]
 
 class Config:
-    def __init__(self, config_file, **kwargs):
+    def __init__(self, config_file=None, **kwargs):
+        assert config_file is not None
+        
         _config = load_config(path=config_file)
         # override config file with argparse args if not None
         for key, value in _config.items():
@@ -88,7 +90,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config_file",
         type=str,
-        default="../debug.yaml",
+        default="configs/debug.yaml",
     )
     parser.add_argument('--save', action='store_true', help='save model and configs to file (default: False)')
     parser.add_argument("--batch_size", type=int, default=32)
@@ -96,4 +98,10 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=100)
     _args = parser.parse_args()
     cfg = Config(**_args.__dict__)
+
+    # TMP
+    print("Save:", cfg.save)
+    cfg.save_path = 'what'
+    print("Save_path:", cfg.save_path is None)
+    print(cfg.save_path)
     print(f"The config of this process is:\n{cfg}")

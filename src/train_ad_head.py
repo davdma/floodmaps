@@ -57,25 +57,25 @@ def get_loss(cfg):
 
 def get_model(cfg):
     if cfg.model.autodespeckler == "CNN1":
-        return ConvAutoencoder1(latent_dim=cfg.cnn1.latent_dim,
-                                dropout=cfg.cnn1.AD_dropout,
-                                activation_func=cfg.cnn1.AD_activation_func)
+        return ConvAutoencoder1(latent_dim=cfg.model.cnn1.latent_dim,
+                                dropout=cfg.model.cnn1.AD_dropout,
+                                activation_func=cfg.model.cnn1.AD_activation_func)
     elif cfg.model.autodespeckler == "CNN2":
-        return ConvAutoencoder2(num_layers=cfg.cnn2.AD_num_layers, 
-                                kernel_size=cfg.cnn2.AD_kernel_size, 
-                                dropout=cfg.cnn2.AD_dropout, 
-                                activation_func=cfg.cnn2.AD_activation_func)
+        return ConvAutoencoder2(num_layers=cfg.model.cnn2.AD_num_layers,
+                                kernel_size=cfg.model.cnn2.AD_kernel_size,
+                                dropout=cfg.model.cnn2.AD_dropout,
+                                activation_func=cfg.model.cnn2.AD_activation_func)
     elif cfg.model.autodespeckler == "DAE":
         # need to modify with new AE architecture parameters
-        return DenoiseAutoencoder(num_layers=cfg.dae.AD_num_layers,
-                                  kernel_size=cfg.dae.AD_kernel_size,
-                                  dropout=cfg.dae.AD_dropout,
-                                  coeff=cfg.dae.noise_coeff,
-                                  noise_type=cfg.dae.noise_type,
-                                  activation_func=cfg.dae.AD_activation_func)
+        return DenoiseAutoencoder(num_layers=cfg.model.dae.AD_num_layers,
+                                  kernel_size=cfg.model.dae.AD_kernel_size,
+                                  dropout=cfg.model.dae.AD_dropout,
+                                  coeff=cfg.model.dae.noise_coeff,
+                                  noise_type=cfg.model.dae.noise_type,
+                                  activation_func=cfg.model.dae.AD_activation_func)
     elif cfg.model.autodespeckler == "VAE":
         # need to modify with new AE architecture parametersi
-        return VarAutoencoder(latent_dim=cfg.vae.latent_dim) # more hyperparameters
+        return VarAutoencoder(latent_dim=cfg.model.vae.latent_dim) # more hyperparameters
     else:
         raise Exception('Invalid autodespeckler specified.')
 
@@ -119,12 +119,12 @@ def compute_loss(out_dict, targets, loss_fn, cfg, beta_scheduler=None, debug=Fal
             else:
                 balance_ratio = float('inf')  # Handle division by zero if KLD loss is 0
             print(f"Reconstruction Loss: {recons_loss.item()}, KLD Loss: {kld_loss.item()}, Balance Ratio: {balance_ratio}")
-            
+
         loss_dict['recons_loss'] = recons_loss
         loss_dict['kld_loss'] = kld_loss
         beta = beta_scheduler.beta() if cfg.model.vae.beta_annealing else cfg.model.vae.VAE_beta
         recons_loss = recons_loss + beta * kld_loss # KLD weighting dropped for better regularization
-        
+
         if torch.isnan(recons_loss).any() or torch.isinf(recons_loss).any():
             print(f'min mu: {mu.min().item()}')
             print(f'max mu: {mu.max().item()}')
@@ -146,11 +146,11 @@ def train_loop(dataloader, model, device, optimizer, minibatches, loss_fn, cfg, 
     # for VAE monitoring
     all_mu = []
     all_log_var = []
-    
+
     model.train()
     for batch_i, X in enumerate(dataloader):
         X = X.to(device)
-        
+
         sar_in = X[:, :2, :, :] if not cfg.data.use_lee else X[:, 2:, :, :]
         out_dict = model(sar_in)
 
@@ -162,7 +162,7 @@ def train_loop(dataloader, model, device, optimizer, minibatches, loss_fn, cfg, 
             stats_dict = print_model_params_and_grads(model, file_name=err_file_name)
             raise ValueError(f"Loss became NaN during training loop in batch {batch_i}. \
                                 The input SAR was NaN: {torch.isnan(sar_in).any()}")
-        
+
         optimizer.zero_grad()
         loss.backward()
         # Compute gradient norm, scaled by batch size
@@ -170,7 +170,7 @@ def train_loop(dataloader, model, device, optimizer, minibatches, loss_fn, cfg, 
             scaled_grad_norm = get_gradient_norm(model) / cfg.train.batch_size
             epoch_gradient_norm += scaled_grad_norm
             batches_logged += 1
-            
+
         nn.utils.clip_grad_norm_(model.parameters(), cfg.train.clip)
         optimizer.step()
 
@@ -183,14 +183,14 @@ def train_loop(dataloader, model, device, optimizer, minibatches, loss_fn, cfg, 
             all_log_var.append(out_dict['log_var'].detach().cpu())
             running_recons_loss += loss_dict['recons_loss'].detach()
             running_kld_loss += loss_dict['kld_loss'].detach()
-            
+
         if batch_i >= minibatches:
             break
-    
-    # calculate metrics    
-    epoch_tot_loss = running_tot_loss.item() / minibatches 
+
+    # calculate metrics
+    epoch_tot_loss = running_tot_loss.item() / minibatches
     avg_epoch_gradient_norm = epoch_gradient_norm.item() / batches_logged
-    log_dict = {"train loss": epoch_tot_loss, 
+    log_dict = {"train loss": epoch_tot_loss,
                "train gradient norm": avg_epoch_gradient_norm}
 
     # VAE mu and log_var monitoring
@@ -212,13 +212,13 @@ def train_loop(dataloader, model, device, optimizer, minibatches, loss_fn, cfg, 
                     "train_ratio": ratio,
                     "beta": beta})
     wandb.log(log_dict, step=epoch)
-    
+
     return epoch_tot_loss
 
 def test_loop(dataloader, model, device, loss_fn, cfg, epoch, logging=True):
     running_tot_vloss = torch.tensor(0.0, device=device)
     num_batches = len(dataloader)
-    
+
     model.eval()
     with torch.no_grad():
         for batch_i, X in enumerate(dataloader):
@@ -238,7 +238,7 @@ def test_loop(dataloader, model, device, loss_fn, cfg, epoch, logging=True):
 
     if logging:
         wandb.log({'val loss': epoch_tot_vloss}, step=epoch)
-    
+
     return epoch_tot_vloss
 
 def train(model, train_set, val_set, test_set, device, cfg):
@@ -256,7 +256,7 @@ def train(model, train_set, val_set, test_set, device, cfg):
 
     # log model parameters
     total_params, trainable_params, param_size_in_mb = get_model_params(model)
-    
+
     # log via wandb
     run = wandb.init(
         project=cfg.wandb.project,
@@ -274,11 +274,11 @@ def train(model, train_set, val_set, test_set, device, cfg):
         }
     )
     if cfg.save:
-        if save_path is None:
+        if cfg.save_path is None:
             default_path = f"experiments/{datetime.today().strftime('%Y-%m-%d')}_{cfg.model.autodespeckler}_{run.id}/"
             cfg.save_path = default_path
         print(f'Save path set to: {cfg.save_path}')
-        
+
     # silence unnecessary wandb prints
     logging.getLogger("wandb").setLevel(logging.WARNING)
     # log weights and gradients each epoch
@@ -300,7 +300,7 @@ def train(model, train_set, val_set, test_set, device, cfg):
                              pin_memory=True,
                              shuffle=True,
                              drop_last=False)
-    
+
     val_loader = DataLoader(val_set,
                             batch_size=cfg.train.batch_size,
                             num_workers=cfg.train.num_workers,
@@ -321,15 +321,15 @@ def train(model, train_set, val_set, test_set, device, cfg):
         early_stopper = ADEarlyStopper(patience=cfg.train.patience, beta_annealing=cfg.model.vae.beta_annealing,
                                       period=cfg.model.vae.beta_period, n_cycle=cfg.model.vae.beta_cycles,
                                       count_cycles=False)
-    
+
     wandb.define_metric("val reconstruction loss", summary="min")
     minibatches = int(len(train_loader) * cfg.train.subset)
     loss_fn = get_loss(cfg).to(device)
     for epoch in range(cfg.train.epochs):
-        try:    
+        try:
             # train loop
             avg_loss = train_loop(train_loader, model, device, optimizer, minibatches, loss_fn, cfg, epoch, beta_scheduler=beta_scheduler)
-    
+
             # at the end of each training epoch compute validation
             avg_vloss = test_loop(val_loader, model, device, loss_fn, cfg, epoch)
         except Exception as err:
@@ -349,8 +349,7 @@ def train(model, train_set, val_set, test_set, device, cfg):
         if beta_scheduler is not None:
             beta_scheduler.step()
 
-        wandb.log({"learning_rate": scheduler.get_last_lr()[0] if scheduler is not None else cfg.train.lr,
-                   "epoch": epoch})
+        wandb.log({"learning_rate": scheduler.get_last_lr()[0] if scheduler is not None else cfg.train.lr}, step=epoch)
 
     # Save our model, config, and metrics to save_path
     fmetrics = Metrics(use_partitions=False)
@@ -376,7 +375,9 @@ def train(model, train_set, val_set, test_set, device, cfg):
 
 def save_experiment(weights, metrics, run, cfg):
     """Save experiment files to directory specified by config save_path."""
-    path = Path(cfg.save_path).mkdir(parents=True, exist_ok=True)
+    path = Path(cfg.save_path)
+    path.mkdir(parents=True, exist_ok=True)
+
     if weights is not None:
         torch.save(weights, path / "model.pth")
 
@@ -397,7 +398,7 @@ def save_experiment(weights, metrics, run, cfg):
     }
     with open(path / f"wandb_info.json", "w") as f:
         json.dump(wandb_info, f, indent=4)
-    
+
 
 def create_histogram_plot(input_values, output_values, min=-2, max=2):
     """
@@ -405,7 +406,7 @@ def create_histogram_plot(input_values, output_values, min=-2, max=2):
 
     Note: resolution for wandb image is low (except for the matplotlib distribution plots).
     This is for efficiency sake. During final benchmarking, can use matplotlib fig with dpi=300
-    for high res WandB image. 
+    for high res WandB image.
     """
     fig, ax = plt.subplots(figsize=(5, 4), dpi=200)
     ax.hist(input_values, bins=50, alpha=0.5, range=(min, max), label="SAR-in", color="blue")
@@ -426,7 +427,7 @@ def sample_predictions(model, sample_set, mean, std, cfg, histogram=True, hist_f
 
     # enable dem visualization in dataset
     sample_set.set_include_dem(True)
-    columns = ["id", 'input_vv', 'input_vh', 'enhanced_lee_vv', 'enhanced_lee_vh', 'despeckled_vv', 'despeckled_vh', 'dem'] 
+    columns = ["id", 'input_vv', 'input_vh', 'enhanced_lee_vv', 'enhanced_lee_vh', 'despeckled_vv', 'despeckled_vh', 'dem']
 
     # some display options
     if cfg.model.autodespeckler == 'DAE':
@@ -434,7 +435,7 @@ def sample_predictions(model, sample_set, mean, std, cfg, histogram=True, hist_f
         columns.insert(4, 'noisy_vh')
     if histogram:
         columns.extend(['vv_histogram', 'vh_histogram'])
-        
+
     table = wandb.Table(columns=columns)
     vv_map = ScalarMappable(norm=None, cmap='gray')
     vh_map = ScalarMappable(norm=None, cmap='gray')
@@ -455,7 +456,7 @@ def sample_predictions(model, sample_set, mean, std, cfg, histogram=True, hist_f
             out_dict = model(sar_in.unsqueeze(0))
             despeckler_output = out_dict['despeckler_output'].squeeze(0)
             despeckler_input = out_dict['despeckler_input'].squeeze(0) # tmp
-            
+
         # Channels are descaled using linear variance scaling
         X = X.permute(1, 2, 0)
         # X = std * X + mean - removed as we choose to work with standardized data
@@ -501,7 +502,7 @@ def sample_predictions(model, sample_set, mean, std, cfg, histogram=True, hist_f
             noisy_vv = dae_vv_map.to_rgba(noisy_vv, bytes=True)
             noisy_vv_img = Image.fromarray(noisy_vv, mode="RGBA")
             row.append(wandb.Image(noisy_vv_img))
-    
+
             # noisy VH
             noisy_vh = dae_vh_map.to_rgba(noisy_vh, bytes=True)
             noisy_vh_img = Image.fromarray(noisy_vh, mode="RGBA")
@@ -539,14 +540,14 @@ def sample_predictions(model, sample_set, mean, std, cfg, histogram=True, hist_f
                 input_values = sar_in[0].numpy().flatten()
                 output_values = despeckler_output[0].numpy().flatten()
                 row.append(create_histogram_plot(input_values, output_values, min=-2, max=2))
-    
+
                 input_values = sar_in[1].numpy().flatten()
                 output_values = despeckler_output[1].numpy().flatten()
                 row.append(create_histogram_plot(input_values, output_values, min=-2, max=2))
             else:
                 # skip so add empty cell
                 row.extend([None, None])
-        
+
         table.add_data(*row)
 
     return table
@@ -557,9 +558,9 @@ def sample_examples(model, sample_set, cfg, idxs=[14440, 3639, 7866]):
     sample_set.set_include_dem(True)
     x = np.linspace(0, 1, 64)  # Adjust the range as needed
     y = np.linspace(0, 1, 64)
-    X, Y = np.meshgrid(x, y)
-    Y_flipped = np.flipud(Y) # invert y to match imshow
-    
+    Xs, Ys = np.meshgrid(x, y)
+    Ys_flipped = np.flipud(Ys) # invert y to match imshow
+
     vv_map = ScalarMappable(norm=None, cmap='gray')
     vh_map = ScalarMappable(norm=None, cmap='gray')
     model.to('cpu')
@@ -574,7 +575,7 @@ def sample_examples(model, sample_set, cfg, idxs=[14440, 3639, 7866]):
             out_dict = model(sar_in.unsqueeze(0))
             despeckler_output = out_dict['despeckler_output'].squeeze(0)
             despeckler_input = out_dict['despeckler_input'].squeeze(0) # tmp
-            
+
         # Channels are descaled using linear variance scaling
         X = X.permute(1, 2, 0)
 
@@ -609,19 +610,19 @@ def sample_examples(model, sample_set, cfg, idxs=[14440, 3639, 7866]):
         examples.append(wandb.Image(vh_img, caption=f"({k}VH) Top: In, Middle: Lee, Bottom: Out"))
 
         # DEM column with overlaid contour plots
-        fig, axes = plt.subplots(3, 1, figsize=(6, 18), dpi=200))
+        fig, axes = plt.subplots(3, 1, figsize=(6, 18), dpi=200)
         im = axes[0].imshow(dem, cmap='gray', vmin=np.min(dem), vmax=np.max(dem))
         axes[0].set_title("DEM")
         axes[0].axis("off")
         fig.colorbar(im, ax=axes[0], fraction=0.046, pad=0.04, label="DEM Value")
-        
+
         axes[1].imshow(dem, cmap='gray', extent=[0, 1, 0, 1], origin='upper')
-        contour = axes[1].contour(X, Y_flipped, dem, levels=10, cmap='terrain', alpha=1)
+        contour = axes[1].contour(Xs, Ys_flipped, dem, levels=10, cmap='terrain', alpha=1)
         axes[1].set_title("DEM Contour Plot 1")
         axes[1].set_aspect('equal')
         fig.colorbar(contour, ax=axes[1], fraction=0.046, pad=0.04, label="DEM Value")
-        
-        contour = axes[2].contourf(X, Y_flipped, dem, levels=10, cmap='cividis', alpha=1)
+
+        contour = axes[2].contourf(Xs, Ys_flipped, dem, levels=10, cmap='cividis', alpha=1)
         axes[2].set_title("DEM Contour Plot 2")
         axes[2].set_aspect('equal')
         fig.colorbar(contour, ax=axes[2], fraction=0.046, pad=0.04, label="DEM Value")
@@ -648,14 +649,14 @@ def run_experiment_ad(cfg):
             else "cpu"
         )
         model = get_model(cfg).to(device)
-        
+
         print(f"Using {device} device")
         model_name = cfg.model.autodespeckler
         kernel_size = cfg.data.kernel_size
         size = cfg.data.size
         samples = cfg.data.samples
         sample_dir = f'data/ad/samples_{kernel_size}_{size}_{samples}_dem/'
-        
+
         # load in mean and std
         with open(f'data/ad/stats/{kernel_size}_{size}_{samples}_dem.pkl', 'rb') as f:
             train_mean, train_std = pickle.load(f)
@@ -668,16 +669,16 @@ def run_experiment_ad(cfg):
                                           seed=cfg.seed+1)
         val_set = DespecklerSARDataset(sample_dir, typ="val", transform=standardize)
         test_set = DespecklerSARDataset(sample_dir, typ="test", transform=standardize) if cfg.eval.mode == 'test' else None
-        
+
         # initialize loss functions - train loss function is optimized for gradient calculations
         run, fmetrics = train(model, train_set, val_set, test_set, device, cfg)
 
         # summary metrics
         run.summary[f"final_{cfg.eval.mode}_loss"] = fmetrics.get_metrics(split=cfg.eval.mode)['loss']
-            
+
         # log predictions on validation set using wandb
         try:
-            pred_table = sample_predictions(model, test_set if cfg.eval.mode == 'test' else val_set, 
+            pred_table = sample_predictions(model, test_set if cfg.eval.mode == 'test' else val_set,
                                             train_mean, train_std, cfg)
 
             # pick 3 full res examples
@@ -693,11 +694,11 @@ def run_experiment_ad(cfg):
 def main(cfg):
     run_experiment_ad(cfg)
 
-if __name__ == '__main__':    
+if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='train_ad_head', description='Trains SAR autoencoder head by itself.')
 
     # YAML config file
-    parser.add_argument("--config", default="configs/default.yaml", help="Path to YAML config file (default: configs/default.yaml)")
+    parser.add_argument("--config_file", default="configs/default.yaml", help="Path to YAML config file (default: configs/default.yaml)")
 
     # save model, config, and wandb run info to folder
     parser.add_argument('--save', action='store_true', help='save model and configs to file (default: False)')
@@ -707,11 +708,11 @@ if __name__ == '__main__':
     parser.add_argument('--project', help='Wandb project where run will be logged')
     parser.add_argument('--group', help='Optional group name for model experiments')
     parser.add_argument('--num_sample_predictions', type=int, help='number of predictions to visualize')
-    
+
     # ml
     parser.add_argument('-e', '--epochs', type=int)
     parser.add_argument('-b', '--batch_size', type=int)
-    parser.add_argument('-l', '--learning_rate', type=float)
+    parser.add_argument('-l', '--lr', type=float)
     parser.add_argument('--early_stopping', action='store_true', help='early stopping (default: False)')
     parser.add_argument('-p', '--patience', type=int, help='early stopping patience')
     parser.add_argument('--LR_scheduler', choices=SCHEDULER_NAMES,
@@ -736,18 +737,18 @@ if __name__ == '__main__':
     parser.add_argument('--beta_period', type=int, help="Epoch period for beta annealing")
     parser.add_argument('--beta_cycles', type=int, help="M cycles for beta annealing ")
     parser.add_argument('--beta_proportion', type=float, help="R proportion used to increase beta within a cycle")
-    
+
     # data
     parser.add_argument('--use_lee', action='store_true', help='use enhanced lee filter on ad input (default: False)')
     parser.add_argument('--num_workers', type=int)
-    
+
     # loss
     parser.add_argument('--loss', choices=LOSS_NAMES,
                         help=f"loss: {', '.join(LOSS_NAMES)}")
     parser.add_argument('--clip', type=float, help="Gradient clipping max norm")
     # print statistics of current gradient and adjust norm used to clip according to the statistics
     # heuristically use 1
-    
+
     # optimizer
     parser.add_argument('--optimizer', choices=['Adam', 'SGD'],
                         help=f"optimizer: {', '.join(['Adam', 'SGD'])}")

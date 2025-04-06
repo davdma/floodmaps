@@ -11,8 +11,9 @@ from datetime import datetime
 from dataset import DespecklerSARDataset
 from config import Config
 from loss import PseudoHuberLoss, LogCoshLoss, JSD, PatchMSELoss, PatchL1Loss, PatchHuberLoss
-from utils import ADEarlyStopper, Metrics, get_gradient_norm, get_model_params, print_model_params_and_grads
-from utils import denormalize, TV_loss, var_laplacian, ssi, get_random_batch, enl, RIS, quality_m
+from utils import (ADEarlyStopper, Metrics, BetaScheduler, get_gradient_norm,
+                   get_model_params, print_model_params_and_grads, denormalize,
+                   TV_loss, var_laplacian, ssi, get_random_batch, enl, RIS, quality_m)
 from torchvision import transforms
 from architectures.autodespeckler import ConvAutoencoder1, ConvAutoencoder2, DenoiseAutoencoder, VarAutoencoder
 from matplotlib.cm import ScalarMappable
@@ -136,7 +137,7 @@ def compute_loss(out_dict, targets, loss_fn, cfg, beta_scheduler=None, debug=Fal
     loss_dict['final_loss'] = recons_loss
     return loss_dict
 
-def train_loop(dataloader, model, device, optimizer, minibatches, loss_fn, cfg, epoch, beta_scheduler=None):
+def train_loop(dataloader, model, device, optimizer, minibatches, loss_fn, cfg, run, epoch, beta_scheduler=None):
     running_tot_loss = torch.tensor(0.0, device=device)
     if cfg.model.autodespeckler == 'VAE':
         running_recons_loss = torch.tensor(0.0, device=device)
@@ -212,11 +213,11 @@ def train_loop(dataloader, model, device, optimizer, minibatches, loss_fn, cfg, 
                     "train_kld_loss": running_kld_loss.item() / minibatches,
                     "train_ratio": ratio,
                     "beta": beta})
-    wandb.log(log_dict, step=epoch)
+    run.log(log_dict, step=epoch)
 
     return epoch_tot_loss
 
-def test_loop(dataloader, model, device, loss_fn, cfg, epoch, logging=True):
+def test_loop(dataloader, model, device, loss_fn, cfg, run, epoch, logging=True):
     running_tot_vloss = torch.tensor(0.0, device=device)
     num_batches = len(dataloader)
 
@@ -238,52 +239,24 @@ def test_loop(dataloader, model, device, loss_fn, cfg, epoch, logging=True):
     epoch_tot_vloss = running_tot_vloss.item() / num_batches
 
     if logging:
-        wandb.log({'val loss': epoch_tot_vloss}, step=epoch)
+        run.log({'val loss': epoch_tot_vloss}, step=epoch)
 
     return epoch_tot_vloss
 
-def train(model, train_set, val_set, test_set, device, cfg):
+def train(model, train_loader, val_loader, test_loader, device, cfg, run):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     logging.info(f'''Starting training:
         Date:            {timestamp}
         Epochs:          {cfg.train.epochs}
         Batch size:      {cfg.train.batch_size}
         Learning rate:   {cfg.train.lr}
-        Training size:   {len(train_set)}
-        Validation size: {len(val_set)}
-        Test size:       {len(test_set) if test_set is not None else 'NA'}
+        Training size:   {len(train_loader.dataset)}
+        Validation size: {len(val_loader.dataset)}
+        Test size:       {len(test_loader.dataset) if test_loader is not None else 'NA'}
         Device:          {device}
     ''')
-
-    # log model parameters
-    total_params, trainable_params, param_size_in_mb = get_model_params(model)
-
-    # log via wandb
-    run = wandb.init(
-        project=cfg.wandb.project,
-        group=cfg.wandb.group,
-        config={
-        "dataset": "Sentinel1",
-        **cfg.to_dict(),
-        "training_size": len(train_set),
-        "validation_size": len(val_set),
-        "test_size": len(test_set) if cfg.eval.mode == 'test' else None,
-        "val_percent": len(val_set) / (len(train_set) + len(val_set)),
-        "total_parameters": total_params,
-        "trainable_parameters": trainable_params,
-        "parameter_size_mb": param_size_in_mb
-        }
-    )
-    if cfg.save:
-        if cfg.save_path is None:
-            default_path = f"experiments/{datetime.today().strftime('%Y-%m-%d')}_{cfg.model.autodespeckler}_{run.id}/"
-            cfg.save_path = default_path
-        print(f'Save path set to: {cfg.save_path}')
-
-    # silence unnecessary wandb prints
-    logging.getLogger("wandb").setLevel(logging.WARNING)
     # log weights and gradients each epoch
-    wandb.watch(model, log="all", log_freq=10)
+    run.watch(model, log="all", log_freq=10)
 
     # optimizer and scheduler for reducing learning rate
     optimizer = get_optimizer(model, cfg)
@@ -293,46 +266,23 @@ def train(model, train_set, val_set, test_set, device, cfg):
                                    n_cycle=cfg.model.vae.beta_cycles,
                                    ratio=cfg.model.vae.beta_proportion) if cfg.model.vae.beta_annealing else None
 
-    # make DataLoader
-    train_loader = DataLoader(train_set,
-                             batch_size=cfg.train.batch_size,
-                             num_workers=cfg.train.num_workers,
-                             persistent_workers=cfg.train.num_workers>0,
-                             pin_memory=True,
-                             shuffle=True,
-                             drop_last=False)
-
-    val_loader = DataLoader(val_set,
-                            batch_size=cfg.train.batch_size,
-                            num_workers=cfg.train.num_workers,
-                            persistent_workers=cfg.train.num_workers>0,
-                            pin_memory=True,
-                            shuffle=True,
-                            drop_last=False)
-
-    test_loader = DataLoader(test_set,
-                            batch_size=cfg.train.batch_size,
-                            num_workers=cfg.train.num_workers,
-                            persistent_workers=cfg.train.num_workers>0,
-                            pin_memory=True,
-                            shuffle=True,
-                            drop_last=False) if cfg.eval.mode == 'test' else None
-
     if cfg.train.early_stopping:
         early_stopper = ADEarlyStopper(patience=cfg.train.patience, beta_annealing=cfg.model.vae.beta_annealing,
                                       period=cfg.model.vae.beta_period, n_cycle=cfg.model.vae.beta_cycles,
                                       count_cycles=False)
 
-    wandb.define_metric("val reconstruction loss", summary="min")
+    run.define_metric("val reconstruction loss", summary="min")
     minibatches = int(len(train_loader) * cfg.train.subset)
     loss_fn = get_loss(cfg).to(device)
     for epoch in range(cfg.train.epochs):
         try:
             # train loop
-            avg_loss = train_loop(train_loader, model, device, optimizer, minibatches, loss_fn, cfg, epoch, beta_scheduler=beta_scheduler)
+            avg_loss = train_loop(train_loader, model, device, optimizer,
+                                  minibatches, loss_fn, cfg, run, epoch,
+                                  beta_scheduler=beta_scheduler)
 
             # at the end of each training epoch compute validation
-            avg_vloss = test_loop(val_loader, model, device, loss_fn, cfg, epoch)
+            avg_vloss = test_loop(val_loader, model, device, loss_fn, cfg, run, epoch)
         except Exception as err:
             raise RuntimeError(f'Error while training occurred at epoch {epoch}.') from err
 
@@ -350,9 +300,9 @@ def train(model, train_set, val_set, test_set, device, cfg):
         if beta_scheduler is not None:
             beta_scheduler.step()
 
-        wandb.log({"learning_rate": scheduler.get_last_lr()[0] if scheduler is not None else cfg.train.lr}, step=epoch)
+        run.log({"learning_rate": scheduler.get_last_lr()[0] if scheduler is not None else cfg.train.lr}, step=epoch)
 
-    # Save our model, config, and metrics to save_path
+    # retrieve best metrics and weights
     fmetrics = Metrics(use_partitions=False)
     model_weights = None
     if cfg.train.early_stopping:
@@ -369,20 +319,14 @@ def train(model, train_set, val_set, test_set, device, cfg):
         test_loss = test_loop(test_loader, model, device, cfg, logging=False)
         fmetrics.save_metrics('test', loss=test_loss)
 
-    # calculate summary metrics here
-    ### SUMMARY ?????
-    ### HOW TO GET DENORMALIZE OPERATION ???
     run.summary[f"final_{cfg.eval.mode}_loss"] = fmetrics.get_metrics(split=cfg.eval.mode)['loss']
-    calculate_metrics(test_loader if cfg.eval.mode == 'test' else val_loader,
-                      test_set if cfg.eval.mode == 'test' else val_set,
-                      model, device, fmetrics, cfg)
+    return model_weights, fmetrics
 
-    if cfg.save:
-        save_experiment(model_weights, fmetrics, run, cfg)
+def calculate_metrics(dataloader, dataset, train_mean, train_std, model, \
+                      device, metrics, cfg, run, sample_size=100):
+    train_mean = train_mean[:2].to(device) if not cfg.data.use_lee else train_mean[2:].to(device)
+    train_std = train_std[:2].to(device) if not cfg.data.use_lee else train_std[2:].to(device)
 
-    return run, fmetrics
-
-def calculate_metrics(dataloader, dataset, model, device, metrics, cfg, sample_size=100):
     # TV Loss, Var of Laplacian, SSI
     tv_loss = torch.tensor(0.0, device=device, dtype=torch.float32)
     var_lap = torch.tensor(0.0, device=device, dtype=torch.float32)
@@ -396,8 +340,8 @@ def calculate_metrics(dataloader, dataset, model, device, metrics, cfg, sample_s
         # convert back to dB scale
         with torch.no_grad():
             # figure out how to denormalize here
-            db_sar_filt = denormalize(result, train_mean[:2].to(device), train_std[:2].to(device))
-            db_sar_noisy = denormalize(X, train_mean[:2].to(device), train_std[:2].to(device))
+            db_sar_filt = denormalize(result, train_mean, train_std)
+            db_sar_noisy = denormalize(X, train_mean, train_std)
             tv_loss += TV_loss(db_sar_filt, weight=1, per_pixel=False)
             var_lap += var_laplacian(db_sar_filt, per_pixel=False)
             ssi_val += ssi(db_sar_noisy, db_sar_filt, per_pixel=False)
@@ -406,23 +350,20 @@ def calculate_metrics(dataloader, dataset, model, device, metrics, cfg, sample_s
     # subset 100 to pass through inference
     batch = get_random_batch(dataset, batch_size=sample_size)
     batch = batch.to(device)
-    batch = batch[:, :2, :, :]
+    batch = batch[:, :2, :, :] if not cfg.data.use_lee else batch[:, 2:, :, :]
     out_dict = model(batch)
     result = out_dict['despeckler_output']
 
     # convert back to dB scale
     with torch.no_grad():
-        db_batch_filt = denormalize(result,
-                                    train_mean[:2].to(device),
-                                    train_std[:2].to(device)).cpu().numpy()
-        db_batch_noisy = denormalize(batch,
-                                     train_mean[:2].to(device),
-                                     train_std[:2].to(device)).cpu().numpy()
+        db_batch_filt = denormalize(result, train_mean, train_std).cpu().numpy()
+        db_batch_noisy = denormalize(batch, train_mean, train_std).cpu().numpy()
 
     tot_enl = 0.0
     tot_ris = 0.0
     tot_m = 0.0
     for i in range(sample_size):
+        # only calculate for VV
         db_filt_vv = db_batch_filt[i, 0]
         db_noisy_vv = db_batch_noisy[i, 0]
 
@@ -439,9 +380,9 @@ def calculate_metrics(dataloader, dataset, model, device, metrics, cfg, sample_s
     metrics.save_metrics(cfg.eval.mode, **metrics_dict)
 
     # log as wandb summary statistics
-    wandb.log(metrics_dict)
+    run.summary.update(metrics_dict)
 
-def save_experiment(weights, metrics, run, cfg):
+def save_experiment(weights, metrics, cfg, run):
     """Save experiment files to directory specified by config save_path."""
     path = Path(cfg.save_path)
     path.mkdir(parents=True, exist_ok=True)
@@ -702,7 +643,7 @@ def sample_examples(model, sample_set, cfg, idxs=[14440, 3639, 7866]):
     return examples
 
 def run_experiment_ad(cfg):
-    """Run a single autodespeckler model experiment given the configuration parameters. Append output and input vv/vh."""
+    """Run a single autodespeckler model experiment given the configuration parameters."""
     if not wandb.login():
         raise Exception("Failed to login to wandb.")
 
@@ -732,7 +673,6 @@ def run_experiment_ad(cfg):
     # load in mean and std
     with open(f'data/ad/stats/{kernel_size}_{size}_{samples}_dem.pkl', 'rb') as f:
         train_mean, train_std = pickle.load(f)
-
         train_mean = torch.from_numpy(train_mean)
         train_std = torch.from_numpy(train_std)
     standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
@@ -743,17 +683,85 @@ def run_experiment_ad(cfg):
     val_set = DespecklerSARDataset(sample_dir, typ="val", transform=standardize)
     test_set = DespecklerSARDataset(sample_dir, typ="test", transform=standardize) if cfg.eval.mode == 'test' else None
 
-    run, fmetrics = train(model, train_set, val_set, test_set, device, cfg)
+    # dataloaders
+    train_loader = DataLoader(train_set,
+                             batch_size=cfg.train.batch_size,
+                             num_workers=cfg.train.num_workers,
+                             persistent_workers=cfg.train.num_workers>0,
+                             pin_memory=True,
+                             shuffle=True,
+                             drop_last=False)
 
-    # initialize wandb run
-    # log predictions on validation set using wandb
+    val_loader = DataLoader(val_set,
+                            batch_size=cfg.train.batch_size,
+                            num_workers=cfg.train.num_workers,
+                            persistent_workers=cfg.train.num_workers>0,
+                            pin_memory=True,
+                            shuffle=True,
+                            drop_last=False)
+
+    test_loader = DataLoader(test_set,
+                            batch_size=cfg.train.batch_size,
+                            num_workers=cfg.train.num_workers,
+                            persistent_workers=cfg.train.num_workers>0,
+                            pin_memory=True,
+                            shuffle=True,
+                            drop_last=False) if cfg.eval.mode == 'test' else None
+
+    # initialize wandb run + save path
+    total_params, trainable_params, param_size_in_mb = get_model_params(model)
+    if cfg.save:
+        if cfg.save_path is None:
+            default_path = f"experiments/{datetime.today().strftime('%Y-%m-%d')}_{cfg.model.autodespeckler}_{run.id}/"
+            cfg.save_path = default_path
+        print(f'Save path set to: {cfg.save_path}')
+
+    run = wandb.init(
+        project=cfg.wandb.project,
+        group=cfg.wandb.group,
+        config={
+            "dataset": "Sentinel1",
+            **cfg.to_dict(),
+            "training_size": len(train_set),
+            "validation_size": len(val_set),
+            "test_size": len(test_set) if cfg.eval.mode == 'test' else None,
+            "val_percent": len(val_set) / (len(train_set) + len(val_set)),
+            "total_parameters": total_params,
+            "trainable_parameters": trainable_params,
+            "parameter_size_mb": param_size_in_mb
+        }
+    )
+
     try:
+        # train and save results metrics
+        weights, fmetrics = train(model, train_loader, val_loader, test_loader, device, cfg, run)
+        calculate_metrics(test_loader if cfg.eval.mode == 'test' else val_loader,
+                      test_set if cfg.eval.mode == 'test' else val_set,
+                      train_mean, train_std, model, device, fmetrics, cfg, run)
+        if cfg.save:
+            save_experiment(weights, fmetrics, cfg, run)
+
+        # sample predictions for analysis
         pred_table = sample_predictions(model, test_set if cfg.eval.mode == 'test' else val_set,
                                         train_mean, train_std, cfg)
 
-        # pick 3 full res examples
+        # pick 3 full res examples for closer look
         examples = sample_examples(model, test_set if cfg.eval.mode == 'test' else val_set, cfg)
         run.log({"model_val_predictions": pred_table, "examples": examples})
+    except Exception as e:
+        print("An exception occurred during training!")
+
+        # Send an alert in the W&B UI
+        run.alert(
+            title="Training crashed 🚨",
+            text=f"Run failed due to: {e}"
+        )
+
+        # Log to wandb summary
+        run.summary["error"] = str(e)
+
+        # remove save directory if needed
+        raise e
     finally:
         run.finish()
 

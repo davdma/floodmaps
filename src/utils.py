@@ -1,16 +1,19 @@
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Subset
 import rasterio
 import numpy as np
 from dataset import FloodSampleMeanStd
 from math import exp
 import json
 import copy
+import random
+import torch.nn.functional as F
+from skimage.feature import graycomatrix, graycoprops
 
 TRAIN_LABELS = ["label_20150919_20150917_496_811.tif", "label_20150919_20150917_497_812.tif",
-                "label_20151112_20151109_472_940.tif", "label_20151112_20151109_473_939.tif", 
-                "label_20151112_20151109_473_940.tif", "label_20151112_20151109_473_941.tif", 
-                "label_20151112_20151109_474_942.tif", "label_20160314_20160311_451_838.tif", 
+                "label_20151112_20151109_472_940.tif", "label_20151112_20151109_473_939.tif",
+                "label_20151112_20151109_473_940.tif", "label_20151112_20151109_473_941.tif",
+                "label_20151112_20151109_474_942.tif", "label_20160314_20160311_451_838.tif",
                 "label_20160314_20160311_451_839.tif", "label_20160307_20160311_452_846.tif",
                 "label_20160314_20160311_452_845.tif", "label_20160314_20160311_453_845.tif",
                 "label_20170830_20170828_462_695.tif", "label_20170830_20170828_470_694.tif",
@@ -19,10 +22,10 @@ TRAIN_LABELS = ["label_20150919_20150917_496_811.tif", "label_20150919_20150917_
                 "label_20170830_20170826_488_695.tif", "label_20170830_20170826_490_704.tif",
                 "label_20170830_20170826_493_708.tif", "label_20180824_20180822_580_1050.tif",
                 "label_20180824_20180822_586_1051.tif", "label_20180918_20180917_389_1098.tif"]
-VAL_LABELS = ["label_20150919_20150917_496_812.tif", "label_20150919_20150917_497_811.tif", 
-               "label_20151112_20151109_474_941.tif", "label_20151112_20151109_485_960.tif", 
+VAL_LABELS = ["label_20150919_20150917_496_812.tif", "label_20150919_20150917_497_811.tif",
+               "label_20151112_20151109_474_941.tif", "label_20151112_20151109_485_960.tif",
                "label_20160314_20160311_452_843.tif", "label_20160314_20160311_452_846.tif",
-               "label_20170830_20170826_487_696.tif", "label_20170830_20170826_493_695.tif"] 
+               "label_20170830_20170826_487_696.tif", "label_20170830_20170826_493_695.tif"]
 TEST_LABELS = ["label_20170830_20170826_487_695.tif",
                "label_20170830_20170829_497_709.tif",
                "label_20180818_20180815_304_703.tif",
@@ -36,7 +39,7 @@ CMAX_DEFAULT = 1.73 # 1.183 is sqrt(1 + 2/number of looks)
 class Metrics:
     """Improved object interface to store validation and/or test metrics during single experiment.
     Allows for generalized data splits and partitions within splits if enabled.
-    
+
     All metrics are organized into one large dictionary with split (val, test, etc.) index first, then
     partition (shift, non-shift, etc.) as the next available index if enabled."""
     def __init__(self, use_partitions=False):
@@ -45,7 +48,7 @@ class Metrics:
 
     def save_metrics(self, split, partition=None, **kwargs):
         """Save one or more metrics for a given split (and partition if enabled).
-        
+
         - If partitions are enabled, store under {split -> partition -> metric}.
         - If partitions are disabled, store under {split -> metric}.
         - Supports multiple metrics at once via **kwargs.
@@ -75,7 +78,7 @@ class Metrics:
 
     def get_metrics(self, split=None, partition=None):
         """Retrieve metrics.
-        
+
         - If partitions are enabled:
             - If both `split` & `partition` are specified, return that partition's metrics.
             - If only `split` is specified, return all partitions within that split.
@@ -106,7 +109,7 @@ class Metrics:
         """
         with open(filename, "w") as f:
             json.dump(self.metrics, f, indent=4)
-        
+
 class SaveMetrics:
     """Object interface to handle storing and retrieving shift invariant and non shift invariant metrics."""
     def __init__(self, shift_invariant=True):
@@ -129,10 +132,10 @@ class SaveMetrics:
             return self.test_metrics
         else:
             raise Exception('Invalid argument typ: must be val, test.')
-        
+
     def get_val_metrics(self):
         return self.val_metrics
-        
+
     def get_test_metrics(self):
         return self.test_metrics
 
@@ -191,9 +194,9 @@ class ChannelIndexer:
 
 class SARChannelIndexer:
     """Abstract class for wrapping list of S1 dataset channels used for input.
-    
+
     The 7 available channels in order:
-    
+
     1. SAR VV
     2. SAR VH
     3. DEM
@@ -235,13 +238,14 @@ class SARChannelIndexer:
     def get_channel_names(self):
         return self.names
 
+### VAE Beta Scheduling
 def beta_cycle_linear(epoch, beta=1, period=50, n_cycle=4, ratio=0.5):
     """Beta annealing function as proposed by https://arxiv.org/pdf/1903.10145.
     After the n cycles of period epochs, the remaining epochs remain at max beta.
     """
     if epoch >= n_cycle * period:
         return beta
-        
+
     tao = (epoch % period) / period
     return beta if tao > ratio else beta * tao / ratio
 
@@ -257,15 +261,16 @@ class BetaScheduler:
 
     def step(self):
         self.epoch += 1
-        self.cur_beta = beta_cycle_linear(self.epoch, 
-                                          beta=self.beta, 
-                                          period=self.period, 
-                                          n_cycle=self.n_cycle, 
+        self.cur_beta = beta_cycle_linear(self.epoch,
+                                          beta=self.beta,
+                                          period=self.period,
+                                          n_cycle=self.n_cycle,
                                           ratio=self.ratio)
 
     def beta(self):
         return self.cur_beta
 
+### Model and gradient tracking helpers
 def get_gradient_norm(model):
     """Calculate global gradient norm during training."""
     total_norm = 0.0
@@ -291,7 +296,7 @@ def print_model_params_and_grads(model, file_name='ad_param_err.json', save_to_f
     stats_dict = {}
     print(f"{'Parameter':>30} | {'Min':^10} | {'Max':^10} | {'Mean':^10} | {'Std':^10} | {'Grad Min':^10} | {'Grad Max':^10} | {'Grad Mean':^10} | {'Grad Std':^10}")
     print("=" * 130)  # Table separator
-    
+
     # Iterate through the model's named parameters
     for name, param in model.named_parameters():
         param_data = param.data
@@ -317,7 +322,7 @@ def print_model_params_and_grads(model, file_name='ad_param_err.json', save_to_f
     if save_to_file:
         with open(file_name, 'w') as json_file:
             json.dump(stats_dict, json_file, indent=4)
-        
+
     return stats_dict
 
 def wet_label(image, crop_size, num_pixel=100):
@@ -329,7 +334,7 @@ def wet_label(image, crop_size, num_pixel=100):
     crop_size: int
         width and height of the patch.
     num_pixel: int
-        Number of water pixels in patch for the patch to qualify as wet. 
+        Number of water pixels in patch for the patch to qualify as wet.
 
     Returns
     -------
@@ -367,16 +372,16 @@ def trainMeanStd(batch_size=10, channels=[True] * 10, sample_dir='../sampling/sa
         samples = torch.cat(batch, 1)
         return samples
 
-    train_mean_std = FloodSampleMeanStd(TRAIN_LABELS, 
-                                        channels=channels, 
-                                        sample_dir=sample_dir, 
+    train_mean_std = FloodSampleMeanStd(TRAIN_LABELS,
+                                        channels=channels,
+                                        sample_dir=sample_dir,
                                         label_dir=label_dir)
     loader = DataLoader(train_mean_std,
                         batch_size=batch_size,
                         num_workers=0,
                         collate_fn=channel_collate,
                         shuffle=False)
- 
+
     # random crop - calculate total mean and std for each channel not including missing values
     n_channels = sum(channels)
     b_channels = sum(channels[-2:])
@@ -389,7 +394,7 @@ def trainMeanStd(batch_size=10, channels=[True] * 10, sample_dir='../sampling/sa
         for i in range(n_channels - b_channels):
             tot_sum[i] += samples[i][mask].sum()
     mean = tot_sum / pixel_count
-    
+
     # add up variance for each channel not including missing values
     tot_var = torch.zeros(n_channels, dtype=torch.float64)
     for samples in loader:
@@ -399,7 +404,7 @@ def trainMeanStd(batch_size=10, channels=[True] * 10, sample_dir='../sampling/sa
             tot_var[i] += ((samples[i][mask] - mean[i]) ** 2).sum()
     std = torch.sqrt(tot_var / (pixel_count - 1))
 
-    # set mean to 0 and std to 1 for binary channels - roads and waterbody!!  
+    # set mean to 0 and std to 1 for binary channels - roads and waterbody!!
     if b_channels > 0:
         mean[-b_channels:] = 0
         std[-b_channels:] = 1
@@ -407,7 +412,7 @@ def trainMeanStd(batch_size=10, channels=[True] * 10, sample_dir='../sampling/sa
 
 class EarlyStopper:
     """Stops the training early if validation loss doesn't improve after a given number of epochs.
-    
+
     Parameters
     ----------
     patience : int
@@ -449,7 +454,7 @@ class EarlyStopper:
 class ADEarlyStopper:
     """This class supports regular early stopping as well as early stopping for VAE cyclical beta annealing
     training patterns.
-    
+
     Parameters
     ----------
     patience : int
@@ -480,7 +485,7 @@ class ADEarlyStopper:
         """
         Note: For beta annealing scheduling at the end of n_cycles,
         we revert to normal early stopping with fixed beta.
-        
+
         Args:
         - val_loss: Current validation loss.
         - model: Model to save weights from.
@@ -489,7 +494,7 @@ class ADEarlyStopper:
         # if beta annealing check if end of cycle or past end of last cycle
         if self.beta_annealing and (epoch + 1) % self.period != 0 and epoch < self.n_cycle * self.period:
             return  # Do nothing
-            
+
         if validation_loss < self.min_validation_loss:
             self.min_validation_loss = validation_loss
             self.counter = 0
@@ -516,13 +521,14 @@ class ADEarlyStopper:
         """Return the best model weights."""
         return self.best_model_weights
 
+### SAR Preprocessing Utils
 def dbToPower(x):
     """Convert SAR raster from db scale to power scale.
 
     Parameters
     ----------
     x : ndarray
-    
+
     Returns
     -------
     x : ndarray
@@ -536,11 +542,11 @@ def dbToPower(x):
 
 def powerToDb(x):
     """Convert SAR raster from power scale to db scale. Missing values set to -9999.
-    
+
     Parameters
     ----------
     x : ndarray
-    
+
     Returns
     -------
     x : ndarray
@@ -553,7 +559,7 @@ def powerToDb(x):
 
 def enhanced_lee_filter(image, kernel_size=7, d=DAMP_DEFAULT, cu=CU_DEFAULT,
                         cmax=CMAX_DEFAULT):
-    """Implements the enhanced lee filter outlined here: 
+    """Implements the enhanced lee filter outlined here:
     https://desktop.arcgis.com/en/arcmap/latest/manage-data/raster-and-images/speckle-function.htm
     https://catalyst.earth/catalyst-system-files/help/concepts/orthoengine_c/Chapter_825.html
     https://pyradar-tools.readthedocs.io/en/latest/_modules/pyradar/filters/lee_enhanced.html#lee_enhanced_filter
@@ -571,7 +577,7 @@ def enhanced_lee_filter(image, kernel_size=7, d=DAMP_DEFAULT, cu=CU_DEFAULT,
         Enhanced lee noise variation coefficient.
     cmax : float
         Enhanced lee maximum noise variation coefficient
-    
+
     Returns
     -------
     filtered_image : ndarray
@@ -595,35 +601,35 @@ def enhanced_lee_filter(image, kernel_size=7, d=DAMP_DEFAULT, cu=CU_DEFAULT,
             pix_value = image[y][x]
             if pix_value == 0:
                 filtered_image[y][x] = 0
-                continue 
+                continue
 
             # get window
             xleft = x - half_size
             xright = x + half_size
             yup = y - half_size
             ydown = y + half_size
-        
+
             if xleft < 0:
                 xleft = 0
             if xright >= width:
                 xright = width
-        
+
             if yup < 0:
                 yup = 0
             if ydown >= height:
                 ydown = height
-        
-            neighbor_pixels = image[yup:ydown, xleft:xright] 
+
+            neighbor_pixels = image[yup:ydown, xleft:xright]
             num_samples = np.count_nonzero(neighbor_pixels)
             # unoptimized: num_samples = get_neighbors(y, x, image, height, width, kernel_size, neighbor_pixels)
             w_mean = getLocalMeanValue(neighbor_pixels)
             if num_samples == 1:
                 w_std = 0
             else:
-                w_std = getLocalStdValue(neighbor_pixels) 
-                
+                w_std = getLocalStdValue(neighbor_pixels)
+
             w_t = weighting(w_mean, w_std, d, cu, cmax)
-    
+
             new_pix_value = (w_mean * w_t) + (pix_value * (1.0 - w_t))
             if new_pix_value < 0:
                 raise Exception("filter pixel value cannot be negative")
@@ -669,5 +675,256 @@ def get_neighbors(y, x, image, height, width, kernel_size, neighbor_pixels):
             else:
                 neighbor_pixels[j][i] = image[yj][xi]
                 if neighbor_pixels[j][i] != 0:
-                    num_samples += 1    
+                    num_samples += 1
     return num_samples
+
+### Evaluation metrics for SAR despeckling
+def denormalize(tensor, mean, std):
+    """Reverts standardization back to the original dB scale.
+    Parameters
+    ----------
+    tensor: shape (N, C, H, W)
+    mean: shape (C,)
+    std: shape (C,)
+    """
+    mean = mean.view(1, -1, 1, 1)
+    std = std.view(1, -1, 1, 1)
+    return tensor * std + mean
+
+def TV_loss(img, weight=1, per_pixel=False):
+    """TV Loss calculated on denormalized dB scale sar."""
+    n_img, c_img, h_img, w_img = img.shape
+    tv_h = torch.pow(img[..., 1:, :]-img[..., :-1, :], 2).sum()
+    tv_w = torch.pow(img[..., :, 1:]-img[..., :, :-1], 2).sum()
+
+    # per pixel or per patch
+    num = n_img*c_img*h_img*w_img if per_pixel else n_img
+    return weight*(tv_h+tv_w)/(num)
+
+def var_laplacian(img, per_pixel=False):
+    """Convolution of Laplace Operator as described in https://ieeexplore.ieee.org/document/7894491.
+    The implementation convolves the laplace operator separately over each
+    channel, and then sums their variance (and divides by 2).
+
+    Parameters
+    ----------
+    img : tensor[b, 2, h, w]
+        denormalized in dB sar data with 2 polarization channels.
+    per_pixel : bool
+        If true then accounts for patch size, otherwise averages by patch.
+    """
+    n_img, c_img, h_img, w_img = img.shape
+    # Positive laplacian kernel for 2 channels
+    laplacian_kernel = torch.tensor([[[[0, 1, 0],
+                                        [1, -4, 1],
+                                        [0, 1, 0]]]], dtype=img.dtype, device=img.device)
+    # stack for c channels
+    all_kernels = laplacian_kernel.expand(c_img, -1, -1, -1)
+
+    # Apply Laplacian filter via 2D convolution
+    laplacian = F.conv2d(img, all_kernels, padding=1, groups=c_img)
+
+    # Compute variance of Laplacian over each image
+    var_laplacian = laplacian.view(n_img, c_img, -1).var(dim=2).sum()
+
+    num = n_img*c_img*h_img*w_img if per_pixel else n_img*c_img
+    return var_laplacian / num
+
+def ssi(noisy, filt, per_pixel=False):
+    """Expects denormalized input.
+    Speckle Suppression Index should be calculated on raw intensity rather
+    than dB scale.
+
+    Parameters
+    ----------
+    img : tensor[b, c, h, w]
+        denormalized in dB sar data with c polarization channels.
+    per_pixel : bool
+        If true then accounts for patch size, otherwise averages by patch.
+    """
+    n_img, c_img, h_img, w_img = noisy.shape
+    # first convert back to raw intensity
+    r_noisy = torch.pow(10.0, noisy / 10).view(n_img, c_img, -1)
+    r_filt = torch.pow(10.0, filt / 10).view(n_img, c_img, -1)
+    std_noisy = r_noisy.std(dim=2)
+    mean_noisy = r_noisy.mean(dim=2)
+    std_filt = r_filt.std(dim=2)
+    mean_filt = r_filt.mean(dim=2)
+
+    channel_ssi = (std_filt / mean_filt) * (mean_noisy / std_noisy)
+    num = n_img*c_img*h_img*w_img if per_pixel else n_img*c_img
+    return channel_ssi.sum() / num
+
+def get_random_batch(dataset, batch_size=50, seed=None):
+    if seed is not None:
+        random.seed(seed)
+    indices = random.sample(range(len(dataset)), batch_size)
+    subset = Subset(dataset, indices)
+    loader = DataLoader(subset, batch_size=batch_size, shuffle=False)
+    return next(iter(loader))
+
+def permute_image(image):
+    """Randomly permutes an image while keeping the pixel values the same."""
+    permuted = image.flatten()  # Flatten to 1D array
+    np.random.shuffle(permuted)  # Shuffle the values
+    return permuted.reshape(image.shape)  # Reshape back to original
+
+def convert_to_grayscale(image, levels=64):
+    """Fast conversion of an image to grayscale with levels <= 256."""
+    imin = image.min()
+    imax = image.max()
+    if imin == imax:
+        return np.zeros(image.shape,dtype=np.uint8)
+    else:
+        return (np.round(np.clip((image - imin) / (imax - imin), 0, 1) * (levels-1))).astype(np.uint8)
+
+def enl(img, N=5, window_size=8, levels=4):
+    """ENL calculated for non-overlapping sliding windows of size x over the image.
+    The N windows with the least variance have their ENLs averaged.
+    We select homogenous regions via lowest regions as specified in textural
+    analysis of https://oa.ee.tsinghua.edu.cn/~yangjian/xubin/pdf/manuscript_ENL.pdf
+
+    Parameters
+    ----------
+    img : tensor[h, w]
+        Denormalized in dB sar data of a chosen polarization channel.
+    """
+    # first convert to raw intensity, not dB scale
+    h_img, w_img = img.shape
+    intensity = np.power(10, img / 10)
+
+    # sliding windows over 64 x 64
+    axis_windows = h_img // window_size
+    enls = np.empty(axis_windows**2)
+    entropy = np.empty(axis_windows**2)
+    for i in range(axis_windows):
+        for j in range(axis_windows):
+            window = intensity[i*window_size:(i+1)*window_size, j*window_size:(j+1)*window_size]
+            std = window.std()
+            mean = window.mean()
+            enl_val = np.clip((mean / std)**2, 0, 9999) if std > 0 else 9999
+            enls[j + i * axis_windows] = enl_val
+
+            # calculate window entropy
+            g = convert_to_grayscale(window, levels=levels)
+            glcm = graycomatrix(g, distances=[1], angles=[0, np.pi/2], levels=levels, normed=True, symmetric=True)
+            entropy[j + i * axis_windows] = graycoprops(glcm, 'entropy').sum()
+
+    # avg of lowest std (highest homogeneity) enls
+    sorted_indices = np.argsort(entropy)[:N]  # Select N smallest entropy windows
+    avg_enl = np.mean(enls[sorted_indices])
+    return avg_enl
+
+def RIS(noisy, filt, levels=64):
+    """Implemented as described in https://arxiv.org/pdf/1811.11872
+    They use 4-connected sites, horizontal, and vertical directions.
+
+    Parameters
+    ----------
+    noisy : tensor
+        Noisy SAR image in dB scale
+    filt : tensor
+        Despeckled SAR image in dB scale
+    levels : int
+        Quantization level for ratio image (default: 64).
+    """
+    def ref_h0(glcm):
+        """Homogeneity textual descriptor calculated assuming independence
+        p(i, j) = p(i) * p(j)."""
+        arr = glcm.squeeze(2).sum(axis=2) / 2
+        w, h = arr.shape
+        # calculate marginals
+        p = np.empty(w)
+        for i in range(w):
+            p[i] = arr[i, :].sum()
+        sum = 0
+        for i in range(w):
+            for j in range(h):
+                sum += p[i] * p[j] / ((i - j)**2 + 1)
+        return sum
+
+    in_intensity = np.power(10, noisy / 10)
+    out_intensity = np.power(10, filt / 10)
+    ratio = in_intensity / out_intensity
+
+    # haralick term - https://earlglynn.github.io/RNotes/package/EBImage/Haralick-Textural-Features.html
+    img_O = convert_to_grayscale(ratio, levels=levels)
+    distances = [1]
+    angles = [0, np.pi/2]
+    glcm = graycomatrix(img_O, distances=distances, angles=angles, levels=levels, normed=True, symmetric=True)
+
+    # compute a homogeneity value for each direction and calculate the mean
+    H = np.mean(graycoprops(glcm, 'homogeneity'))
+    H_0 = ref_h0(glcm)
+    ris = 100 * (H - H_0) / H_0
+    return ris
+
+def quality_m(noisy, filt, N=4, window_size=8, samples=10, levels=8):
+    """Metric for filter quality as described in https://arxiv.org/pdf/1704.05952
+
+    The paper uses n=8 automatically detected homogenous areas (500 x 500 sar images).
+    r_enl_mu is usually between 2-11 for filters.
+
+    Parameters
+    ----------
+    noisy : tensor
+        Noisy SAR image in dB scale
+    filt : tensor
+        Despeckled SAR image in dB scale
+    N : int
+        Lowest N ENL diffs chosen as textureless area
+    window_size : int
+        Size of windows to calculate ENL and ratio for the r_enl_mu term.
+    samples : int
+        Number of random permutations of ratio image sampled to estimate
+        homogeneity without structure.
+    levels : int
+        Quantization level for ratio image (default: 64).
+    """
+    in_intensity = np.power(10, noisy / 10)
+    out_intensity = np.power(10, filt / 10)
+    ratio = in_intensity / out_intensity
+    # sliding windows over 64 x 64
+    axis_windows = 64 // window_size
+    enl_diffs = np.empty(axis_windows**2)
+    enl_rel_diffs = np.empty(axis_windows**2)
+    ratio_diffs = np.empty(axis_windows**2)
+    for i in range(axis_windows):
+        for j in range(axis_windows):
+            noisy_window = in_intensity[i*window_size:(i+1)* window_size, j*window_size:(j+1)*window_size]
+            ratio_window = ratio[i*window_size:(i+1)* window_size, j*window_size:(j+1)*window_size]
+
+            noisy_var = noisy_window.var()
+            noisy_mean = noisy_window.mean()
+            enl_noisy = np.clip(noisy_mean**2 / noisy_var, 0, 9999) if noisy_var > 0 else 9999
+
+            ratio_var = ratio_window.var()
+            ratio_mean = ratio_window.mean()
+            enl_ratio = np.clip(ratio_mean**2 / ratio_var, 0, 9999) if ratio_var > 0 else 9999
+
+            # noisy enl, ratio enl, ratio mean
+            tmp = abs(enl_noisy - enl_ratio)
+            enl_diffs[j + i * axis_windows] = tmp
+            enl_rel_diffs[j + i * axis_windows] = np.clip(tmp / enl_noisy, 0, 9999) if enl_noisy > 0 else 9999
+            ratio_diffs[j + i * axis_windows] = abs(1 - ratio_mean)
+
+    # choose lowest N ENL noisy - ratio diffs as textureless areas
+    # empirically the ratio mean is usually ~1 so we do not need to worry but ENL error is not guaranteed
+    sorted_indices = np.argsort(enl_diffs)[:N]
+    r_enl_mu = (enl_rel_diffs[sorted_indices].sum() + ratio_diffs[sorted_indices].sum()) / 2
+
+    # haralick term - https://earlglynn.github.io/RNotes/package/EBImage/Haralick-Textural-Features.html
+    img_O = convert_to_grayscale(ratio, levels=levels)
+    distances = [1, 2, 3] # focus on small scale textures and structure
+    angles = [0, np.pi/4, np.pi/2, 3*np.pi/4]
+    glcm = graycomatrix(img_O, distances=distances, angles=angles, levels=levels, normed=True, symmetric=True)
+    h_O = np.mean(graycoprops(glcm, 'homogeneity'))
+    h_g = np.empty(samples)
+    for i in range(samples):
+        img_g = permute_image(img_O)
+        glcm = graycomatrix(img_g, distances=distances, angles=angles, levels=levels, normed=True, symmetric=True)
+        h_g[i] = np.mean(graycoprops(glcm, 'homogeneity'))
+
+    # may need to tweak scaling term 100
+    h_term = 100 * abs(h_O - h_g.mean()) / h_O if h_O > 0 else 9999
+    return r_enl_mu + h_term

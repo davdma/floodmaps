@@ -12,6 +12,7 @@ from dataset import DespecklerSARDataset
 from config import Config
 from loss import PseudoHuberLoss, LogCoshLoss, JSD, PatchMSELoss, PatchL1Loss, PatchHuberLoss
 from utils import ADEarlyStopper, Metrics, get_gradient_norm, get_model_params, print_model_params_and_grads
+from utils import denormalize, TV_loss, var_laplacian, ssi, get_random_batch, enl, RIS, quality_m
 from torchvision import transforms
 from architectures.autodespeckler import ConvAutoencoder1, ConvAutoencoder2, DenoiseAutoencoder, VarAutoencoder
 from matplotlib.cm import ScalarMappable
@@ -368,10 +369,77 @@ def train(model, train_set, val_set, test_set, device, cfg):
         test_loss = test_loop(test_loader, model, device, cfg, logging=False)
         fmetrics.save_metrics('test', loss=test_loss)
 
+    # calculate summary metrics here
+    ### SUMMARY ?????
+    ### HOW TO GET DENORMALIZE OPERATION ???
+    run.summary[f"final_{cfg.eval.mode}_loss"] = fmetrics.get_metrics(split=cfg.eval.mode)['loss']
+    calculate_metrics(test_loader if cfg.eval.mode == 'test' else val_loader,
+                      test_set if cfg.eval.mode == 'test' else val_set,
+                      model, device, fmetrics, cfg)
+
     if cfg.save:
         save_experiment(model_weights, fmetrics, run, cfg)
 
     return run, fmetrics
+
+def calculate_metrics(dataloader, dataset, model, device, metrics, cfg, sample_size=100):
+    # TV Loss, Var of Laplacian, SSI
+    tv_loss = torch.tensor(0.0, device=device, dtype=torch.float32)
+    var_lap = torch.tensor(0.0, device=device, dtype=torch.float32)
+    ssi_val = torch.tensor(0.0, device=device, dtype=torch.float32)
+    for X in dataloader:
+        X = X.to(device)
+        X = X[:, :2, :, :] if not cfg.data.use_lee else X[:, 2:, :, :]
+        out_dict = model(X)
+        result = out_dict['despeckler_output']
+
+        # convert back to dB scale
+        with torch.no_grad():
+            # figure out how to denormalize here
+            db_sar_filt = denormalize(result, train_mean[:2].to(device), train_std[:2].to(device))
+            db_sar_noisy = denormalize(X, train_mean[:2].to(device), train_std[:2].to(device))
+            tv_loss += TV_loss(db_sar_filt, weight=1, per_pixel=False)
+            var_lap += var_laplacian(db_sar_filt, per_pixel=False)
+            ssi_val += ssi(db_sar_noisy, db_sar_filt, per_pixel=False)
+
+    # ENL, Quality M, RIS
+    # subset 100 to pass through inference
+    batch = get_random_batch(dataset, batch_size=sample_size)
+    batch = batch.to(device)
+    batch = batch[:, :2, :, :]
+    out_dict = model(batch)
+    result = out_dict['despeckler_output']
+
+    # convert back to dB scale
+    with torch.no_grad():
+        db_batch_filt = denormalize(result,
+                                    train_mean[:2].to(device),
+                                    train_std[:2].to(device)).cpu().numpy()
+        db_batch_noisy = denormalize(batch,
+                                     train_mean[:2].to(device),
+                                     train_std[:2].to(device)).cpu().numpy()
+
+    tot_enl = 0.0
+    tot_ris = 0.0
+    tot_m = 0.0
+    for i in range(sample_size):
+        db_filt_vv = db_batch_filt[i, 0]
+        db_noisy_vv = db_batch_noisy[i, 0]
+
+        tot_enl += enl(db_filt_vv, N=10)
+        tot_ris += RIS(db_noisy_vv, db_filt_vv)
+        tot_m += quality_m(db_noisy_vv, db_filt_vv, samples=10)
+
+    metrics_dict = {"tv_loss": (tv_loss / len(dataloader)).item(),
+                    "var_lap": (var_lap / len(dataloader)).item(),
+                    "ssi_val": (ssi_val / len(dataloader)).item(),
+                    "avg_enl": tot_enl / sample_size,
+                    "avg_m": tot_m / sample_size,
+                    "avg_ris": tot_ris / sample_size}
+    metrics.save_metrics(cfg.eval.mode, **metrics_dict)
+
+    # log as wandb summary statistics
+    wandb.log(metrics_dict)
 
 def save_experiment(weights, metrics, run, cfg):
     """Save experiment files to directory specified by config save_path."""
@@ -635,61 +703,61 @@ def sample_examples(model, sample_set, cfg, idxs=[14440, 3639, 7866]):
 
 def run_experiment_ad(cfg):
     """Run a single autodespeckler model experiment given the configuration parameters. Append output and input vv/vh."""
-    if wandb.login():
-        # seeding
-        np.random.seed(cfg.seed)
-        random.seed(cfg.seed)
-        torch.manual_seed(cfg.seed)
-
-        device = (
-            "cuda"
-            if torch.cuda.is_available()
-            else "mps"
-            if torch.backends.mps.is_available()
-            else "cpu"
-        )
-        model = get_model(cfg).to(device)
-
-        print(f"Using {device} device")
-        model_name = cfg.model.autodespeckler
-        kernel_size = cfg.data.kernel_size
-        size = cfg.data.size
-        samples = cfg.data.samples
-        sample_dir = f'data/ad/samples_{kernel_size}_{size}_{samples}_dem/'
-
-        # load in mean and std
-        with open(f'data/ad/stats/{kernel_size}_{size}_{samples}_dem.pkl', 'rb') as f:
-            train_mean, train_std = pickle.load(f)
-
-            train_mean = torch.from_numpy(train_mean)
-            train_std = torch.from_numpy(train_std)
-
-        standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
-        train_set = DespecklerSARDataset(sample_dir, typ="train", transform=standardize, random_flip=cfg.data.random_flip,
-                                          seed=cfg.seed+1)
-        val_set = DespecklerSARDataset(sample_dir, typ="val", transform=standardize)
-        test_set = DespecklerSARDataset(sample_dir, typ="test", transform=standardize) if cfg.eval.mode == 'test' else None
-
-        # initialize loss functions - train loss function is optimized for gradient calculations
-        run, fmetrics = train(model, train_set, val_set, test_set, device, cfg)
-
-        # summary metrics
-        run.summary[f"final_{cfg.eval.mode}_loss"] = fmetrics.get_metrics(split=cfg.eval.mode)['loss']
-
-        # log predictions on validation set using wandb
-        try:
-            pred_table = sample_predictions(model, test_set if cfg.eval.mode == 'test' else val_set,
-                                            train_mean, train_std, cfg)
-
-            # pick 3 full res examples
-            examples = sample_examples(model, test_set if cfg.eval.mode == 'test' else val_set, cfg)
-            run.log({"model_val_predictions": pred_table, "examples": examples})
-        finally:
-            run.finish()
-
-        return fmetrics
-    else:
+    if not wandb.login():
         raise Exception("Failed to login to wandb.")
+
+    # seeding
+    np.random.seed(cfg.seed)
+    random.seed(cfg.seed)
+    torch.manual_seed(cfg.seed)
+
+    # device and model
+    device = (
+        "cuda"
+        if torch.cuda.is_available()
+        else "mps"
+        if torch.backends.mps.is_available()
+        else "cpu"
+    )
+    model = get_model(cfg).to(device)
+
+    # dataset and transforms
+    print(f"Using {device} device")
+    model_name = cfg.model.autodespeckler
+    kernel_size = cfg.data.kernel_size
+    size = cfg.data.size
+    samples = cfg.data.samples
+    sample_dir = f'data/ad/samples_{kernel_size}_{size}_{samples}_dem/'
+
+    # load in mean and std
+    with open(f'data/ad/stats/{kernel_size}_{size}_{samples}_dem.pkl', 'rb') as f:
+        train_mean, train_std = pickle.load(f)
+
+        train_mean = torch.from_numpy(train_mean)
+        train_std = torch.from_numpy(train_std)
+    standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
+
+    # datasets
+    train_set = DespecklerSARDataset(sample_dir, typ="train", transform=standardize, random_flip=cfg.data.random_flip,
+                                        seed=cfg.seed+1)
+    val_set = DespecklerSARDataset(sample_dir, typ="val", transform=standardize)
+    test_set = DespecklerSARDataset(sample_dir, typ="test", transform=standardize) if cfg.eval.mode == 'test' else None
+
+    run, fmetrics = train(model, train_set, val_set, test_set, device, cfg)
+
+    # initialize wandb run
+    # log predictions on validation set using wandb
+    try:
+        pred_table = sample_predictions(model, test_set if cfg.eval.mode == 'test' else val_set,
+                                        train_mean, train_std, cfg)
+
+        # pick 3 full res examples
+        examples = sample_examples(model, test_set if cfg.eval.mode == 'test' else val_set, cfg)
+        run.log({"model_val_predictions": pred_table, "examples": examples})
+    finally:
+        run.finish()
+
+    return fmetrics
 
 def main(cfg):
     run_experiment_ad(cfg)

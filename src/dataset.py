@@ -17,12 +17,12 @@ class DespecklerSARDataset(Dataset):
 
     The class does not have knowledge of the dimensions of the patches of the dataset which are
     set during preprocessing. The class assumes the data has 4 channels being:
-    
+
     1. SAR VV
     2. SAR VH
     3. SAR VV (Enhanced Lee)
     4. SAR VH (Enhanced Lee)
-    
+
     The 5th channel though unused for training is DEM, which can be toggled for visualization purposes.
 
     Parameters
@@ -69,18 +69,18 @@ class DespecklerSARDataset(Dataset):
         # add random flips and rotations? Could help prevent learning constant shift...
         if self.random_flip and self.typ == "train":
             sar_image = self.hv_random_flip(sar_image)
-            
+
         return sar_image
 
     def hv_random_flip(self, x):
         # Random horizontal flipping
         if self.random.random() > 0.5:
             x = torch.flip(x, [2])
-            
+
         # Random vertical flipping
         if self.random.random() > 0.5:
             x = torch.flip(x, [1])
-            
+
         return x
 
     def set_include_dem(self, val):
@@ -94,7 +94,7 @@ class FloodSampleSARDataset(Dataset):
     The class does not have knowledge of the dimensions of the patches of the dataset which are
     set during preprocessing. The class assumes the data has 8 channels with the first 7 channels
     being:
-    
+
     1. SAR VV
     2. SAR VH
     3. DEM
@@ -103,7 +103,7 @@ class FloodSampleSARDataset(Dataset):
     6. Waterbody
     7. Roads
 
-    And the last channel is the label. 
+    And the last channel is the label.
     Note: Currently adding RGB TCI reference channels to dataset.
 
     Parameters
@@ -146,7 +146,7 @@ class FloodSampleSARDataset(Dataset):
         # add random flips and rotations? Could help prevent learning constant shift...
         if self.random_flip and self.typ == "train":
             image, label = self.hv_random_flip(image, label)
-            
+
         return image, label
 
     def hv_random_flip(self, x, y):
@@ -154,17 +154,17 @@ class FloodSampleSARDataset(Dataset):
         if self.random.random() > 0.5:
             x = torch.flip(x, [2])
             y = torch.flip(y, [2])
-            
+
         # Random vertical flipping
         if self.random.random() > 0.5:
             x = torch.flip(x, [1])
             y = torch.flip(y, [1])
-            
+
         return x, y
 
 class FloodSampleDataset(Dataset):
     """An abstract class representing the Sentinel-2 flood labelling dataset. The entire dataset is
-    stored as individual files with the 10 input channels of each patch stored in sample_dir and the 
+    stored as individual files with the 10 input channels of each patch stored in sample_dir and the
     corresponding label for the patch stored in label_dir. The files are loaded into memory and cached
     in a multiprocessing array to be shared between pytorch dataloader workers.
 
@@ -182,10 +182,10 @@ class FloodSampleDataset(Dataset):
     8. Slope X
     9. Waterbody
     10. Roads
-    
-    Note: the multiprocessing implementation is currently buggy and can hang when run with pytorch 
+
+    Note: the multiprocessing implementation is currently buggy and can hang when run with pytorch
     dataloaders, thus use num_workers=0 to be safe.
-    
+
     Parameters
     ----------
     dataset_dir : str
@@ -222,11 +222,11 @@ class FloodSampleDataset(Dataset):
         saved_label_base = mp.Array(ctypes.c_uint8, len(self.labels_path)*size*size)
         saved_label_array = np.ctypeslib.as_array(saved_label_base.get_obj())
         saved_label_array = saved_label_array.reshape(len(self.labels_path), 1, size, size)
-        
+
         self.saved_samples = torch.from_numpy(saved_samples_array)
         self.saved_labels = torch.from_numpy(saved_label_array)
         self.use_cache = False
-        
+
         if random_flip:
             self.random = Random(seed)
 
@@ -241,7 +241,7 @@ class FloodSampleDataset(Dataset):
         if not self.use_cache:
             # filling cache
             raster = np.load(filename)
-            
+
             self.saved_samples[idx] = torch.from_numpy(raster)
         return self.saved_samples[idx]
 
@@ -251,7 +251,7 @@ class FloodSampleDataset(Dataset):
             raster = np.load(filename)
             self.saved_labels[idx] = torch.from_numpy(raster)
         return self.saved_labels[idx]
-        
+
     def __getitem__(self, idx):
         label_path = self.labels_path[idx]
         p = re.compile('label_(.+\.npy)')
@@ -271,7 +271,7 @@ class FloodSampleDataset(Dataset):
 
         if self.random_flip and self.typ == "train":
             image, label = self.hv_random_flip(image, label)
-            
+
         return image, label
 
     def hv_random_flip(self, x, y):
@@ -279,18 +279,18 @@ class FloodSampleDataset(Dataset):
         if self.random.random() > 0.5:
             x = torch.flip(x, [2])
             y = torch.flip(y, [2])
-            
+
         # Random vertical flipping
         if self.random.random() > 0.5:
             x = torch.flip(x, [1])
             y = torch.flip(y, [1])
-            
+
         return x, y
 
 class FloodSampleMeanStd(Dataset):
     """An abstract class used to estimate the mean and std of each channel across the entire dataset
     by using the original tiles (not preprocessed) used for generating patches.
-    
+
     Parameters
     ----------
     labels : str
@@ -330,12 +330,12 @@ class FloodSampleMeanStd(Dataset):
 
         with rasterio.open(ndwi_file) as src:
             ndwi_raster = src.read().reshape((1, -1))
-    
+
         with rasterio.open(dem_file) as src:
             dem_raster = src.read()
             slope = np.gradient(dem_raster, axis=(1,2))
             dem_raster = dem_raster.reshape((1, -1))
-    
+
         # with rasterio.open(slope_file) as src:
             # slope_raster = src.read().reshape((1, -1))
         slope_y_raster = slope[0].reshape((1, -1))
@@ -347,12 +347,12 @@ class FloodSampleMeanStd(Dataset):
         with rasterio.open(roads_file) as src:
             roads_raster = src.read().reshape((1, -1))
 
-        stack = np.vstack((tci_raster, b08_raster, ndwi_raster, dem_raster, 
-                           slope_y_raster, slope_x_raster, waterbody_raster, 
+        stack = np.vstack((tci_raster, b08_raster, ndwi_raster, dem_raster,
+                           slope_y_raster, slope_x_raster, waterbody_raster,
                            roads_raster), dtype=np.float32)
         tensor = torch.from_numpy(stack)
         return tensor
-        
+
     def __getitem__(self, idx):
         label_path = self.label_dir + self.labels[idx]
         p = re.compile('label_(\d{8})_(.+).tif')
@@ -364,5 +364,5 @@ class FloodSampleMeanStd(Dataset):
             image = self.stack_channels(eid, tile_date)[self.channels]
         else:
             raise Exception("Improper label path name")
-            
+
         return image

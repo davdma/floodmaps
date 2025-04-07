@@ -124,7 +124,7 @@ def compute_loss(out_dict, targets, loss_fn, cfg, beta_scheduler=None, debug=Fal
 
         loss_dict['recons_loss'] = recons_loss
         loss_dict['kld_loss'] = kld_loss
-        beta = beta_scheduler.beta() if cfg.model.vae.beta_annealing else cfg.model.vae.VAE_beta
+        beta = beta_scheduler.get_beta() if cfg.model.vae.beta_annealing else cfg.model.vae.VAE_beta
         recons_loss = recons_loss + beta * kld_loss # KLD weighting dropped for better regularization
 
         if torch.isnan(recons_loss).any() or torch.isinf(recons_loss).any():
@@ -198,7 +198,7 @@ def train_loop(dataloader, model, device, optimizer, minibatches, loss_fn, cfg, 
     # VAE mu and log_var monitoring
     if cfg.model.autodespeckler == 'VAE':
         # full histogram monitoring
-        beta = beta_scheduler.beta() if cfg.model.vae.beta_annealing else cfg.model.vae.VAE_beta
+        beta = beta_scheduler.get_beta() if cfg.model.vae.beta_annealing else cfg.model.vae.VAE_beta
         all_mu = torch.cat(all_mu, dim=0).numpy()
         all_log_var = torch.cat(all_log_var, dim=0).numpy()
         ratio = (running_recons_loss.item()
@@ -217,7 +217,7 @@ def train_loop(dataloader, model, device, optimizer, minibatches, loss_fn, cfg, 
 
     return epoch_tot_loss
 
-def test_loop(dataloader, model, device, loss_fn, cfg, run, epoch, logging=True):
+def test_loop(dataloader, model, device, loss_fn, cfg, run, epoch, beta_scheduler=None):
     running_tot_vloss = torch.tensor(0.0, device=device)
     num_batches = len(dataloader)
 
@@ -227,7 +227,7 @@ def test_loop(dataloader, model, device, loss_fn, cfg, run, epoch, logging=True)
             X = X.to(device)
             sar_in = X[:, :2, :, :] if not cfg.data.use_lee else X[:, 2:, :, :]
             out_dict = model(sar_in)
-            loss_dict = compute_loss(out_dict, sar_in, loss_fn, cfg)
+            loss_dict = compute_loss(out_dict, sar_in, loss_fn, cfg, beta_scheduler=beta_scheduler)
             loss = loss_dict['final_loss']
             if torch.isnan(loss).any():
                 err_file_name=f"outputs/ad_param_err_val_{cfg.model.autodespeckler}.json"
@@ -238,9 +238,7 @@ def test_loop(dataloader, model, device, loss_fn, cfg, run, epoch, logging=True)
 
     epoch_tot_vloss = running_tot_vloss.item() / num_batches
 
-    if logging:
-        run.log({'val loss': epoch_tot_vloss}, step=epoch)
-
+    run.log({'val loss': epoch_tot_vloss}, step=epoch)
     return epoch_tot_vloss
 
 def train(model, train_loader, val_loader, test_loader, device, cfg, run):
@@ -282,7 +280,8 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
                                   beta_scheduler=beta_scheduler)
 
             # at the end of each training epoch compute validation
-            avg_vloss = test_loop(val_loader, model, device, loss_fn, cfg, run, epoch)
+            avg_vloss = test_loop(val_loader, model, device, loss_fn, cfg, run,
+                                  epoch, beta_scheduler=beta_scheduler)
         except Exception as err:
             raise RuntimeError(f'Error while training occurred at epoch {epoch}.') from err
 
@@ -398,12 +397,13 @@ def save_experiment(weights, metrics, cfg, run):
 
     # save wandb id info to json
     wandb_info = {
-        "run_id": run.id,
+        "entity": run.entity,
         "project": run.project,
         "group": run.group,
+        "run_id": run.id,
         "name": run.name,
-        "state": run.state,  # "running", "finished", "crashed", etc.
-        "url": run.url
+        "url": run.url,
+        "dir": run.dir
     }
     with open(path / f"wandb_info.json", "w") as f:
         json.dump(wandb_info, f, indent=4)
@@ -708,14 +708,8 @@ def run_experiment_ad(cfg):
                             shuffle=True,
                             drop_last=False) if cfg.eval.mode == 'test' else None
 
-    # initialize wandb run + save path
+    # initialize wandb run
     total_params, trainable_params, param_size_in_mb = get_model_params(model)
-    if cfg.save:
-        if cfg.save_path is None:
-            default_path = f"experiments/{datetime.today().strftime('%Y-%m-%d')}_{cfg.model.autodespeckler}_{run.id}/"
-            cfg.save_path = default_path
-        print(f'Save path set to: {cfg.save_path}')
-
     run = wandb.init(
         project=cfg.wandb.project,
         group=cfg.wandb.group,
@@ -733,6 +727,14 @@ def run_experiment_ad(cfg):
     )
 
     try:
+        # setup save path
+        if cfg.save:
+            if cfg.save_path is None:
+                default_path = f"experiments/{datetime.today().strftime('%Y-%m-%d')}_{cfg.model.autodespeckler}_{run.id}/"
+                cfg.save_path = default_path
+                run.config.update({"save_path": cfg.save_path}, allow_val_change=True)
+            print(f'Save path set to: {cfg.save_path}')
+
         # train and save results metrics
         weights, fmetrics = train(model, train_loader, val_loader, test_loader, device, cfg, run)
         calculate_metrics(test_loader if cfg.eval.mode == 'test' else val_loader,
@@ -789,7 +791,6 @@ if __name__ == '__main__':
     parser.add_argument('-e', '--epochs', type=int)
     parser.add_argument('-b', '--batch_size', type=int)
     parser.add_argument('-l', '--lr', type=float)
-    parser.add_argument('--early_stopping', action='store_true', help='early stopping (default: False)')
     parser.add_argument('-p', '--patience', type=int, help='early stopping patience')
     parser.add_argument('--LR_scheduler', choices=SCHEDULER_NAMES,
                         help=f"LR schedulers: {', '.join(SCHEDULER_NAMES)}")
@@ -808,14 +809,11 @@ if __name__ == '__main__':
 
     # VAE Beta
     parser.add_argument('--VAE_beta', type=float, help="VAE beta for KL divergence term")
-    # new...
-    parser.add_argument('--beta_annealing', action='store_true', help="Use beta annealing for VAE (default: False)")
     parser.add_argument('--beta_period', type=int, help="Epoch period for beta annealing")
     parser.add_argument('--beta_cycles', type=int, help="M cycles for beta annealing ")
     parser.add_argument('--beta_proportion', type=float, help="R proportion used to increase beta within a cycle")
 
     # data
-    parser.add_argument('--use_lee', action='store_true', help='use enhanced lee filter on ad input (default: False)')
     parser.add_argument('--num_workers', type=int)
 
     # loss

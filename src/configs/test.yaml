@@ -31,12 +31,12 @@ model:
         latent_dim: 512
         VAE_beta: 1.0
         beta_annealing: True
-        beta_period: 50
-        beta_cycles: 4
+        beta_period: 5
+        beta_cycles: 2
         beta_proportion: 0.5
     
 train:
-    epochs: 5
+    epochs: 13
     batch_size: 1024
     loss: L1Loss # ['L1Loss', 'MSELoss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss', 'JSDLoss']
     clip: 1.0

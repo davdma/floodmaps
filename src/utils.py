@@ -7,6 +7,7 @@ from math import exp
 import json
 import copy
 import random
+import math
 import torch.nn.functional as F
 from skimage.feature import graycomatrix, graycoprops
 
@@ -246,8 +247,10 @@ def beta_cycle_linear(epoch, beta=1, period=50, n_cycle=4, ratio=0.5):
     if epoch >= n_cycle * period:
         return beta
 
-    tao = (epoch % period) / period
-    return beta if tao > ratio else beta * tao / ratio
+    # scales linearly to the closest epoch of specified ratio
+    t = epoch % period
+    midpt = math.ceil((period - 1) * ratio)
+    return beta if t >= midpt else beta * t / midpt
 
 class BetaScheduler:
     def __init__(self, beta=1.0, period=50, n_cycle=4, ratio=0.5):
@@ -267,7 +270,7 @@ class BetaScheduler:
                                           n_cycle=self.n_cycle,
                                           ratio=self.ratio)
 
-    def beta(self):
+    def get_beta(self):
         return self.cur_beta
 
 ### Model and gradient tracking helpers

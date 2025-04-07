@@ -11,14 +11,30 @@ import argparse
 import os
 import sys
 import socket
+import json
+
+def load_stopper_info(filepath):
+    """Loads historical early stopper objective and count."""
+    if os.path.exists(filepath):
+        with open(filepath, 'r') as f:
+            state = json.load(f)
+        return state['_best_objective'], state['_n_lower']
+    print('Stopper filepath not found.')
+    return None, 0
+
+def save_stopper_info(stopper, filepath):
+    """Save optimization early stopper objective and count."""
+    state = {'_best_objective': stopper._best_objective, '_n_lower': stopper._n_lower}
+    with open(filepath, 'w') as f:
+        json.dump(state, f)
 
 # tuning autodespeckler + unet architecture
 # need to fill in need fields for loading, freezing, watching weights
 def run_s1(job):
     config = {
-        'size': 68, 
+        'size': 68,
         'window': 64,
-        'samples': 1000, 
+        'samples': 1000,
         'method': 'minibatch',
         'filter': 'raw',
         'channels': [bool(int(x)) for x in '1111111'],
@@ -26,11 +42,11 @@ def run_s1(job):
         'group': 'VAE_autodespeckler',
         'num_sample_predictions': 60,
         'mode': 'val',
-        'epochs': 250, 
-        'batch_size': 256, 
+        'epochs': 250,
+        'batch_size': 256,
         'subset': 0.5,
-        'learning_rate': job.parameters['learning_rate'], 
-        'early_stopping': True, 
+        'learning_rate': job.parameters['learning_rate'],
+        'early_stopping': True,
         'patience': 10,
         'name': 'unet++',
         'load_classifier': None,
@@ -90,7 +106,7 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping, random_sta
 
     with Evaluator.create(run_s1, method="serial", method_kwargs=method_kwargs) as evaluator:
         search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=random_state)
-        
+
         if int(file_index) >= 1:
             # fit model from previous checkpointed search
             search.fit_surrogate(search_dir + '/all.csv')
@@ -107,65 +123,125 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping, random_sta
             existing_df = pd.read_csv(save_file, nrows=0)
             existing_columns = existing_df.columns.tolist()
             results = results[existing_columns]
-            
+
             results.to_csv(save_file, mode='a', index=False, header=False)
         else:
             results.to_csv(save_file, index=False)
 
 # tuning autodespeckler alone
-def run_ad(job):
+def run_vae(job):
     override = {
-        'project': 'SAR_AD_Tuning_Head_2',
+        'project': 'SAR_AD_Tuning_Head_3',
         'group': 'VAE_L1',
+        'loss': 'L1Loss',
         'learning_rate': job.parameters['learning_rate'],
-        'LR_scheduler': job.parameters['LR_scheduler'],
         'latent_dim': job.parameters['latent_dim'],
-        'VAE_beta': job.parameters['VAE_beta']
+        'beta_period': job.parameters['beta_period'],
+        'beta_cycles': job.parameters['beta_cycles']
     }
-    cfg = Config("configs/VAE_tuning.yaml", **override)
-    final_vmetrics = run_experiment_ad(cfg)
-    final_vloss = final_vmetrics.get_val_metrics()
-    return 0 - final_vloss
+    cfg = Config(config_file="configs/VAE_tuning.yaml", **override)
+    fmetrics = run_experiment_ad(cfg)
+    floss = fmetrics.get_metrics(split='val')['loss']
+    return 0 - floss
 
-def tuning_ad(file_index, max_evals, experiment_name, early_stopping, random_state=17630):
+def run_cnn1(job):
+    override = {
+        'project': 'SAR_AD_Tuning_Head_3',
+        'group': 'CNN1_L1',
+        'loss': 'L1Loss',
+        'learning_rate': job.parameters['learning_rate'],
+        'latent_dim': job.parameters['latent_dim'],
+        'AD_dropout': job.parameters['AD_dropout'],
+        'AD_activation_func': job.parameters['AD_activation_func']
+    }
+    cfg = Config(config_file="configs/CNN1_tuning.yaml", **override)
+    fmetrics = run_experiment_ad(cfg)
+    floss = fmetrics.get_metrics(split='val')['loss']
+    return 0 - floss
+
+def run_cnn2(job):
+    override = {
+        'project': 'SAR_AD_Tuning_Head_3',
+        'group': 'CNN2_L1',
+        'loss': 'L1Loss',
+        'learning_rate': job.parameters['learning_rate']
+    }
+    cfg = Config(config_file="configs/CNN1_tuning.yaml", **override)
+    fmetrics = run_experiment_ad(cfg)
+    floss = fmetrics.get_metrics(split='val')['loss']
+    return 0 - floss
+
+def run_dae(job):
+    override = {
+        'project': 'SAR_AD_Tuning_Head_3',
+        'group': 'DAE_L1',
+        'loss': 'L1Loss',
+        'learning_rate': job.parameters['learning_rate']
+    }
+    cfg = Config(config_file="configs/DAE_tuning.yaml", **override)
+    fmetrics = run_experiment_ad(cfg)
+    floss = fmetrics.get_metrics(split='val')['loss']
+    return 0 - floss
+
+def tuning_ad(file_index, max_evals, model, experiment_name, early_stopping, random_state=17630):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     hostname = socket.gethostname()
     print("----------------------------------")
     print("Running tuning script on:", hostname)
     print("Current timestamp:", timestamp)
-    print(f'Beginning tuning for experiment {experiment_name} for {max_evals} max evals using random seed {random_state}.')
-    search_dir = './tuning/ad_fixed/' + experiment_name
+    print(f'Beginning tuning for {model} experiment {experiment_name} for {max_evals} max evals using random seed {random_state}.')
+    search_dir = './tuning/ad_3/' + experiment_name
 
     if not os.path.exists(search_dir):
         os.makedirs(search_dir)
 
-    # define the variable you want to optimize
-    # We want to create model w dem and model wo dem
-
-    # General params
     problem = HpProblem()
-    # problem.add_hyperparameter([True, False], "use_lee")
-    problem.add_hyperparameter((0.00001, 0.01), "learning_rate") # real parameter
-    problem.add_hyperparameter(["Constant", "ReduceLROnPlateau", "CosAnnealingLR"], "LR_scheduler")
-
     # VAE
-    problem.add_hyperparameter([0.0001, 0.001, 0.01, 0.1, 1, 2], "VAE_beta")
-    problem.add_hyperparameter([128, 256, 512, 768, 1024, 1280, 1536], "latent_dim")
-    
+    if model == 'vae':
+        problem.add_hyperparameter((0.00001, 0.01), "learning_rate")
+        problem.add_hyperparameter([256, 512, 768, 1024], "latent_dim")
+        problem.add_hyperparameter([10, 15, 20, 25, 30, 35, 40], "beta_period")
+        problem.add_hyperparameter([1, 2, 3, 4, 5, 6], "beta_cycles")
+        obj_func = run_vae
+
+    # CNN1
+    if model == 'cnn1':
+        problem.add_hyperparameter((0.00001, 0.01), "learning_rate")
+        problem.add_hyperparameter([256, 512, 768, 1024], "latent_dim")
+        problem.add_hyperparameter((0.05, 0.3), "AD_dropout")
+        problem.add_hyperparameter(['relu', 'leaky_relu', 'softplus', 'mish', 'gelu', 'elu'], "AD_activation_func")
+        obj_func = run_cnn1
+
     # DAE
-    # problem.add_hyperparameter([2, 3, 5, 7], "AD_num_layers")
-    # problem.add_hyperparameter([3, 5, 7], "AD_kernel_size")
-    # problem.add_hyperparameter((0.05, 1.0), "noise_coeff") # change interval for dif noise funcs
-    # problem.add_hyperparameter(['leaky_relu', 'relu', 'softplus', 'mish', 'gelu', 'elu'], "AD_activation_func")
-    # problem.add_hyperparameter(["MSELoss", "PseudoHuberLoss", "HuberLoss", "LogCoshLoss"], "loss")
-    # problem.add_hyperparameter((0.0001, 0.30), "AD_dropout")
+    if model == 'dae':
+        problem.add_hyperparameter((0.00001, 0.01), "learning_rate")
+        problem.add_hyperparameter([2, 3, 5, 7], "AD_num_layers")
+        problem.add_hyperparameter([3, 5, 7], "AD_kernel_size")
+        problem.add_hyperparameter((0.05, 1.0), "noise_coeff") # change interval for dif noise funcs
+        problem.add_hyperparameter(['leaky_relu', 'relu', 'softplus', 'mish', 'gelu', 'elu'], "AD_activation_func")
+        problem.add_hyperparameter((0.0001, 0.30), "AD_dropout")
+        obj_func = run_dae
+
+    # CNN2
+    if model == 'cnn2':
+        problem.add_hyperparameter((0.00001, 0.01), "learning_rate")
+        obj_func = run_cnn2
+
+    # load in early stopping metrics if available
+    if early_stopping:
+        early_stopper = SearchEarlyStopping(patience=10)
+        if os.path.exists(search_dir + '/stopper.json'):
+            _best_objective, _n_lower = load_stopper_info(search_dir + '/stopper.json')
+            early_stopper._best_objective = _best_objective
+            early_stopper._n_lower = _n_lower
+        method_kwargs = {"callbacks": [early_stopper]}
+    else:
+        method_kwargs = dict()
 
     # define the evaluator to distribute the computation
-    method_kwargs = {"callbacks": [SearchEarlyStopping(patience=10)]} if early_stopping else dict()
-
-    with Evaluator.create(run_ad, method="serial", method_kwargs=method_kwargs) as evaluator:
+    with Evaluator.create(obj_func, method="serial", method_kwargs=method_kwargs) as evaluator:
         search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=random_state)
-        
+
         if int(file_index) >= 1:
             # fit model from previous checkpointed search
             search.fit_surrogate(search_dir + '/all.csv')
@@ -175,6 +251,8 @@ def tuning_ad(file_index, max_evals, experiment_name, early_stopping, random_sta
         else:
             results = search.search(max_evals=max_evals, timeout=23*3600)
 
+        print('Saving stopper and eval results to file...')
+        save_stopper_info(early_stopper, search_dir + '/stopper.json')
         # save results to collective file
         save_file = search_dir + '/all.csv'
         if os.path.exists(save_file):
@@ -182,24 +260,27 @@ def tuning_ad(file_index, max_evals, experiment_name, early_stopping, random_sta
             existing_df = pd.read_csv(save_file, nrows=0)
             existing_columns = existing_df.columns.tolist()
             results = results[existing_columns]
-            
+
             results.to_csv(save_file, mode='a', index=False, header=False)
         else:
             results.to_csv(save_file, index=False)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-i", "--run_index", type=int, default=0)
+    parser.add_argument("-i", "--run_index", type=int, default=0,
+                        help='0 if random trials, 1 if bayesian opt (requires 10+ previous runs)')
     parser.add_argument("-e", "--max_evals", type=int, default=1)
-    parser.add_argument("-r", "--random_state", type=int, default=123213)
-    parser.add_argument("-n", "--experiment_name", type=str, default="ad_vae_unet")
+    parser.add_argument("-m", "--model", default='vae', choices=['vae', 'cnn1', 'cnn2', 'dae'])
+    parser.add_argument("-n", "--experiment_name", type=str, default="ad_vae")
     parser.add_argument('--early_stopping', action='store_true', help='early stopping (default: False)')
-    parser.add_argument('--full_model', action='store_true', help='whether to tune full model or just ad head (default: False)')
+    parser.add_argument("-r", "--random_state", type=int, default=123213)
+    ### To implement:
+    # parser.add_argument('--full_model', action='store_true', help='whether to tune full model or just ad head (default: False)')
 
     args = parser.parse_args()
-    if args.full_model:
-        sys.exit(tuning_s1(args.run_index, args.max_evals, args.experiment_name, args.early_stopping,
-                           random_state=args.random_state))
-    else:
-        sys.exit(tuning_ad(args.run_index, args.max_evals, args.experiment_name, args.early_stopping,
-                           random_state=args.random_state))
+    sys.exit(tuning_ad(args.run_index, args.max_evals, args.model, args.experiment_name, args.early_stopping,
+                        random_state=args.random_state))
+    ### To implement:
+    # if args.full_model:
+    #     sys.exit(tuning_s1(args.run_index, args.max_evals, args.experiment_name, args.early_stopping,
+    #                        random_state=args.random_state))

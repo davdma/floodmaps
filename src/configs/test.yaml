@@ -1,5 +1,5 @@
 seed: 831002
-save: True
+save: False
 save_path:
 
 data:
@@ -10,10 +10,10 @@ data:
     random_flip: True
 
 model:
-    autodespeckler: VAE # ['CNN1', 'CNN2', 'DAE', 'VAE']
+    autodespeckler: CNN1 # ['CNN1', 'CNN2', 'DAE', 'VAE']
     cnn1:
-        latent_dim: 200
-        AD_dropout: 0.1
+        latent_dim: 1024
+        AD_dropout: 0.05
         AD_activation_func: leaky_relu # ['leaky_relu', 'relu', 'softplus', 'mish', 'gelu', 'elu']
     cnn2:
         AD_num_layers: 5
@@ -36,8 +36,8 @@ model:
         beta_proportion: 0.5
     
 train:
-    epochs: 13
-    batch_size: 1024
+    epochs: 200
+    batch_size: 16384
     loss: L1Loss # ['L1Loss', 'MSELoss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss', 'JSDLoss']
     clip: 1.0
     lr: 0.0001
@@ -46,13 +46,13 @@ train:
     LR_patience:
     LR_T_max:
     early_stopping: True
-    patience: 5
+    patience: 10
     subset: 1.0
-    num_workers: 10
+    num_workers: 4
 
 eval:
     mode: val # ['val', 'test'],
-    
+
 wandb:
     project: debug
     group:

@@ -44,7 +44,7 @@ class WaterPixelDetector(nn.Module):
 
 class SARClassifier(nn.Module):
     """General S1 water pixel detection model with classifier and optional autodespeckler.
-    The autodespeckler is an autoencoder for the SAR channels that aimed to extract salient features 
+    The autodespeckler is an autoencoder for the SAR channels that aimed to extract salient features
     from speckled SAR data for improving labeling performance.
 
     Parameters
@@ -72,14 +72,14 @@ class SARClassifier(nn.Module):
         if config['autodespeckler'] == "CNN1":
             return ConvAutoencoder1(latent_dim=config['latent_dim'], dropout=config['AD_dropout'])
         elif config['autodespeckler'] == "CNN2":
-            # activation function            
-            return ConvAutoencoder2(num_layers=config['AD_num_layers'], 
-                                    kernel_size=config['AD_kernel_size'], 
-                                    dropout=config['AD_dropout'], 
+            # activation function
+            return ConvAutoencoder2(num_layers=config['AD_num_layers'],
+                                    kernel_size=config['AD_kernel_size'],
+                                    dropout=config['AD_dropout'],
                                     activation_func=config['AD_activation_func'])
         elif config['autodespeckler'] == "DAE":
             # need to modify with new AE architecture parameters
-            return DenoiseAutoencoder(num_layers=config['AD_num_layers'], 
+            return DenoiseAutoencoder(num_layers=config['AD_num_layers'],
                                       kernel_size=config['AD_kernel_size'],
                                       dropout=config['AD_dropout'],
                                       coeff=config['noise_coeff'],
@@ -97,7 +97,7 @@ class SARClassifier(nn.Module):
     def load_autodespeckler_weights(self, weight_path, device):
         """
         Load weights for the autodespeckler from a .pth file.
-        
+
         Parameters
         ----------
         weight_path : str
@@ -106,10 +106,10 @@ class SARClassifier(nn.Module):
         """
         if weight_path is None:
             return
-            
+
         if not self.uses_autodespeckler():
             raise ValueError("Autodespeckler is not initialized in this model.")
-        
+
         state_dict = torch.load(weight_path, map_location=device)
         try:
             self.autodespeckler.load_state_dict(state_dict)
@@ -121,7 +121,7 @@ class SARClassifier(nn.Module):
     def load_classifier_weights(self, weight_path, device):
         """
         Load weights for the sar classifier from a .pth file.
-        
+
         Parameters
         ----------
         weight_path : str
@@ -130,7 +130,7 @@ class SARClassifier(nn.Module):
         """
         if weight_path is None:
             return
-        
+
         state_dict = torch.load(weight_path, map_location=device)
         try:
             self.classifier.load_state_dict(state_dict)
@@ -148,9 +148,9 @@ class SARClassifier(nn.Module):
         """Unfreeze the weights of the autodespeckler during training."""
         for param in self.autodespeckler.parameters():
             param.requires_grad = True
-        
+
     def forward(self, x):
-        """Returns dictionary containing outputs. If autodespeckler architecture used then 
+        """Returns dictionary containing outputs. If autodespeckler architecture used then
         output from the autodespeckler head is also included."""
         if self.uses_autodespeckler():
             sar = x[:, :2, :, :]

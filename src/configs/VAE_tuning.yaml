@@ -34,10 +34,10 @@ model:
         beta_period: 50
         beta_cycles: 4
         beta_proportion: 0.5
-    
+
 train:
-    epochs: 400
-    batch_size: 1024
+    epochs: 300
+    batch_size: 4096
     loss: L1Loss # ['L1Loss', 'MSELoss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss', 'JSDLoss']
     clip: 1.0
     lr: 0.0001
@@ -48,13 +48,13 @@ train:
     early_stopping: True
     patience: 15
     subset: 1.0
-    num_workers: 10
+    num_workers: 6
 
 eval:
     mode: val # ['val', 'test'],
-    
+
 wandb:
-    project: SAR_AD_Tuning_Head_2
+    project: SAR_AD_Tuning_Head_3
     group:
     num_sample_predictions: 40
 

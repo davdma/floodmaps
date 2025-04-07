@@ -25,13 +25,13 @@ class ConvAutoencoder1(nn.Module):
             activation_func = nn.ELU()
         else:
             raise Exception('Unrecognized activation function')
-        
+
         # subset VV and VH and concatenation of other channels in the patches?
         self.encoder = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, 3, padding=1), # (64, 64)
             nn.BatchNorm2d(out_channels),
             activation_func,
-            nn.Conv2d(out_channels, out_channels, 3, padding=1), 
+            nn.Conv2d(out_channels, out_channels, 3, padding=1),
             nn.BatchNorm2d(out_channels),
             activation_func,
             nn.Dropout(p=dropout),
@@ -61,14 +61,14 @@ class ConvAutoencoder1(nn.Module):
             nn.ConvTranspose2d(4*out_channels, 4*out_channels, 3, padding=1), # (16, 16)
             nn.BatchNorm2d(4*out_channels),
             activation_func,
-            nn.ConvTranspose2d(4*out_channels, 2*out_channels, 3, padding=1, 
+            nn.ConvTranspose2d(4*out_channels, 2*out_channels, 3, padding=1,
                                stride=2, output_padding=1), # (32, 32)
             nn.BatchNorm2d(2*out_channels),
             activation_func,
             nn.ConvTranspose2d(2*out_channels, 2*out_channels, 3, padding=1),
             nn.BatchNorm2d(2*out_channels),
             activation_func,
-            nn.ConvTranspose2d(2*out_channels, out_channels, 3, padding=1, 
+            nn.ConvTranspose2d(2*out_channels, out_channels, 3, padding=1,
                                stride=2, output_padding=1), # (64, 64)
             nn.BatchNorm2d(out_channels),
             activation_func,
@@ -140,7 +140,7 @@ class ConvAutoencoder2(nn.Module):
                 nn.BatchNorm2d(layer_channels),
                 activation_func
         ))
-                       
+
         for i in range(num_layers):
             if i < num_layers - 1:
                 modules.append(nn.Sequential(
@@ -175,9 +175,9 @@ class DenoiseAutoencoder(nn.Module):
             self.noise_layer = LogGammaNoiseLayer(coeff=coeff)
         else:
             raise Exception('Noise not correctly specified')
-            
+
         self.autoencoder = ConvAutoencoder2(in_channels=in_channels, out_channels=out_channels, num_layers=num_layers, kernel_size=kernel_size, dropout=dropout, activation_func=activation_func)
-        
+
     def forward(self, x):
         noisy = self.noise_layer(x)
         decoded_dict = self.autoencoder(noisy)

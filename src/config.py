@@ -27,7 +27,7 @@ class Struct:
 class Config:
     def __init__(self, config_file=None, **kwargs):
         assert config_file is not None
-        
+
         _config = load_config(path=config_file)
         # override config file with argparse args if not None
         for key, value in _config.items():

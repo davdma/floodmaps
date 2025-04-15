@@ -2,8 +2,8 @@ from deephyper.problem import HpProblem
 from deephyper.search.hps import CBO
 from deephyper.evaluator import Evaluator
 from deephyper.evaluator.callback import SearchEarlyStopping
-from train_classifier import run_experiment_s2
-from train_sar import run_experiment_s1
+from training.train_classifier import run_experiment_s2
+from training.train_sar import run_experiment_s1
 import pandas as pd
 import argparse
 import sys
@@ -12,21 +12,21 @@ import math
 
 def run_s2(job):
     config = {
-        'method': "random", 
-        'size': 64, 
-        'samples': 1000, 
+        'method': "random",
+        'size': 64,
+        'samples': 1000,
         'channels': [bool(int(x)) for x in '1111111111'],
         'sample_dir': '../sampling/samples_200_5_4_35/',
         'label_dir': '../sampling/labels/',
-        'project': 'FloodSamplesUNet++Tuning2', 
+        'project': 'FloodSamplesUNet++Tuning2',
         'group': None,
         'num_sample_predictions': 60,
         'mode': 'val',
-        'epochs': 200, 
-        'batch_size': job.parameters['batch_size'], 
+        'epochs': 200,
+        'batch_size': job.parameters['batch_size'],
         'num_workers': 0,
-        'learning_rate': job.parameters['learning_rate'] * math.sqrt(job.parameters['batch_size'] // 16), # job.parameters['learning_rate'], 
-        'early_stopping': True, 
+        'learning_rate': job.parameters['learning_rate'] * math.sqrt(job.parameters['batch_size'] // 16), # job.parameters['learning_rate'],
+        'early_stopping': True,
         'patience': 10,
         'name': 'unet++',
         'dropout': job.parameters['dropout'],
@@ -42,9 +42,9 @@ def run_s2(job):
 
 def run_s1(job):
     config = {
-        'size': 68, 
+        'size': 68,
         'window': 64,
-        'samples': 1000, 
+        'samples': 1000,
         'method': 'minibatch',
         'filter': 'raw',
         'channels': [bool(int(x)) for x in '1111111'],
@@ -52,11 +52,11 @@ def run_s1(job):
         'group': None,
         'num_sample_predictions': 60,
         'mode': 'val',
-        'epochs': 200, 
-        'batch_size': 256, 
+        'epochs': 200,
+        'batch_size': 256,
         'subset': 0.15,
-        'learning_rate': job.parameters['learning_rate'], 
-        'early_stopping': True, 
+        'learning_rate': job.parameters['learning_rate'],
+        'early_stopping': True,
         'patience': 10,
         'name': 'unet++',
         'dropout': job.parameters['dropout'],
@@ -93,7 +93,7 @@ def tuning_s2(file_index, max_evals, experiment_name, early_stopping):
 
     with Evaluator.create(run_s2, method="serial", method_kwargs=method_kwargs) as evaluator:
         search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=29239)
-        
+
         if int(file_index) >= 1:
             # fit model from previous checkpointed search
             search.fit_surrogate(search_dir + '/all.csv')
@@ -130,7 +130,7 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping):
 
     with Evaluator.create(run_s1, method="serial", method_kwargs=method_kwargs) as evaluator:
         search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=123539)
-        
+
         if int(file_index) >= 1:
             # fit model from previous checkpointed search
             search.fit_surrogate(search_dir + '/all.csv')
@@ -156,7 +156,7 @@ if __name__ == "__main__":
     parser.add_argument('--early_stopping', action='store_true', help='early stopping (default: False)')
 
     args = parser.parse_args()
-    
+
     if args.dataset == 's2':
         sys.exit(tuning_s2(args.run_index, args.max_evals, args.experiment_name, args.early_stopping))
     elif args.dataset == 's1':

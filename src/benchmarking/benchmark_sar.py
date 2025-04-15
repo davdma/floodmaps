@@ -1,4 +1,4 @@
-from train_sar import run_experiment_s1
+from training.train_sar import run_experiment_s1
 from random import Random
 import pandas as pd
 import numpy as np

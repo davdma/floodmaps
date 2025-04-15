@@ -6,6 +6,7 @@ from glob import glob
 from random import Random
 from torch.utils.data import Dataset
 from torchvision import transforms
+from pathlib import Path
 
 import ctypes
 import multiprocessing as mp
@@ -35,7 +36,7 @@ class DespecklerSARDataset(Dataset):
         PyTorch transform.
     """
     def __init__(self, sample_dir, typ="train", random_flip=False, transform=None, include_dem=False, seed=3200):
-        self.sample_dir = sample_dir
+        self.sample_dir = Path(sample_dir)
         self.typ = typ
         self.random_flip = random_flip
         self.transform = transform
@@ -43,7 +44,7 @@ class DespecklerSARDataset(Dataset):
         self.seed = seed
 
         # first load data in
-        self.dataset = np.load(sample_dir + f"{typ}_patches.npy")
+        self.dataset = np.load(self.sample_dir / f"{typ}_patches.npy")
         self.sar = self.dataset[:, :4, :, :]
         self.dem = self.dataset[:, 4:, :, :]
 
@@ -118,7 +119,7 @@ class FloodSampleSARDataset(Dataset):
         PyTorch transform.
     """
     def __init__(self, sample_dir, channels=[True] * 7, typ="train", random_flip=False, transform=None, seed=3200):
-        self.sample_dir = sample_dir
+        self.sample_dir = Path(sample_dir)
         self.channels = channels + [True] # always keep label
         self.typ = typ
         self.random_flip = random_flip
@@ -126,7 +127,7 @@ class FloodSampleSARDataset(Dataset):
         self.seed = seed
 
         # first load data in
-        self.dataset = np.load(sample_dir + f"{typ}_patches.npy")
+        self.dataset = np.load(self.sample_dir / f"{typ}_patches.npy")
 
         if random_flip:
             self.random = Random(seed)

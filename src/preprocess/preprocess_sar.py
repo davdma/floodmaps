@@ -9,13 +9,15 @@ import argparse
 from random import Random
 import logging
 import pickle
-from utils import enhanced_lee_filter
 from sklearn.model_selection import train_test_split
+
+from utils.utils import SRC_DIR, SAMPLES_DIR, enhanced_lee_filter
+### TO IMPLEMENT: PATHS WITH SRC_DIR, SAMPLES_DIR
 
 def minibatch(events, size, num_samples, rng, sample_dir, cloud_threshold, filter='raw', typ="train"):
     """Uniformly samples patches of dimension size x size across each dataset tile. The
     patches are saved together with labels into one file for minibatching.
-    
+
     Parameters
     ----------
     events : list[str]
@@ -37,7 +39,7 @@ def minibatch(events, size, num_samples, rng, sample_dir, cloud_threshold, filte
         Subset assigned to the saved patches: train, val, test.
     """
     logger = logging.getLogger('preprocessing')
-    
+
     pre_sample_dir = f'data/sar/minibatch/{filter}/samples_{size}_{num_samples}/'
     Path(pre_sample_dir).mkdir(parents=True, exist_ok=True)
 
@@ -61,12 +63,12 @@ def minibatch(events, size, num_samples, rng, sample_dir, cloud_threshold, filte
         for label in glob(event + f'/pred_*.tif'):
             m = p2.search(label)
             img_dt = m.group(1)
-            
+
             sar_vv_files = glob(event + f'/sar_{img_dt}_*_vv.tif')
             if len(sar_vv_files) == 0:
                 # SKIP IF SAR NOT FOUND FOR A LABEL (THIS IS SOMETIMES POSSIBLE)
                 logger.info(f'SAR file not found for label {label}')
-                continue 
+                continue
 
             sar_vv_file = sar_vv_files[0]
             sar_vh_file = sar_vv_files[0][:-6] + 'vh.tif'
@@ -77,10 +79,10 @@ def minibatch(events, size, num_samples, rng, sample_dir, cloud_threshold, filte
                 # if label has any values != 0 or 255 then print to log!
                 if np.any((label_raster > 0) & (label_raster < 255)):
                     logger.debug(f'{label_file} values are not 0 or 255.')
-                    
+
                 label_binary = np.where(label_raster[0] != 0, 1, 0)
                 label_binary = np.expand_dims(label_binary, axis = 0)
-    
+
                 HEIGHT = src.height
                 WIDTH = src.width
 
@@ -111,30 +113,30 @@ def minibatch(events, size, num_samples, rng, sample_dir, cloud_threshold, filte
             if filter == "lee":
                 vv_raster = np.expand_dims(enhanced_lee_filter(vv_raster[0], kernel_size=5).astype(np.float32), axis=0)
                 vh_raster = np.expand_dims(enhanced_lee_filter(vh_raster[0], kernel_size=5).astype(np.float32), axis=0)
-                
+
             with rasterio.open(dem_file) as src:
                 dem_raster = src.read()
 
             slope = np.gradient(dem_raster, axis=(1,2))
             slope_y_raster, slope_x_raster = slope
-    
+
             with rasterio.open(waterbody_file) as src:
                 waterbody_raster = src.read()
-    
+
             with rasterio.open(roads_file) as src:
                 roads_raster = src.read()
 
             with rasterio.open(cloud_file) as src:
                 cloud_raster = src.read()
 
-            stacked_raster = np.vstack((vv_raster, vh_raster, dem_raster, 
+            stacked_raster = np.vstack((vv_raster, vh_raster, dem_raster,
                                       slope_y_raster, slope_x_raster,
-                                      waterbody_raster, roads_raster, tci_floats, label_binary, 
+                                      waterbody_raster, roads_raster, tci_floats, label_binary,
                                       missing_raster, cloud_raster), dtype=np.float32)
 
             tiles.append(stacked_raster)
     logger.info('Tiles loaded.')
-    
+
     # loop over all events to generate samples for each epoch
     logger.info('Generating minibatches...')
     # want to store 7 channels + label + tci
@@ -145,7 +147,7 @@ def minibatch(events, size, num_samples, rng, sample_dir, cloud_threshold, filte
     for i, tile in enumerate(tiles):
         patches_sampled = 0
         _, HEIGHT, WIDTH = tile.shape
-            
+
         while patches_sampled < num_samples:
             x = int(rng.uniform(0, HEIGHT - size))
             y = int(rng.uniform(0, WIDTH - size))
@@ -162,7 +164,7 @@ def minibatch(events, size, num_samples, rng, sample_dir, cloud_threshold, filte
             # filter out missing vv or vh tiles
             if np.any(patch[0] == -9999) or np.any(patch[1] == -9999):
                 continue
-        
+
             dataset[i * num_samples + patches_sampled] = patch[:11]
             patches_sampled += 1
 
@@ -194,7 +196,7 @@ def trainMean(train_events, sample_dir, filter="raw"):
     # since we have n > 500 this is good approximation of pop mean
     count = 0
     means = np.zeros(7)
-    
+
     p1 = re.compile('\d{8}_\d+_\d+')
     p2 = re.compile('pred_(\d{8})_.+.tif')
     for event in train_events:
@@ -211,12 +213,12 @@ def trainMean(train_events, sample_dir, filter="raw"):
         for label in glob(event + f'/pred_*.tif'):
             m = p2.search(label)
             img_dt = m.group(1)
-            
+
             sar_vv_files = glob(event + f'/sar_{img_dt}_*_vv.tif')
             if len(sar_vv_files) == 0:
                 # SKIP IF SAR NOT FOUND FOR A LABEL (THIS IS SOMETIMES POSSIBLE)
                 logger.info(f'Mean std: SAR file not found for label {label}')
-                continue 
+                continue
 
             sar_vv_file = sar_vv_files[0]
             sar_vh_file = sar_vv_files[0][:-6] + 'vh.tif'
@@ -240,7 +242,7 @@ def trainMean(train_events, sample_dir, filter="raw"):
 
             vv_raster = vv_raster.reshape((1, -1))
             vh_raster = vh_raster.reshape((1, -1))
-            
+
             with rasterio.open(dem_file) as src:
                 dem_raster = src.read()
 
@@ -250,10 +252,10 @@ def trainMean(train_events, sample_dir, filter="raw"):
             dem_raster = dem_raster.reshape((1, -1))
             slope_y_raster = slope_y_raster.reshape((1, -1))
             slope_x_raster = slope_x_raster.reshape((1, -1))
-    
+
             with rasterio.open(waterbody_file) as src:
                 waterbody_raster = src.read().reshape((1, -1))
-    
+
             with rasterio.open(roads_file) as src:
                 roads_raster = src.read().reshape((1, -1))
 
@@ -262,11 +264,11 @@ def trainMean(train_events, sample_dir, filter="raw"):
 
             mask = (vv_raster[0] != -9999) & (vh_raster[0] != -9999) & (cloud_raster[0] != 1)
 
-            stack = np.vstack((vv_raster, vh_raster, dem_raster, slope_y_raster, 
+            stack = np.vstack((vv_raster, vh_raster, dem_raster, slope_y_raster,
                                slope_x_raster, waterbody_raster, roads_raster), dtype=np.float32)
 
             masked_stack = stack[:, mask]
-            
+
             # calculate mean and var across channels
             channel_means = np.mean(masked_stack, axis=1)
             means += channel_means
@@ -274,7 +276,7 @@ def trainMean(train_events, sample_dir, filter="raw"):
             count += 1
 
     overall_channel_mean = means / count
-        
+
     # calculate final statistics
     return overall_channel_mean
 
@@ -302,7 +304,7 @@ def trainStd(train_events, train_means, sample_dir, filter="raw"):
 
     count = 0
     variances = np.zeros(7)
-    
+
     p1 = re.compile('\d{8}_\d+_\d+')
     p2 = re.compile('pred_(\d{8})_.+.tif')
     for event in train_events:
@@ -319,12 +321,12 @@ def trainStd(train_events, train_means, sample_dir, filter="raw"):
         for label in glob(event + f'/pred_*.tif'):
             m = p2.search(label)
             img_dt = m.group(1)
-            
+
             sar_vv_files = glob(event + f'/sar_{img_dt}_*_vv.tif')
             if len(sar_vv_files) == 0:
                 # SKIP IF SAR NOT FOUND FOR A LABEL (THIS IS SOMETIMES POSSIBLE)
                 logger.info(f'Mean std: SAR file not found for label {label}')
-                continue 
+                continue
 
             sar_vv_file = sar_vv_files[0]
             sar_vh_file = sar_vv_files[0][:-6] + 'vh.tif'
@@ -348,7 +350,7 @@ def trainStd(train_events, train_means, sample_dir, filter="raw"):
 
             vv_raster = vv_raster.reshape((1, -1))
             vh_raster = vh_raster.reshape((1, -1))
-                
+
             with rasterio.open(dem_file) as src:
                 dem_raster = src.read()
 
@@ -358,10 +360,10 @@ def trainStd(train_events, train_means, sample_dir, filter="raw"):
             dem_raster = dem_raster.reshape((1, -1))
             slope_y_raster = slope_y_raster.reshape((1, -1))
             slope_x_raster = slope_x_raster.reshape((1, -1))
-    
+
             with rasterio.open(waterbody_file) as src:
                 waterbody_raster = src.read().reshape((1, -1))
-    
+
             with rasterio.open(roads_file) as src:
                 roads_raster = src.read().reshape((1, -1))
 
@@ -370,7 +372,7 @@ def trainStd(train_events, train_means, sample_dir, filter="raw"):
 
             mask = (vv_raster[0] != -9999) & (vh_raster[0] != -9999) & (cloud_raster[0] != 1)
 
-            stack = np.vstack((vv_raster, vh_raster, dem_raster, slope_y_raster, 
+            stack = np.vstack((vv_raster, vh_raster, dem_raster, slope_y_raster,
                                slope_x_raster, waterbody_raster, roads_raster), dtype=np.float32)
 
             masked_stack = stack[:, mask]
@@ -386,12 +388,12 @@ def trainStd(train_events, train_means, sample_dir, filter="raw"):
 
     overall_channel_variances = variances / count
     overall_channel_std = np.sqrt(overall_channel_variances)
-        
+
     # calculate final statistics
     return overall_channel_std
 
 
-def main(size, samples, seed, method='minibatch', cloud_threshold=0.1, filter=None, sample_dir='../sampling/samples_200_6_4_10_sar/'):
+def main(size, samples, seed, method='minibatch', cloud_threshold=0.1, filter=None, sample_dir='samples_200_6_4_10_sar/'):
     """Preprocesses raw S1 tiles and corresponding labels into smaller patches.
 
     Parameters
@@ -425,11 +427,11 @@ def main(size, samples, seed, method='minibatch', cloud_threshold=0.1, filter=No
     # calculate mean and std of train tiles
     mean = trainMean(train_events, sample_dir, filter=filter)
     std = trainStd(train_events, mean, sample_dir, filter=filter)
-    
+
     # also store training mean std statistics in file
     with open(f'data/sar/stats/{method}_{filter}_{size}_{samples}.pkl', 'wb') as f:
         pickle.dump((mean, std), f)
-    
+
     rng = Random(seed)
     if method == 'minibatch':
         # presave minibatches of size 1024
@@ -448,7 +450,7 @@ if __name__ == '__main__':
     parser.add_argument('-c', '--cloud_threshold', type=float, default=0.1, help='cloud percentage threshold for patch sampling (default: 0.1)')
     parser.add_argument('--filter', default='raw', choices=['lee', 'raw'],
                         help=f"filters: enhanced lee, raw (default: raw)")
-    parser.add_argument('--sdir', dest='sample_dir', default='../sampling/samples_200_6_4_10_sar/', help='(default: ../sampling/samples_200_6_4_10_sar/)')
-    
+    parser.add_argument('--sdir', dest='sample_dir', default='samples_200_6_4_10_sar/', help='(default: samples_200_6_4_10_sar/)')
+
     args = parser.parse_args()
     sys.exit(main(args.size, args.samples, args.seed, method=args.method, cloud_threshold=args.cloud_threshold, filter=args.filter, sample_dir=args.sample_dir))

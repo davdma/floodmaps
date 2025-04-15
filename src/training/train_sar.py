@@ -3,27 +3,31 @@ import torch
 import logging
 import argparse
 import copy
-import torch
+from datetime import datetime
 from torch import nn
 from torch.utils.data import DataLoader
-from datetime import datetime
-from dataset import FloodSampleSARDataset
-from utils import EarlyStopper, SARChannelIndexer, SaveMetrics
-from config import Config
 from torchvision import transforms
 from torchmetrics import MetricCollection
 from torchmetrics.classification import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score
-from model import SARClassifier
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
 import random
 from random import Random
 from PIL import Image
 from glob import glob
-from loss import InvariantBCELoss, InvariantBCEDiceLoss, InvariantTverskyLoss, ShiftInvariantLoss, TrainShiftInvariantLoss, NonShiftInvariantLoss, BCEDiceLoss, TverskyLoss, LossConfig
 import numpy as np
 import sys
 import pickle
+
+from models.model import SARClassifier
+from utils.config import Config
+from utils.utils import EarlyStopper, SARChannelIndexer, SaveMetrics, get_model_params
+from training.loss import (InvariantBCELoss, InvariantBCEDiceLoss, InvariantTverskyLoss,
+                           ShiftInvariantLoss, TrainShiftInvariantLoss, NonShiftInvariantLoss,
+                           BCEDiceLoss, TverskyLoss, LossConfig)
+from training.dataset import FloodSampleSARDataset
+from training.optim import get_optimizer
+from training.scheduler import get_scheduler
 
 MODEL_NAMES = ['unet', 'unet++']
 AUTODESPECKLER_NAMES = ['CNN1', 'CNN2', 'DAE', 'VAE']
@@ -161,140 +165,75 @@ def test_loop(dataloader, model, device, loss_config, c, epoch, logging=True):
 
     return epoch_vloss, epoch_vmetrics
 
-def train(model, train_set, val_set, test_set, device, loss_config, config, save='model'):
+def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, run):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     logging.info(f'''Starting training:
         Date:            {timestamp}
-        Epochs:          {config['epochs']}
-        Batch size:      {config['batch_size']}
-        Learning rate:   {config['learning_rate']}
-        Training size:   {len(train_set)}
-        Validation size: {len(val_set)}
+        Epochs:          {cfg.train.epochs}
+        Batch size:      {cfg.train.batch_size}
+        Learning rate:   {cfg.train.lr}
+        Training size:   {len(train_loader.dataset)}
+        Validation size: {len(val_loader.dataset)}
+        Test size:       {len(test_loader.dataset) if test_loader is not None else 'NA'}
         Device:          {device}
     ''')
     # log weights and gradients each epoch
     run.watch(model, log="all", log_freq=10)
 
-    # log via wandb
-    run = wandb.init(
-        project=config['project'],
-        group=config['group'],
-        config={
-        "dataset": "Sentinel1",
-        "mode": config['mode'],
-        "method": config['method'],
-        "filter": config['filter'],
-        "channels": ''.join('1' if b else '0' for b in config['channels']),
-        "patch_size": config['size'],
-        "window_size": config['window'],
-        "architecture": config['name'],
-        "load_classifier": config.get('load_classifier'),
-        "dropout": config['dropout'],
-        "deep_supervision": config['deep_supervision'] if config['name'] == 'unet++' else None,
-        "autodespeckler": config['autodespeckler'],
-        "load_autodespeckler": config.get('load_autodespeckler'),
-        "freeze_autodespeckler": config['freeze_autodespeckler'],
-        "latent_dim": config.get('latent_dim'),
-        "AD_num_layers": config.get('AD_num_layers'),
-        "AD_kernel_size": config.get('AD_kernel_size'),
-        "AD_dropout": config.get('AD_dropout'),
-        "AD_activation_func": config.get('AD_activation_func'),
-        "noise_type": config.get('noise_type'),
-        "noise_coeff": config.get('noise_coeff'),
-        'VAE_beta': config.get('VAE_beta'),
-        "learning_rate": config['learning_rate'],
-        "epochs": config['epochs'],
-        "early_stopping": config['early_stopping'],
-        "patience": config['patience'],
-        "batch_size": config['batch_size'],
-        "num_workers": config['num_workers'],
-        "optimizer": config['optimizer'],
-        "loss_fn": config['loss'],
-        "alpha": config.get('alpha') if config['loss'] == 'TverskyLoss' else None,
-        "beta": config.get('beta') if config['loss'] == 'TverskyLoss' else None,
-        "subset": config['subset'],
-        "training_size": len(train_set),
-        "validation_size": len(val_set),
-        "test_size": len(test_set) if mode == 'test' else None,
-        "val_percent": len(val_set) / (len(train_set) + len(val_set)),
-        "save_file": save
-        }
-    )
-
-    # log weights and gradients each epoch
-    if config['watch_weights_grad']:
-        wandb.watch(model, log="all", log_freq=20)
-
-    # VAE only
-    if config['autodespeckler'] == 'VAE':
-        config['kld_weight'] = config['batch_size'] / len(train_set)
-
     # optimizer and scheduler for reducing learning rate
-    if config['optimizer'] == 'Adam':
-        optimizer = torch.optim.Adam(model.parameters(), lr=config['learning_rate'])
-    elif config['optimizer'] == 'SGD':
-        optimizer = torch.optim.SGD(model.parameters(), lr=config['learning_rate'])
-    else:
-        raise Exception('Optimizer not found.')
+    optimizer = get_optimizer(model, cfg)
+    scheduler = get_scheduler(optimizer, cfg)
 
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5)
+    if cfg.train.early_stopping:
+        early_stopper = EarlyStopper(patience=cfg.train.patience)
 
-    # TRAIN AND TEST LOOP IS PER EPOCH!!!
-    if config['early_stopping']:
-        early_stopper = EarlyStopper(patience=config['patience'])
-
-        # best model checkpoint
-        min_model_weights = model.state_dict()
-
-    # best summary params
-    wandb.define_metric("val accuracy", summary="max")
-    wandb.define_metric("val precision", summary="max")
-    wandb.define_metric("val recall", summary="max")
-    wandb.define_metric("val f1", summary="max")
-    wandb.define_metric("val loss", summary="min")
-
-    minibatches = int(len(train_loader) * config['subset'])
-    center_1 = (config['size'] - config['window']) // 2
-    center_2 = center_1 + config['window']
+    minibatches = int(len(train_loader) * cfg.train.subset)
+    center_1 = (cfg.data.size - cfg.data.window) // 2
+    center_2 = center_1 + cfg.data.window
     c = (center_1, center_2)
-    for epoch in range(config['epochs']):
-        # train loop
-        avg_loss = train_loop(train_loader, model, device, loss_config, optimizer, minibatches, c, epoch)
+    for epoch in range(cfg.train.epochs):
+        try:
+            # train loop
+            avg_loss = train_loop(train_loader, model, device, loss_cfg, optimizer, minibatches, c, epoch)
 
-        # at the end of each training epoch compute validation
-        avg_vloss, avg_vmetrics = test_loop(val_loader, model, device, loss_config, c, epoch)
+            # at the end of each training epoch compute validation
+            avg_vloss, avg_vmetrics = test_loop(val_loader, model, device, loss_cfg, c, epoch)
+        except Exception as err:
+            raise RuntimeError(f'Error while training occurred at epoch {epoch}.') from err
 
-        if config['early_stopping']:
-            early_stopper.step(avg_vloss)
+        if cfg.train.early_stopping:
+            early_stopper.step(avg_vloss, model)
             if early_stopper.is_stopped():
                 break
 
-            if early_stopper.is_best_epoch():
-                early_stopper.store_metric(avg_vmetrics)
-                # Model weights are saved at the end of every epoch, if it's the best seen so far:
-                min_model_weights = copy.deepcopy(model.state_dict())
+        if scheduler is not None:
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(avg_vloss)
+            else:
+                scheduler.step()
 
-        scheduler.step(avg_vloss)
+        run.log({"learning_rate": scheduler.get_last_lr()[0] if scheduler is not None else cfg.train.lr}, step=epoch)
 
     # Save our model
-    final_vmetrics = SaveMetrics(shift_invariant=config['shift_invariant'])
+    ### IMPLEMENT METRICS WITH SHIFT INVARIANCE!!!
+    fmetrics = Metrics() # SaveMetrics(shift_invariant=config['shift_invariant'])
     PATH = 'models/' + save + '.pth'
-    if config['early_stopping']:
-        torch.save(min_model_weights, PATH)
-
+    model_weights = None
+    if cfg.train.early_stopping:
+        model_weights = early_stopper.get_best_weights()
         # reset model to checkpoint for later sample prediction
-        model.load_state_dict(min_model_weights)
-        final_vmetrics.save_metrics(early_stopper.get_metric(), typ='val')
+        model.load_state_dict(model_weights)
+        fmetrics.save_metrics('val', loss=early_stopper.get_min_validation_loss())
     else:
-        torch.save(model.state_dict(), PATH)
-        final_vmetrics.save_metrics(avg_vmetrics, typ='val')
+        model_weights = model.state_dict()
+        fmetrics.save_metrics('val', loss=avg_vloss)
 
     # for benchmarking purposes
-    if config['mode'] == 'test':
-        _, test_vmetrics = test_loop(test_loader, model, device, loss_config, c, logging=False)
-        final_vmetrics.save_metrics(test_vmetrics, typ='test')
+    if cfg.eval.mode == 'test':
+        _, test_vmetrics = test_loop(test_loader, model, device, loss_cfg, c, logging=False)
+        # fmetrics.save_metrics(test_vmetrics, typ='test') ???
 
-    return run, final_vmetrics
+    return model_weights, fmetrics
 
 def sample_predictions(model, sample_set, mean, std, loss_config, config, seed=24330):
     """Generate predictions on a subset of images in the dataset for wandb logging."""
@@ -459,6 +398,7 @@ def run_experiment_s1(cfg):
     model = SARClassifier(cfg, ad_cfg=ad_cfg).to(device)
     # potentially freeze AD weights?
 
+    # dataset and transforms
     print(f"Using {device} device")
     model_name = cfg.model.classifier
     filter = 'lee' if cfg.data.use_lee else 'raw'
@@ -515,8 +455,23 @@ def run_experiment_s1(cfg):
                             shuffle=True,
                             drop_last=False) if cfg.eval.mode == 'test' else None
 
+    # initialize wandb run
+    total_params, trainable_params, param_size_in_mb = get_model_params(model)
+    run = wandb.init(
+        project=cfg.wandb.project,
+        group=cfg.wandb.group,
+        config={
+            "dataset": "Sentinel1",
+            **cfg.to_dict(),
+            "training_size": len(train_set),
+            "validation_size": len(val_set),
+            "test_size": len(test_set) if cfg.eval.mode == 'test' else None,
+            "val_percent": len(val_set) / (len(train_set) + len(val_set))
+        }
+    )
+
     # initialize loss functions - train loss function is optimized for gradient calculations
-    loss_config = LossConfig(cfg, device=device)
+    loss_cfg = LossConfig(cfg, device=device)
 
     try:
         if cfg.save:
@@ -526,7 +481,9 @@ def run_experiment_s1(cfg):
                 run.config.update({"save_path": cfg.save_path}, allow_val_change=True)
             print(f'Save path set to: {cfg.save_path}')
 
-        run, final_vmetrics = train(model, train_set, val_set, test_set, device, loss_config, cfg, save=save_file)
+        # train and save results metrics
+        weights, fmetrics = train(model, train_loader, val_loader, test_loader, device,
+                                loss_cfg, cfg, run)
 
         # summary metrics
         final_vacc, final_vpre, final_vrec, final_vf1 = final_vmetrics.get_val_metrics()
@@ -537,8 +494,8 @@ def run_experiment_s1(cfg):
 
         # log predictions on validation set using wandb
 
-        pred_table = sample_predictions(model, test_set if cfg['mode'] == 'test' else val_set,
-                                        train_mean, train_std, loss_config, cfg)
+        pred_table = sample_predictions(model, test_set if cfg.eval.mode == 'test' else val_set,
+                                        train_mean, train_std, loss_cfg, cfg)
         run.log({"model_val_predictions": pred_table})
     except Exception as e:
         print("An exception occurred during training!")

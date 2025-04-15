@@ -2,7 +2,7 @@ from deephyper.problem import HpProblem
 from deephyper.search.hps import CBO
 from deephyper.evaluator import Evaluator
 from deephyper.evaluator.callback import SearchEarlyStopping
-from train_discriminator import run_experiment
+from training.train_discriminator import run_experiment
 import pandas as pd
 import argparse
 import os
@@ -12,21 +12,21 @@ def run(job):
     # channels = [bool(int(x)) for x in str(int(job.parameters['channels']))]
     config = {
         'method': "random", # random
-        'size': 64, 
-        'samples': 1000, 
+        'size': 64,
+        'samples': 1000,
         'name': "c1",
         'channels': [bool(int(x)) for x in '1111111111'],
         'sample_dir': '../sampling/samples_200_5_4_35/',
         'label_dir': '../sampling/labels/',
-        'project': 'FloodSamplesDiscriminatorTuning2', 
+        'project': 'FloodSamplesDiscriminatorTuning2',
         'group': None,
         'num_sample_predictions': 60,
-        'epochs': 100, 
+        'epochs': 100,
         "num_pixels": 1,
-        'batch_size': job.parameters['batch_size'], 
+        'batch_size': job.parameters['batch_size'],
         'num_workers': 0,
-        'learning_rate': job.parameters['learning_rate'] * math.sqrt(job.parameters['batch_size'] // 16), # job.parameters['learning_rate'], 
-        'early_stopping': True, 
+        'learning_rate': job.parameters['learning_rate'] * math.sqrt(job.parameters['batch_size'] // 16), # job.parameters['learning_rate'],
+        'early_stopping': True,
         'patience': 10,
         'loss': 'TverskyLoss', # job.parameters['loss'],
         'alpha': job.parameters['alpha'],
@@ -66,7 +66,7 @@ if __name__ == "__main__":
 
     with Evaluator.create(run, method="serial", method_kwargs=method_kwargs) as evaluator:
         search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=20295)
-        
+
         if int(file_index) >= 1:
             # fit model from previous checkpointed search
             search.fit_surrogate(search_dir + '/all.csv')

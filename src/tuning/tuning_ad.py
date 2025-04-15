@@ -2,9 +2,9 @@ from deephyper.problem import HpProblem
 from deephyper.search.hps import CBO
 from deephyper.evaluator import Evaluator
 from deephyper.evaluator.callback import SearchEarlyStopping
-from train_sar import run_experiment_s1
-from train_ad_head import run_experiment_ad
-from config import Config
+from training.train_sar import run_experiment_s1
+from training.train_ad_head import run_experiment_ad
+from utils.config import Config
 from datetime import datetime
 import pandas as pd
 import argparse

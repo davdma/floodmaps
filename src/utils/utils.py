@@ -10,6 +10,15 @@ import random
 import math
 import torch.nn.functional as F
 from skimage.feature import graycomatrix, graycoprops
+from pathlib import Path
+
+SRC_DIR = Path(__file__).resolve().parents[1]
+SAMPLES_DIR = Path(__file__).resolve().parents[2] / 'sampling'
+DATA_DIR = SRC_DIR / 'data'
+PREPROCESS_DIR = SRC_DIR / 'preprocess'
+MODELS_DIR = SRC_DIR / 'models'
+OUTPUT_DIR = SRC_DIR / 'outputs'
+CONFIG_DIR = SRC_DIR / 'configs'
 
 TRAIN_LABELS = ["label_20150919_20150917_496_811.tif", "label_20150919_20150917_497_812.tif",
                 "label_20151112_20151109_472_940.tif", "label_20151112_20151109_473_939.tif",
@@ -466,12 +475,14 @@ class EarlyStopper:
         self.best = True
         self.min_validation_loss = float('inf')
         self.metric = None
+        self.best_model_weights = None
 
-    def step(self, validation_loss):
+    def step(self, validation_loss, model):
         if validation_loss < self.min_validation_loss:
             self.min_validation_loss = validation_loss
             self.counter = 0
             self.best = True
+            self.best_model_weights = copy.deepcopy(model.state_dict())
         elif validation_loss > (self.min_validation_loss + self.min_delta):
             self.counter += 1
             self.best = False
@@ -479,16 +490,15 @@ class EarlyStopper:
             self.best = False
 
     def is_stopped(self):
+        """Check whether training has stopped."""
         return self.counter >= self.patience
 
-    def is_best_epoch(self):
-        return self.best
+    def get_min_validation_loss(self):
+        return self.min_validation_loss
 
-    def store_metric(self, metric):
-        self.metric = metric
-
-    def get_metric(self):
-        return self.metric
+    def get_best_weights(self):
+        """Return the best model weights."""
+        return self.best_model_weights
 
 class ADEarlyStopper:
     """This class supports regular early stopping as well as early stopping for VAE cyclical beta annealing

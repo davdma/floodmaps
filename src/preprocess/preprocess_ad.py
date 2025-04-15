@@ -9,8 +9,10 @@ import argparse
 from random import Random
 import logging
 import pickle
-from utils import enhanced_lee_filter
 from sklearn.model_selection import train_test_split
+
+from utils.utils import SRC_DIR, SAMPLES_DIR, enhanced_lee_filter
+### TO IMPLEMENT: PATHS WITH SRC_DIR, SAMPLES_DIR
 
 def generate_patches(events, size, num_samples, rng, sample_dir, kernel_size=5, typ="train"):
     """Uniformly samples sar patches of dimension size x size across each dataset tile. The
@@ -36,8 +38,8 @@ def generate_patches(events, size, num_samples, rng, sample_dir, kernel_size=5, 
     """
     logger = logging.getLogger('preprocessing')
 
-    pre_sample_dir = f'data/ad/samples_{kernel_size}_{size}_{num_samples}_dem/' # DEM version
-    Path(pre_sample_dir).mkdir(parents=True, exist_ok=True)
+    pre_sample_dir = SRC_DIR / f'data/ad/samples_{kernel_size}_{size}_{num_samples}_dem/' # DEM version
+    pre_sample_dir.mkdir(parents=True, exist_ok=True)
 
     # first load all samples into memory
     # SAR Preprocessing: labels will be stored in event sample folder
@@ -103,7 +105,7 @@ def generate_patches(events, size, num_samples, rng, sample_dir, kernel_size=5, 
             dataset[i * num_samples + patches_sampled] = patch
             patches_sampled += 1
 
-    np.save(pre_sample_dir + f'{typ}_patches.npy', dataset)
+    np.save(pre_sample_dir / f'{typ}_patches.npy', dataset)
 
     logger.info('Sampling complete.')
 
@@ -264,7 +266,7 @@ def trainStd(train_events, train_means, sample_dir, kernel_size=5):
     return overall_channel_std
 
 
-def main(size, samples, seed, kernel_size=5, sample_dir='../sampling/samples_200_6_4_10_sar/'):
+def main(size, samples, seed, kernel_size=5, sample_dir='samples_200_6_4_10_sar/'):
     """Preprocesses raw S1 tiles into smaller patches. This preprocessing script saves only SAR layers and
     its enhanced lee counterpart useful for despeckling tasks.
 
@@ -289,6 +291,8 @@ def main(size, samples, seed, kernel_size=5, sample_dir='../sampling/samples_200
     logger.addHandler(handler)
     logger.propagate = False
 
+    sample_dir = SAMPLES_DIR / sample_dir
+
     # randomly select samples to be in train and test set
     all_events = glob(sample_dir + '[0-9]*')
     train_events, val_test_events = train_test_split(all_events, test_size=0.2, random_state=seed - 20)
@@ -299,7 +303,7 @@ def main(size, samples, seed, kernel_size=5, sample_dir='../sampling/samples_200
     std = trainStd(train_events, mean, sample_dir, kernel_size=kernel_size)
 
     # also store training mean std statistics in file
-    with open(f'data/ad/stats/{kernel_size}_{size}_{samples}_dem.pkl', 'wb') as f:
+    with open(SRC_DIR / f'data/ad/stats/{kernel_size}_{size}_{samples}_dem.pkl', 'wb') as f:
         pickle.dump((mean, std), f)
 
     rng = Random(seed)
@@ -317,7 +321,7 @@ if __name__ == '__main__':
     parser.add_argument('-s', '--seed', dest='seed', type=int, default=433002, help='random number generator seed (default: 433002)')
     parser.add_argument('--kernel_size', type=int, default=5,
                         help=f"kernel size for enhanced lee filter (default: 5)")
-    parser.add_argument('--sdir', dest='sample_dir', default='../sampling/samples_200_6_4_10_sar/', help='(default: ../sampling/samples_200_6_4_10_sar/)')
+    parser.add_argument('--sdir', dest='sample_dir', default='samples_200_6_4_10_sar/', help='(default: samples_200_6_4_10_sar/)')
 
     args = parser.parse_args()
     sys.exit(main(args.size, args.samples, args.seed, kernel_size=args.kernel_size, sample_dir=args.sample_dir))

@@ -1,4 +1,4 @@
-from train_classifier import run_experiment_s2
+from training.train_classifier import run_experiment_s2
 from random import Random
 import pandas as pd
 import numpy as np

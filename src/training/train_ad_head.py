@@ -1,21 +1,8 @@
 import wandb
-import torch
 import logging
 import argparse
-import copy
-import math
-import torch
-from torch import nn
-from torch.utils.data import DataLoader
+from pathlib import Path
 from datetime import datetime
-from dataset import DespecklerSARDataset
-from config import Config
-from loss import PseudoHuberLoss, LogCoshLoss, JSD, PatchMSELoss, PatchL1Loss, PatchHuberLoss
-from utils import (ADEarlyStopper, Metrics, BetaScheduler, get_gradient_norm,
-                   get_model_params, print_model_params_and_grads, denormalize,
-                   TV_loss, var_laplacian, ssi, get_random_batch, enl, RIS, quality_m)
-from torchvision import transforms
-from model import build_autodespeckler
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
 import matplotlib.pyplot as plt
@@ -24,11 +11,24 @@ from random import Random
 from PIL import Image
 from glob import glob
 import numpy as np
-from pathlib import Path
 import sys
 import pickle
-import yaml
 import json
+
+import torch
+from torch import nn
+from torch.utils.data import DataLoader
+from torchvision import transforms
+
+from models.model import build_autodespeckler
+from training.dataset import DespecklerSARDataset
+from training.optim import get_optimizer
+from training.scheduler import get_scheduler
+from training.loss import PseudoHuberLoss, LogCoshLoss, JSD, PatchMSELoss, PatchL1Loss, PatchHuberLoss
+from utils.config import Config
+from utils.utils import (ADEarlyStopper, Metrics, BetaScheduler, get_gradient_norm,
+                   get_model_params, print_model_params_and_grads, denormalize,
+                   TV_loss, var_laplacian, ssi, get_random_batch, enl, RIS, quality_m)
 
 AUTODESPECKLER_NAMES = ['CNN1', 'CNN2', 'DAE', 'VAE']
 NOISE_NAMES = ['normal', 'masking', 'log_gamma']
@@ -56,28 +56,6 @@ def get_loss(cfg):
         return JSD()
     else:
         raise Exception(f"Loss must be one of: {', '.join(LOSS_NAMES)}")
-
-def get_optimizer(model, cfg):
-    if cfg.train.optimizer == 'Adam':
-        optimizer = torch.optim.Adam(model.parameters(), lr=cfg.train.lr)
-    elif cfg.train.optimizer == 'SGD':
-        optimizer = torch.optim.SGD(model.parameters(), lr=cfg.train.lr)
-    else:
-        raise Exception('Optimizer not found.')
-
-    return optimizer
-
-def get_scheduler(optimizer, cfg):
-    """Supports epoch stepping schedulers (batch step needs to be implemented)."""
-    if cfg.train.LR_scheduler is None or cfg.train.LR_scheduler == 'Constant':
-        scheduler = None
-    elif cfg.train.LR_scheduler == 'ReduceLROnPlateau':
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=cfg.train.LR_patience)
-    elif cfg.train.LR_scheduler == 'CosAnnealingLR':
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, cfg.train.LR_T_max, eta_min=0.000001)
-    else:
-        raise Exception('Scheduler not found.')
-    return scheduler
 
 def compute_loss(out_dict, targets, loss_fn, cfg, beta_scheduler=None, debug=False):
     despeckler_output = out_dict['despeckler_output']

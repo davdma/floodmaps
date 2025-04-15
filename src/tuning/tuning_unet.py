@@ -2,8 +2,8 @@ from deephyper.problem import HpProblem
 from deephyper.search.hps import CBO
 from deephyper.evaluator import Evaluator
 from deephyper.evaluator.callback import SearchEarlyStopping
-from train_classifier import run_experiment_s2
-from train_sar import run_experiment_s1
+from training.train_classifier import run_experiment_s2
+from training.train_sar import run_experiment_s1
 import pandas as pd
 import argparse
 import os
@@ -14,19 +14,19 @@ def run_s2(job):
     config = {
         'mode': 'val',
         'method': "random",
-        'size': 64, 
-        'samples': 1000, 
+        'size': 64,
+        'samples': 1000,
         'channels': [bool(int(x)) for x in '1111101111'], # exclude DEM tuning for now
         'sample_dir': '../sampling/samples_200_5_4_35/',
         'label_dir': '../sampling/labels/',
-        'project': 'FloodSamplesUNetNoDEM', # 'FloodSamplesUNetTuning2', 
+        'project': 'FloodSamplesUNetNoDEM', # 'FloodSamplesUNetTuning2',
         'group': None,
         'num_sample_predictions': 60,
-        'epochs': 100, 
-        'batch_size': job.parameters['batch_size'], 
+        'epochs': 100,
+        'batch_size': job.parameters['batch_size'],
         'num_workers': 0,
-        'learning_rate': job.parameters['learning_rate'], 
-        'early_stopping': True, 
+        'learning_rate': job.parameters['learning_rate'],
+        'early_stopping': True,
         'patience': 10,
         'name': 'unet',
         'dropout': job.parameters['dropout'],
@@ -42,9 +42,9 @@ def run_s2(job):
 
 def run_s1(job):
     config = {
-        'size': 68, 
+        'size': 68,
         'window': 64,
-        'samples': 1000, 
+        'samples': 1000,
         'method': 'minibatch',
         'filter': 'raw',
         'channels': [bool(int(x)) for x in '1111111'],
@@ -52,11 +52,11 @@ def run_s1(job):
         'group': 'CNN2_autodespeckler',
         'num_sample_predictions': 60,
         'mode': 'val',
-        'epochs': 250, 
-        'batch_size': 1200, 
+        'epochs': 250,
+        'batch_size': 1200,
         'subset': 0.5,
-        'learning_rate': job.parameters['learning_rate'], 
-        'early_stopping': True, 
+        'learning_rate': job.parameters['learning_rate'],
+        'early_stopping': True,
         'patience': 10,
         'name': 'unet',
         'dropout': job.parameters['dropout'],
@@ -96,7 +96,7 @@ def tuning_s2(file_index, max_evals, experiment_name, early_stopping):
 
     with Evaluator.create(run_s2, method="serial", method_kwargs=method_kwargs) as evaluator:
         search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=192995)
-        
+
         if int(file_index) >= 1:
             # fit model from previous checkpointed search
             search.fit_surrogate(search_dir + '/all.csv')
@@ -138,7 +138,7 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping):
 
     with Evaluator.create(run_s1, method="serial", method_kwargs=method_kwargs) as evaluator:
         search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=599023)
-        
+
         if int(file_index) >= 1:
             # fit model from previous checkpointed search
             search.fit_surrogate(search_dir + '/all.csv')
@@ -155,7 +155,7 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping):
             existing_df = pd.read_csv(save_file, nrows=0)
             existing_columns = existing_df.columns.tolist()
             results = results[existing_columns]
-            
+
             results.to_csv(save_file, mode='a', index=False, header=False)
         else:
             results.to_csv(save_file, index=False)

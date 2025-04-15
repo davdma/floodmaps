@@ -8,7 +8,9 @@ import sys
 import argparse
 from random import Random
 import logging
-from utils import TRAIN_LABELS, VAL_LABELS, TEST_LABELS
+
+from utils.utils import TRAIN_LABELS, VAL_LABELS, TEST_LABELS, SRC_DIR, SAMPLES_DIR
+### TO IMPLEMENT: PATHS WITH SRC_DIR, SAMPLES_DIR
 
 def random_crop(label_names, size, num_samples, rng, method, sample_dir, label_dir, typ="train"):
     """Uniformly samples patches of dimension size x size across each dataset tile.

@@ -1,9 +1,9 @@
 import torch
 from torch import nn
-from architectures.unet import UNet
-from architectures.unet_plus import NestedUNet
-from architectures.autodespeckler import ConvAutoencoder1, ConvAutoencoder2, DenoiseAutoencoder, VarAutoencoder
-from utils import load_model_weights
+from models.unet import UNet
+from models.unet_plus import NestedUNet
+from models.autodespeckler import ConvAutoencoder1, ConvAutoencoder2, DenoiseAutoencoder, VarAutoencoder
+from utils.utils import load_model_weights
 
 def build_autodespeckler(cfg):
     """Factory function for SAR autodespeckler model construction.

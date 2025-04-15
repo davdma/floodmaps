@@ -28,6 +28,16 @@ def save_stopper_info(stopper, filepath):
     with open(filepath, 'w') as f:
         json.dump(state, f)
 
+def print_best_params(save_file):
+    """Prints the parameters of the best tuning run so far."""
+    df = pd.read_csv(save_file)
+    best_idx = df["objective"].idxmax()
+    best_row = df.loc[best_idx]
+
+    # Filter for columns starting with "p:"
+    p_vars = best_row.filter(like="p:").to_dict()
+    print(p_vars)
+
 # tuning autodespeckler + unet architecture
 # need to fill in need fields for loading, freezing, watching weights
 def run_s1(job):
@@ -132,8 +142,8 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping, random_sta
 def run_vae(job):
     override = {
         'project': 'SAR_AD_Tuning_Head_3',
-        'group': 'VAE_L1',
-        'loss': 'L1Loss',
+        'group': 'VAE_L2',
+        'loss': 'MSELoss',
         'learning_rate': job.parameters['learning_rate'],
         'latent_dim': job.parameters['latent_dim'],
         'beta_period': job.parameters['beta_period'],
@@ -147,8 +157,8 @@ def run_vae(job):
 def run_cnn1(job):
     override = {
         'project': 'SAR_AD_Tuning_Head_3',
-        'group': 'CNN1_L1',
-        'loss': 'L1Loss',
+        'group': 'CNN1_L2',
+        'loss': 'MSELoss',
         'learning_rate': job.parameters['learning_rate'],
         'latent_dim': job.parameters['latent_dim'],
         'AD_dropout': job.parameters['AD_dropout'],
@@ -264,6 +274,10 @@ def tuning_ad(file_index, max_evals, model, experiment_name, early_stopping, ran
             results.to_csv(save_file, mode='a', index=False, header=False)
         else:
             results.to_csv(save_file, index=False)
+
+        # if search stopped print params of best run
+        if early_stopping and early_stopper.search_stopped:
+            print_best_params(save_file)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

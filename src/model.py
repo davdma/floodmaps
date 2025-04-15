@@ -3,6 +3,56 @@ from torch import nn
 from architectures.unet import UNet
 from architectures.unet_plus import NestedUNet
 from architectures.autodespeckler import ConvAutoencoder1, ConvAutoencoder2, DenoiseAutoencoder, VarAutoencoder
+from utils import load_model_weights
+
+def build_autodespeckler(cfg):
+    """Factory function for SAR autodespeckler model construction.
+
+    Parameters
+    ----------
+    cfg : obj
+        SAR autodespeckler config instance specified in config.py.
+    """
+    if cfg.model.autodespeckler == "CNN1":
+        return ConvAutoencoder1(latent_dim=cfg.model.cnn1.latent_dim,
+                                dropout=cfg.model.cnn1.AD_dropout,
+                                activation_func=cfg.model.cnn1.AD_activation_func)
+    elif cfg.model.autodespeckler == "CNN2":
+        return ConvAutoencoder2(num_layers=cfg.model.cnn2.AD_num_layers,
+                                kernel_size=cfg.model.cnn2.AD_kernel_size,
+                                dropout=cfg.model.cnn2.AD_dropout,
+                                activation_func=cfg.model.cnn2.AD_activation_func)
+    elif cfg.model.autodespeckler == "DAE":
+        # need to modify with new AE architecture parameters
+        return DenoiseAutoencoder(num_layers=cfg.model.dae.AD_num_layers,
+                                  kernel_size=cfg.model.dae.AD_kernel_size,
+                                  dropout=cfg.model.dae.AD_dropout,
+                                  coeff=cfg.model.dae.noise_coeff,
+                                  noise_type=cfg.model.dae.noise_type,
+                                  activation_func=cfg.model.dae.AD_activation_func)
+    elif cfg.model.autodespeckler == "VAE":
+        # need to modify with new AE architecture parametersi
+        return VarAutoencoder(latent_dim=cfg.model.vae.latent_dim) # more hyperparameters
+    else:
+        raise Exception('Invalid autodespeckler config.')
+
+def build_sar_classifier(cfg):
+    """Factory function for SAR classifier model construction.
+
+    Parameters
+    ----------
+    cfg : obj
+        SAR classifier config instance specified in config.py.
+    """
+    channels = cfg.data.channels
+    n_channels = sum(channels)
+    if cfg.model.classifier == 'unet':
+        return UNet(n_channels, dropout=cfg.model.unet.dropout)
+    elif cfg.model.classifier == 'unet++':
+        return NestedUNet(n_channels, dropout=cfg.model.unetpp.dropout,
+                          deep_supervision=cfg.model.unetpp.deep_supervision)
+    else:
+        raise Exception('Invalid classifier config.')
 
 class WaterPixelDetector(nn.Module):
     """General S2 water pixel detection model with classifier and optional discriminator.
@@ -49,47 +99,27 @@ class SARClassifier(nn.Module):
 
     Parameters
     ----------
-    config : dict
-        Dictionary containing model parameters.
-    n_channels : int
-        Number of input channels used.
+    cfg: obj
+        SAR classifier config instance as defined in config.py.
+    ad_cfg: obj
+        SAR autodespeckler config instance as defined in config.py.
     """
-    def __init__(self, config, n_channels=7):
+    def __init__(self, cfg, ad_cfg=None):
         super().__init__()
-        self.config = config
-        self.classifier = self.get_classifier(config, n_channels)
-        self.autodespeckler = self.get_autodespeckler(config)
+        self.cfg = cfg
+        self.ad_cfg = ad_cfg
+        self.classifier = self.build_sar_classifier(cfg)
 
-    def get_classifier(self, config, n_channels):
-        if config['name'] == 'unet':
-            return UNet(n_channels, dropout=config['dropout'])
-        elif config['name'] == 'unet++':
-            return NestedUNet(n_channels, dropout=config['dropout'], deep_supervision=config['deep_supervision'])
+        if ad_cfg is not None:
+            self.autodespeckler = self.build_autodespeckler(ad_cfg)
         else:
-            raise Exception('Classifier not specified')
+            self.autodespeckler = None
 
-    def get_autodespeckler(self, config):
-        if config['autodespeckler'] == "CNN1":
-            return ConvAutoencoder1(latent_dim=config['latent_dim'], dropout=config['AD_dropout'])
-        elif config['autodespeckler'] == "CNN2":
-            # activation function
-            return ConvAutoencoder2(num_layers=config['AD_num_layers'],
-                                    kernel_size=config['AD_kernel_size'],
-                                    dropout=config['AD_dropout'],
-                                    activation_func=config['AD_activation_func'])
-        elif config['autodespeckler'] == "DAE":
-            # need to modify with new AE architecture parameters
-            return DenoiseAutoencoder(num_layers=config['AD_num_layers'],
-                                      kernel_size=config['AD_kernel_size'],
-                                      dropout=config['AD_dropout'],
-                                      coeff=config['noise_coeff'],
-                                      noise_type=config['noise_type'],
-                                      activation_func=config['AD_activation_func'])
-        elif config['autodespeckler'] == "VAE":
-            # need to modify with new AE architecture parametersi
-            return VarAutoencoder(latent_dim=config['latent_dim']) # more hyperparameters
-        else:
-            return None
+    def get_classifier(self):
+        return self.classifier
+
+    def get_autodespeckler(self):
+        return self.autodespeckler
 
     def uses_autodespeckler(self):
         return self.autodespeckler is not None
@@ -104,19 +134,8 @@ class SARClassifier(nn.Module):
             Path to the .pth file containing the autodespeckler weights.
         device: torch.device
         """
-        if weight_path is None:
-            return
-
-        if not self.uses_autodespeckler():
-            raise ValueError("Autodespeckler is not initialized in this model.")
-
-        state_dict = torch.load(weight_path, map_location=device)
-        try:
-            self.autodespeckler.load_state_dict(state_dict)
-            print("Autodespeckler weights loaded successfully.")
-        except RuntimeError as e:
-            print(f"Error loading autodespeckler weights: {e}")
-            raise e
+        load_model_weights(self.autodespeckler, weight_path, device,
+                           model_name=f"{self.ad_cfg.model.autodespeckler} autodespeckler")
 
     def load_classifier_weights(self, weight_path, device):
         """
@@ -128,16 +147,8 @@ class SARClassifier(nn.Module):
             Path to the .pth file containing the autodespeckler weights.
         device: torch.device
         """
-        if weight_path is None:
-            return
-
-        state_dict = torch.load(weight_path, map_location=device)
-        try:
-            self.classifier.load_state_dict(state_dict)
-            print("Classifier weights loaded successfully.")
-        except RuntimeError as e:
-            print(f"Error loading classifier weights: {e}")
-            raise e
+        load_model_weights(self.classifier, weight_path, device,
+                           model_name=f"{self.cfg.model.classifier} classifier")
 
     def freeze_autodespeckler_weights(self):
         """Freeze the weights of the autodespeckler during training."""
@@ -156,9 +167,9 @@ class SARClassifier(nn.Module):
             sar = x[:, :2, :, :]
             despeckler_dict = self.autodespeckler(sar)
             logits = self.classifier(torch.cat((despeckler_dict['despeckler_output'], x[:, 2:, :, :]), 1))
-            despeckler_dict['final_output'] = logits
+            despeckler_dict['classifier_output'] = logits
             return despeckler_dict
         else:
             logits = self.classifier(x)
-            out = {'final_output': logits}
+            out = {'classifier_output': logits}
             return out

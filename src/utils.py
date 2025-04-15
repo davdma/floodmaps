@@ -239,10 +239,46 @@ class SARChannelIndexer:
     def get_channel_names(self):
         return self.names
 
+def load_model_weights(model, weight_path, device, model_name="Model"):
+    """Shared weight loading util.
+
+    Parameters
+    ----------
+    model : obj
+        SAR classifier, autodespeckler, or optical model
+    weight_path : str
+    device : str
+    model_name : str
+    """
+    if weight_path is None:
+        return
+    try:
+        state_dict = torch.load(weight_path, map_location=device)
+        model.load_state_dict(state_dict)
+        print(f"{model_name} weights loaded successfully.")
+    except RuntimeError as e:
+        print(f"Error loading {model_name} weights: {e}")
+        raise e
+
 ### VAE Beta Scheduling
 def beta_cycle_linear(epoch, beta=1, period=50, n_cycle=4, ratio=0.5):
     """Beta annealing function as proposed by https://arxiv.org/pdf/1903.10145.
     After the n cycles of period epochs, the remaining epochs remain at max beta.
+
+    Parameters
+    ----------
+    epoch : int
+        Current training epoch.
+    beta : float
+        Max beta value at end of beta annealing cycle.
+    period : int
+        Epochs per cycle.
+    n_cycle : int
+        Number of total cycles for beta annealing. After final cycle, beta
+        will stay at max beta value.
+    ratio : float
+        Proportion of cycle (between 0.0 and 1.0) with a linear ramp. Used to
+        calculate point of the cycle where beta reaches max beta value.
     """
     if epoch >= n_cycle * period:
         return beta

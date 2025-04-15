@@ -19,7 +19,7 @@ class LossConfig():
 
         # autodespeckler reconstruction losses
         self.autodespeckler_loss_fn = nn.MSELoss if self.uses_autodespeckler else None
-        
+
     def compute_loss(self, out_dict, targets, typ='train'):
         """For autodespeckler architecture, will add reconstruction loss from output of despeckler to the final loss."""
         # autodespeckler loss component - calculate reconstruction loss with respect to sar input
@@ -46,8 +46,8 @@ class LossConfig():
             raise Exception('Invalid argument: typ not equal to one of train, val, test.')
 
         total_loss = recons_loss + main_loss if recons_loss is not None else main_loss
-        loss_dict = {"total_loss": total_loss, 
-                     "recons_loss": recons_loss, 
+        loss_dict = {"total_loss": total_loss,
+                     "recons_loss": recons_loss,
                      "shifted_label": y_shifted}
         return loss_dict
 
@@ -64,7 +64,7 @@ class LossConfig():
                 test_loss_fn = val_loss_fn
             else:
                 # non shift wrapper
-                train_loss_fn = NonShiftInvariantLoss(nn.BCEWithLogitsLoss(), 
+                train_loss_fn = NonShiftInvariantLoss(nn.BCEWithLogitsLoss(),
                                                     size=config['size'],
                                                     window=config['window'],
                                                     device=device)
@@ -76,7 +76,7 @@ class LossConfig():
                 val_loss_fn = ShiftInvariantLoss(InvariantBCEDiceLoss(), device=device)
                 test_loss_fn = val_loss_fn
             else:
-                train_loss_fn = NonShiftInvariantLoss(BCEDiceLoss(), 
+                train_loss_fn = NonShiftInvariantLoss(BCEDiceLoss(),
                                                     size=config['size'],
                                                     window=config['window'],
                                                     device=device)
@@ -88,7 +88,7 @@ class LossConfig():
                 val_loss_fn = ShiftInvariantLoss(InvariantTverskyLoss(alpha=config['alpha'], beta=config['beta']), device=device)
                 test_loss_fn = val_loss_fn
             else:
-                train_loss_fn = NonShiftInvariantLoss(TverskyLoss(alpha=config['alpha'], beta=config['beta']), 
+                train_loss_fn = NonShiftInvariantLoss(TverskyLoss(alpha=config['alpha'], beta=config['beta']),
                                                     size=config['size'],
                                                     window=config['window'],
                                                     device=device)
@@ -96,7 +96,7 @@ class LossConfig():
                 test_loss_fn = train_loss_fn
         else:
             raise Exception('Loss function not found.')
-    
+
         return train_loss_fn, val_loss_fn, test_loss_fn
 
     def contains_reconstruction_loss(self):
@@ -147,7 +147,7 @@ class PseudoHuberLoss(nn.Module):
         self.register_buffer('c', torch.tensor(c))
 
     def forward(self, inputs, targets):
-        loss = torch.sqrt((inputs - targets) ** 2 + self.c ** 2) - self.c  
+        loss = torch.sqrt((inputs - targets) ** 2 + self.c ** 2) - self.c
 
         # Per patch loss
         patch_loss = loss.view(loss.size(0), -1).sum(dim=1)
@@ -161,7 +161,7 @@ class LogCoshLoss(nn.Module):
 
     def forward(self, inputs, targets):
         loss = torch.log(torch.cosh(inputs - targets + 1e-12))  # Compute element-wise log-cosh loss
-        
+
         # Sum over all pixels per patch
         patch_loss = loss.view(loss.size(0), -1).sum(dim=1)
         return patch_loss.mean()
@@ -204,19 +204,19 @@ class BCEDiceLoss(nn.Module):
         super().__init__()
 
     def forward(self, inputs, targets, smooth=1):
-        
+
         # remove if your model contains a sigmoid or equivalent activation layer
         inputs = F.sigmoid(inputs)
-        
+
         # flatten label and prediction tensors
         inputs = inputs.view(-1)
         targets = targets.view(-1)
-        
-        intersection = (inputs * targets).sum()                            
-        dice_loss = 1 - (2. * intersection + smooth) / (inputs.sum() + targets.sum() + smooth)  
+
+        intersection = (inputs * targets).sum()
+        dice_loss = 1 - (2. * intersection + smooth) / (inputs.sum() + targets.sum() + smooth)
         BCE = F.binary_cross_entropy(inputs, targets, reduction='mean')
         BCEDice = BCE + dice_loss
-        
+
         return BCEDice
 
 class TverskyLoss(nn.Module):
@@ -226,25 +226,25 @@ class TverskyLoss(nn.Module):
         self.beta = beta
 
     def forward(self, inputs, targets, smooth=1):
-        
+
         # comment out if your model contains a sigmoid or equivalent activation layer
         inputs = F.sigmoid(inputs)
-        
+
         # flatten label and prediction tensors
         inputs = inputs.reshape(-1)
         targets = targets.reshape(-1)
-        
+
         #True Positives, False Positives & False Negatives
-        TP = (inputs * targets).sum()    
+        TP = (inputs * targets).sum()
         FP = ((1-targets) * inputs).sum()
         FN = (targets * (1-inputs)).sum()
-       
-        Tversky = (TP + smooth) / (TP + self.alpha * FP + self.beta * FN + smooth)  
-        
+
+        Tversky = (TP + smooth) / (TP + self.alpha * FP + self.beta * FN + smooth)
+
         return 1 - Tversky
 
 class InvariantBCELoss(nn.Module):
-    """Passed into ShiftInvariantLoss at initialization for optimized shift-invariant BCE loss calculations. 
+    """Passed into ShiftInvariantLoss at initialization for optimized shift-invariant BCE loss calculations.
     Will calculate and return a torch tensor of BCE losses of each patch in the batch.
     """
     def __init__(self, weight=None, reduction='mean'):
@@ -275,7 +275,7 @@ class InvariantBCELoss(nn.Module):
             return loss
 
 class InvariantBCEDiceLoss(nn.Module):
-    """Passed into ShiftInvariantLoss at initialization for optimized shift-invariant BCE Dice loss calculations. 
+    """Passed into ShiftInvariantLoss at initialization for optimized shift-invariant BCE Dice loss calculations.
     Will calculate and return a torch tensor of BCE Dice losses of each patch in the batch.
     """
     def __init__(self, weight=None):
@@ -286,19 +286,19 @@ class InvariantBCEDiceLoss(nn.Module):
         # model should not contain a sigmoid or equivalent activation layer
         BCE = self.BCE(inputs, targets)
         inputs = F.sigmoid(inputs)
-        
+
         # flatten label and prediction tensors
         inputs = inputs.reshape(inputs.shape[0], -1)
         targets = targets.reshape(targets.shape[0], -1)
-        
-        intersection = (inputs * targets).sum(axis=1)                            
-        dice_loss = 1 - (2. * intersection + smooth) / (inputs.sum(axis=1) + targets.sum(axis=1) + smooth)  
+
+        intersection = (inputs * targets).sum(axis=1)
+        dice_loss = 1 - (2. * intersection + smooth) / (inputs.sum(axis=1) + targets.sum(axis=1) + smooth)
         BCEDice = BCE + dice_loss
-        
+
         return BCEDice
 
 class InvariantTverskyLoss(nn.Module):
-    """Passed into ShiftInvariantLoss at initialization for optimized shift-invariant Tversky loss calculations. 
+    """Passed into ShiftInvariantLoss at initialization for optimized shift-invariant Tversky loss calculations.
     Will calculate and return a torch tensor of Tversky losses of each patch in the batch.
     """
     def __init__(self, alpha=ALPHA, beta=BETA):
@@ -309,29 +309,29 @@ class InvariantTverskyLoss(nn.Module):
     def forward(self, inputs, targets, smooth=1):
         # comment out if your model contains a sigmoid or equivalent activation layer
         inputs = F.sigmoid(inputs)
-        
+
         # flatten label and prediction tensors but sample wise
         inputs = inputs.reshape(inputs.shape[0], -1)
         targets = targets.reshape(targets.shape[0], -1)
-        
+
         #True Positives, False Positives & False Negatives
         TP = (inputs * targets).sum(axis=1) # sum across samples
         FP = ((1-targets) * inputs).sum(axis=1)
         FN = (targets * (1-inputs)).sum(axis=1)
 
         # want this to be list of size samples
-        Tversky = (TP + smooth) / (TP + self.alpha * FP + self.beta * FN + smooth)  
-        
+        Tversky = (TP + smooth) / (TP + self.alpha * FP + self.beta * FN + smooth)
+
         return 1 - Tversky
 
 class ShiftInvariantLoss(nn.Module):
-    """Implementation of a shift invariant loss function. Given a batch size B of input patches of dimension N x N 
-    and corresponding target patches of dimension M x M, where M > N, the loss function calculates the minimum 
+    """Implementation of a shift invariant loss function. Given a batch size B of input patches of dimension N x N
+    and corresponding target patches of dimension M x M, where M > N, the loss function calculates the minimum
     loss from aligning each input patch with all possible N x N windows inside of its M x M target patch.
     The total loss is the sum of all B minimum losses.
 
     For each patch, the corresponding N x N window in the target that produces the minimum loss is also returned.
-    
+
     To use, must specify compatible loss function (Invariant BCE Loss, Invariant BCE Dice Loss, Invariant Tversky Loss)
     at initialization.
 
@@ -376,7 +376,7 @@ class ShiftInvariantLoss(nn.Module):
         self.device = device
 
 class TrainShiftInvariantLoss(nn.Module):
-    """Implementation of a shift invariant loss function optimized for training loop by only calculating 
+    """Implementation of a shift invariant loss function optimized for training loop by only calculating
     gradients when necessary.
 
     Parameters
@@ -401,16 +401,16 @@ class TrainShiftInvariantLoss(nn.Module):
         with torch.no_grad():
             patch_shift_err = torch.empty((inputs.shape[0], shift1 * shift2), dtype=torch.float32, device=self.device)
             candidate_shifts = torch.empty((shift1 * shift2, *inputs.shape), dtype=torch.float32, device=self.device)
-    
+
             # first calculate all potential shift arrays
             for i in range(shift1):
                 for j in range(shift2):
                     window = targets[:, :, i:i+inputs.shape[-2], j:j+inputs.shape[-1]]
                     candidate_shifts[i * shift2 + j] = window
                     patch_shift_err[:, i * shift2 + j] = self.loss(inputs, window)
-    
+
             min_ij = torch.argmin(patch_shift_err, dim=1)
-            
+
         adjusted_labels = candidate_shifts[min_ij, torch.arange(len(min_ij), device=self.device)]
         total_loss = self.loss(inputs, adjusted_labels).sum()
         return total_loss, adjusted_labels
@@ -421,7 +421,7 @@ class TrainShiftInvariantLoss(nn.Module):
 
 class NonShiftInvariantLoss(nn.Module):
     """Wrapper for regular non shifting loss. Used when target label is larger than predicted label.
-    
+
     Parameters
     ----------
     loss : obj
@@ -432,7 +432,7 @@ class NonShiftInvariantLoss(nn.Module):
         super().__init__()
         self.loss = loss.to(device)
         self.device = device
-        center_1 = (size - window) // 2 
+        center_1 = (size - window) // 2
         self.c = (center_1, center_1 + window)
 
     def forward(self, inputs, targets):

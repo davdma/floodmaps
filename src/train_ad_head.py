@@ -15,7 +15,7 @@ from utils import (ADEarlyStopper, Metrics, BetaScheduler, get_gradient_norm,
                    get_model_params, print_model_params_and_grads, denormalize,
                    TV_loss, var_laplacian, ssi, get_random_batch, enl, RIS, quality_m)
 from torchvision import transforms
-from architectures.autodespeckler import ConvAutoencoder1, ConvAutoencoder2, DenoiseAutoencoder, VarAutoencoder
+from model import build_autodespeckler
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
 import matplotlib.pyplot as plt
@@ -56,30 +56,6 @@ def get_loss(cfg):
         return JSD()
     else:
         raise Exception(f"Loss must be one of: {', '.join(LOSS_NAMES)}")
-
-def get_model(cfg):
-    if cfg.model.autodespeckler == "CNN1":
-        return ConvAutoencoder1(latent_dim=cfg.model.cnn1.latent_dim,
-                                dropout=cfg.model.cnn1.AD_dropout,
-                                activation_func=cfg.model.cnn1.AD_activation_func)
-    elif cfg.model.autodespeckler == "CNN2":
-        return ConvAutoencoder2(num_layers=cfg.model.cnn2.AD_num_layers,
-                                kernel_size=cfg.model.cnn2.AD_kernel_size,
-                                dropout=cfg.model.cnn2.AD_dropout,
-                                activation_func=cfg.model.cnn2.AD_activation_func)
-    elif cfg.model.autodespeckler == "DAE":
-        # need to modify with new AE architecture parameters
-        return DenoiseAutoencoder(num_layers=cfg.model.dae.AD_num_layers,
-                                  kernel_size=cfg.model.dae.AD_kernel_size,
-                                  dropout=cfg.model.dae.AD_dropout,
-                                  coeff=cfg.model.dae.noise_coeff,
-                                  noise_type=cfg.model.dae.noise_type,
-                                  activation_func=cfg.model.dae.AD_activation_func)
-    elif cfg.model.autodespeckler == "VAE":
-        # need to modify with new AE architecture parametersi
-        return VarAutoencoder(latent_dim=cfg.model.vae.latent_dim) # more hyperparameters
-    else:
-        raise Exception('Invalid autodespeckler specified.')
 
 def get_optimizer(model, cfg):
     if cfg.train.optimizer == 'Adam':
@@ -259,10 +235,13 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
     # optimizer and scheduler for reducing learning rate
     optimizer = get_optimizer(model, cfg)
     scheduler = get_scheduler(optimizer, cfg)
-    beta_scheduler = BetaScheduler(beta=cfg.model.vae.VAE_beta,
-                                   period=cfg.model.vae.beta_period,
-                                   n_cycle=cfg.model.vae.beta_cycles,
-                                   ratio=cfg.model.vae.beta_proportion) if cfg.model.vae.beta_annealing else None
+    if cfg.model.autodespeckler == 'VAE' and cfg.model.vae.beta_annealing:
+        beta_scheduler = BetaScheduler(beta=cfg.model.vae.VAE_beta,
+                                    period=cfg.model.vae.beta_period,
+                                    n_cycle=cfg.model.vae.beta_cycles,
+                                    ratio=cfg.model.vae.beta_proportion)
+    else:
+        beta_scheduler = None
 
     if cfg.train.early_stopping:
         early_stopper = ADEarlyStopper(patience=cfg.train.patience, beta_annealing=cfg.model.vae.beta_annealing,
@@ -660,7 +639,7 @@ def run_experiment_ad(cfg):
         if torch.backends.mps.is_available()
         else "cpu"
     )
-    model = get_model(cfg).to(device)
+    model = build_autodespeckler(cfg).to(device)
 
     # dataset and transforms
     print(f"Using {device} device")
@@ -779,7 +758,7 @@ if __name__ == '__main__':
     parser.add_argument("--config_file", default="configs/default.yaml", help="Path to YAML config file (default: configs/default.yaml)")
 
     # save model, config, and wandb run info to folder
-    parser.add_argument('--save', action='store_true', help='save model and configs to file (default: False)')
+    # parser.add_argument('--save', action='store_true', help='save model and configs to file (default: False)')
     parser.add_argument('--save_path', help='directory path for saving the model')
 
     # wandb

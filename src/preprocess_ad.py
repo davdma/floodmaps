@@ -15,7 +15,7 @@ from sklearn.model_selection import train_test_split
 def generate_patches(events, size, num_samples, rng, sample_dir, kernel_size=5, typ="train"):
     """Uniformly samples sar patches of dimension size x size across each dataset tile. The
     patches are saved together into one file with enhanced lee filter.
-    
+
     Parameters
     ----------
     events : list[str]
@@ -35,7 +35,7 @@ def generate_patches(events, size, num_samples, rng, sample_dir, kernel_size=5, 
         Subset assigned to the saved patches: train, val, test.
     """
     logger = logging.getLogger('preprocessing')
-    
+
     pre_sample_dir = f'data/ad/samples_{kernel_size}_{size}_{num_samples}_dem/' # DEM version
     Path(pre_sample_dir).mkdir(parents=True, exist_ok=True)
 
@@ -63,10 +63,10 @@ def generate_patches(events, size, num_samples, rng, sample_dir, kernel_size=5, 
             dem_file = event + f'/dem_{eid}.tif'
             with rasterio.open(dem_file) as src:
                 dem_raster = src.read()
-            
+
             with rasterio.open(sar_vv_file) as src:
                 vv_raster = src.read()
-                
+
             with rasterio.open(sar_vh_file) as src:
                 vh_raster = src.read()
 
@@ -79,7 +79,7 @@ def generate_patches(events, size, num_samples, rng, sample_dir, kernel_size=5, 
 
         logger.info(f"Loading tiles into memory: iteration {i}/{total_iterations} completed.")
     logger.info('Tiles loaded.')
-    
+
     # loop over all events to generate samples for each epoch
     logger.info('Beginning patch sampling...')
     total_patches = num_samples * len(tiles)
@@ -89,7 +89,7 @@ def generate_patches(events, size, num_samples, rng, sample_dir, kernel_size=5, 
     for i, tile in enumerate(tiles):
         patches_sampled = 0
         _, HEIGHT, WIDTH = tile.shape
-            
+
         while patches_sampled < num_samples:
             x = int(rng.uniform(0, HEIGHT - size))
             y = int(rng.uniform(0, WIDTH - size))
@@ -99,7 +99,7 @@ def generate_patches(events, size, num_samples, rng, sample_dir, kernel_size=5, 
             # filter out missing vv or vh tiles
             if np.any(patch[0] == -9999) or np.any(patch[1] == -9999):
                 continue
-        
+
             dataset[i * num_samples + patches_sampled] = patch
             patches_sampled += 1
 
@@ -132,7 +132,7 @@ def trainMean(train_events, sample_dir, kernel_size=5):
     logger.info('Train mean calculation start.')
     count = 0
     means = np.zeros(4)
-    
+
     p1 = re.compile('\d{8}_\d+_\d+')
     p2 = re.compile('pred_(\d{8})_.+.tif')
     total_iterations = len(train_events)
@@ -149,19 +149,19 @@ def trainMean(train_events, sample_dir, kernel_size=5):
         # look for labels w tci + sar pairings
         for sar_vv_file in glob(event + f'/sar_*_vv.tif'):
             sar_vh_file = sar_vv_file[:-6] + 'vh.tif'
-            
+
             with rasterio.open(sar_vv_file) as src:
                 vv_raster = src.read()
 
             with rasterio.open(sar_vh_file) as src:
                 vh_raster = src.read()
-            
+
             # apply speckle filter to sar: this may be slow
             vv_raster_lee = np.expand_dims(enhanced_lee_filter(vv_raster[0], kernel_size=5).astype(
                 np.float32), axis=0).reshape((1, -1))
             vh_raster_lee = np.expand_dims(enhanced_lee_filter(vh_raster[0], kernel_size=5).astype(
                 np.float32), axis=0).reshape((1, -1))
-            
+
             vv_raster = vv_raster.reshape((1, -1))
             vh_raster = vh_raster.reshape((1, -1))
 
@@ -170,7 +170,7 @@ def trainMean(train_events, sample_dir, kernel_size=5):
             stack = np.vstack((vv_raster, vh_raster, vv_raster_lee, vh_raster_lee), dtype=np.float32)
 
             masked_stack = stack[:, mask]
-            
+
             # calculate mean and var across channels
             channel_means = np.mean(masked_stack, axis=1)
             means += channel_means
@@ -179,7 +179,7 @@ def trainMean(train_events, sample_dir, kernel_size=5):
         logger.info(f'Calculating train mean: iteration {i}/{total_iterations} completed.')
 
     overall_channel_mean = means / count
-        
+
     # calculate final statistics
     return overall_channel_mean
 
@@ -208,7 +208,7 @@ def trainStd(train_events, train_means, sample_dir, kernel_size=5):
     logger.info('Train std calculation start.')
     count = 0
     variances = np.zeros(4)
-    
+
     p1 = re.compile('\d{8}_\d+_\d+')
     p2 = re.compile('pred_(\d{8})_.+.tif')
     total_iterations = len(train_events)
@@ -240,7 +240,7 @@ def trainStd(train_events, train_means, sample_dir, kernel_size=5):
 
             vv_raster = vv_raster.reshape((1, -1))
             vh_raster = vh_raster.reshape((1, -1))
-            
+
             mask = (vv_raster[0] != -9999) & (vh_raster[0] != -9999)
 
             stack = np.vstack((vv_raster, vh_raster, vv_raster_lee, vh_raster_lee), dtype=np.float32)
@@ -259,13 +259,13 @@ def trainStd(train_events, train_means, sample_dir, kernel_size=5):
 
     overall_channel_variances = variances / count
     overall_channel_std = np.sqrt(overall_channel_variances)
-        
+
     # calculate final statistics
     return overall_channel_std
 
 
 def main(size, samples, seed, kernel_size=5, sample_dir='../sampling/samples_200_6_4_10_sar/'):
-    """Preprocesses raw S1 tiles into smaller patches. This preprocessing script saves only SAR layers and 
+    """Preprocesses raw S1 tiles into smaller patches. This preprocessing script saves only SAR layers and
     its enhanced lee counterpart useful for despeckling tasks.
 
     Parameters
@@ -297,13 +297,13 @@ def main(size, samples, seed, kernel_size=5, sample_dir='../sampling/samples_200
     # calculate mean and std of train tiles
     mean = trainMean(train_events, sample_dir, kernel_size=kernel_size)
     std = trainStd(train_events, mean, sample_dir, kernel_size=kernel_size)
-    
+
     # also store training mean std statistics in file
     with open(f'data/ad/stats/{kernel_size}_{size}_{samples}_dem.pkl', 'wb') as f:
         pickle.dump((mean, std), f)
-    
+
     rng = Random(seed)
-    
+
     generate_patches(train_events, size, samples, rng, sample_dir, kernel_size=kernel_size, typ="train")
     generate_patches(val_events, size, samples, rng, sample_dir, kernel_size=kernel_size, typ="val")
     generate_patches(test_events, size, samples, rng, sample_dir, kernel_size=kernel_size, typ="test")
@@ -318,6 +318,6 @@ if __name__ == '__main__':
     parser.add_argument('--kernel_size', type=int, default=5,
                         help=f"kernel size for enhanced lee filter (default: 5)")
     parser.add_argument('--sdir', dest='sample_dir', default='../sampling/samples_200_6_4_10_sar/', help='(default: ../sampling/samples_200_6_4_10_sar/)')
-    
+
     args = parser.parse_args()
     sys.exit(main(args.size, args.samples, args.seed, kernel_size=args.kernel_size, sample_dir=args.sample_dir))

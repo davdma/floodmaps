@@ -22,7 +22,7 @@ def get_detector(name, n_channels, dropout, load_classifier_path="", load_discri
     """Initializes water pixel detection model on CPU given stored model files and settings.
 
     Note: UNet++ has been updated with dropout, so some prior UNet++ models trained without dropout may fail.
-    
+
     Parameters
     ----------
     n_channels : int
@@ -31,7 +31,7 @@ def get_detector(name, n_channels, dropout, load_classifier_path="", load_discri
     load_classifier_path : str
         Path to classifier weights.
     load_discriminator_path : Optional[str]
-        Path to discriminator weights. Will be attached to the classifier. If empty will return 
+        Path to discriminator weights. Will be attached to the classifier. If empty will return
         only classifier model.
 
     Returns
@@ -44,7 +44,7 @@ def get_detector(name, n_channels, dropout, load_classifier_path="", load_discri
         model = NestedUNet(n_channels, dropout=dropout, deep_supervision=True).to('cpu')
     else:
         raise Exception("model unknown")
-        
+
     model.load_state_dict(torch.load(load_classifier_path, map_location=torch.device('cpu')))
     discriminator = Classifier1(n_channels).to('cpu')
     discriminator.load_state_dict(torch.load(load_discriminator_path, map_location=torch.device('cpu')))
@@ -57,7 +57,7 @@ def get_classifier_s2(name, n_channels, dropout, load_classifier_path=""):
     """Initializes classifer model on CPU given stored model files and settings.
 
     Note: UNet++ has been updated with dropout, so some prior UNet++ models trained without dropout may fail.
-    
+
     Parameters
     ----------
     n_channels : int
@@ -83,7 +83,7 @@ def get_classifier_s2(name, n_channels, dropout, load_classifier_path=""):
 
 def get_model_sar(config, n_channels, load_model_path="", device="cpu"):
     """Initializes sar model on CPU given stored model files and settings.
-    
+
     Parameters
     ----------
     config : dict
@@ -151,7 +151,7 @@ def get_sample_prediction(size, channels, detector, standardize, train_mean, dir
         dem_tile = src.read().astype(np.float32)
     if my_channels.has_dem():
         layers.append(dem_tile)
-        
+
     # if my_channels.has_slope():
         # slope_file = dir_path + f'/slope_{eid}.tif'
         # with rasterio.open(slope_file) as src:
@@ -178,12 +178,12 @@ def get_sample_prediction(size, channels, detector, standardize, train_mean, dir
 
     # get missing values mask (to later zero out)
     missing_vals = X[0] == 0
-    
+
     # impute missing values in each channel with its mean
     train_mean = train_mean.tolist()
     for i, mean in enumerate(train_mean):
         X[i][missing_vals] = mean
-        
+
     X = torch.from_numpy(X)
     X = standardize(X)
 
@@ -200,7 +200,7 @@ def get_sample_prediction(size, channels, detector, standardize, train_mean, dir
             start_col = j * size
             end_row = (i + 1) * size if (i + 1) * size <= HEIGHT else HEIGHT
             end_col = (j + 1) * size if (j + 1) * size <= WIDTH else WIDTH
-            
+
             dh = end_row - start_row # normally size
             dw = end_col - start_col # normally size
             if dh < size:
@@ -215,9 +215,9 @@ def get_sample_prediction(size, channels, detector, standardize, train_mean, dir
                 patch_col = start_col
 
             patch = X[:, patch_row : patch_row + size, patch_col : patch_col + size].unsqueeze(0)
-            
+
             patch_pred = detector(patch).squeeze()
-            
+
             # stitch tiles together and convert to numpy then use boolean mask
             # want H x W
             label[start_row : end_row, start_col : end_col] = patch_pred[size - dh:, size - dw:].numpy()
@@ -246,11 +246,11 @@ def sample_one(dir_path, dt, eid, size, channels, name="unet", format="tif", dro
         with rasterio.open(dir_path + f'/tci_{dt}_{eid}.tif') as src:
             transform = src.transform
             crs = src.crs
-            
+
         mult_pred = pred * 255
         broadcasted = np.broadcast_to(mult_pred, (3, *pred.shape)).astype(np.uint8)
-        with rasterio.open(dir_path + f'/qc_pred_{dt}_{eid}.tif', 'w', driver='Gtiff', count=3, 
-                           height=pred.shape[-2], width=pred.shape[-1], dtype=np.uint8, crs=crs, 
+        with rasterio.open(dir_path + f'/qc_pred_{dt}_{eid}.tif', 'w', driver='Gtiff', count=3,
+                           height=pred.shape[-2], width=pred.shape[-1], dtype=np.uint8, crs=crs,
                            transform=transform) as dst:
             dst.write(broadcasted)
     elif format == "npy":
@@ -278,7 +278,7 @@ def get_sample_prediction_sar(size, model, channels, standardize, train_mean, di
         dem_raster = src.read().astype(np.float32)
     if my_channels.has_dem():
         layers.append(dem_raster)
-        
+
     slope = np.gradient(dem_raster, axis=(1,2))
     slope_y_raster, slope_x_raster = slope
     if my_channels.has_slope_y():
@@ -300,12 +300,12 @@ def get_sample_prediction_sar(size, model, channels, standardize, train_mean, di
 
     # get missing values mask (to later zero out)
     missing_vals = X[0] == -9999
-    
+
     # impute missing values in each channel with its mean
     train_mean = train_mean.tolist()
     for i, mean in enumerate(train_mean):
         X[i][missing_vals] = mean
-        
+
     X = torch.from_numpy(X)
     X = standardize(X)
 
@@ -316,7 +316,7 @@ def get_sample_prediction_sar(size, model, channels, standardize, train_mean, di
 
     # send to device
     X = X.to(device)
-    
+
     i = 0
     while i * size < HEIGHT:
         j = 0
@@ -325,7 +325,7 @@ def get_sample_prediction_sar(size, model, channels, standardize, train_mean, di
             start_col = j * size
             end_row = (i + 1) * size if (i + 1) * size <= HEIGHT else HEIGHT
             end_col = (j + 1) * size if (j + 1) * size <= WIDTH else WIDTH
-            
+
             dh = end_row - start_row # normally size
             dw = end_col - start_col # normally size
             if dh < size:
@@ -343,7 +343,7 @@ def get_sample_prediction_sar(size, model, channels, standardize, train_mean, di
 
             with torch.no_grad():
                 patch_logits = model(patch) # .squeeze()
-                
+
                 # stitch tiles together and convert to numpy then use boolean mask
                 # want H x W
                 patch_pred = torch.where(nn.functional.sigmoid(patch_logits) > 0.5, 1.0, 0.0).byte().squeeze().to('cpu')
@@ -353,7 +353,7 @@ def get_sample_prediction_sar(size, model, channels, standardize, train_mean, di
 
     label[missing_vals] = 0
     return label
-    
+
 def sample_one_sar(dir_path, s2_dt, s1_dt, eid, channels, name="unet++", format="tif", dropout=0.0531091802785671, deep_supervision=True, model_path="models/sar_unet++_model110.pth"):
     # sample_dir='../sampling/samples_200_6_4_10_sar/'
     """Predict one SAR sample for quality control purposes."""
@@ -389,11 +389,11 @@ def sample_one_sar(dir_path, s2_dt, s1_dt, eid, channels, name="unet++", format=
         with rasterio.open(dir_path + f'/sar_{s2_dt}_{s1_dt}_{eid}_vv.tif') as src:
             transform = src.transform
             crs = src.crs
-            
+
         mult_pred = pred * 255
         broadcasted = np.broadcast_to(mult_pred, (3, *pred.shape)).astype(np.uint8)
-        with rasterio.open(dir_path + f'/sar_qc_pred_{s1_dt}_{eid}.tif', 'w', driver='Gtiff', count=3, 
-                           height=pred.shape[-2], width=pred.shape[-1], dtype=np.uint8, crs=crs, 
+        with rasterio.open(dir_path + f'/sar_qc_pred_{s1_dt}_{eid}.tif', 'w', driver='Gtiff', count=3,
+                           height=pred.shape[-2], width=pred.shape[-1], dtype=np.uint8, crs=crs,
                            transform=transform) as dst:
             dst.write(broadcasted)
     elif format == "npy":
@@ -408,7 +408,7 @@ def sample_nodem(size, channels, name="unet", format="tif", dropout=0.2987776077
         detector = get_detector(name, n_channels, dropout, load_classifier_path="models/unet_model511.pth", load_discriminator_path="models/discriminator42.pth")
     else:
         detector = get_classifier_s2(name, n_channels, dropout, load_classifier_path="models/unet_model511.pth")
-        
+
     train_mean, train_std = trainMeanStd(channels=channels, sample_dir=sample_dir, label_dir=label_dir)
     standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
 
@@ -420,10 +420,10 @@ def sample_nodem(size, channels, name="unet", format="tif", dropout=0.2987776077
     for dir_path in lst:
         if os.path.isdir(dir_path):
             eid = dir_path.split('/')[-1]
-            # FILTER OUT ALL eids before 20180815 
+            # FILTER OUT ALL eids before 20180815
             if datetime.strptime(eid[:8], '%Y%m%d') < datetime(2018, 8, 14):
                 continue
-            
+
             samples = glob(dir_path + '/tci_*.tif')
             # check for existence of predictions
             for sample in samples:
@@ -435,7 +435,7 @@ def sample_nodem(size, channels, name="unet", format="tif", dropout=0.2987776077
                 # skip if pre-precipitation event
                 if post and img_dt < event_dt:
                     continue
-            
+
                 if not replace and Path(dir_path + f'/pred_{dt}_{eid}.tif').exists():
                     continue
                 else:
@@ -447,7 +447,7 @@ def sample_nodem(size, channels, name="unet", format="tif", dropout=0.2987776077
                         with rasterio.open(dir_path + f'/tci_{dt}_{eid}.tif') as src:
                             transform = src.transform
                             crs = src.crs
-                            
+
                         mult_pred = pred * 255
                         broadcasted = np.broadcast_to(mult_pred, (3, *pred.shape)).astype(np.uint8)
                         with rasterio.open(dir_path + f'/pred_{dt}_{eid}.tif', 'w', driver='Gtiff', count=3, height=pred.shape[-2], width=pred.shape[-1], dtype=np.uint8, crs=crs, transform=transform) as dst:
@@ -461,7 +461,7 @@ def main(size, channels, name="unet", format="tif", dropout=0.2, replace=True, i
     """Generates machine labels for dataset using tuned S2 optical model.
 
     Note: run with conda environment 'floodmaps'.
-    
+
     Parameters
     ----------
     size : int
@@ -491,7 +491,7 @@ def main(size, channels, name="unet", format="tif", dropout=0.2, replace=True, i
         detector = get_detector(name, n_channels, dropout, load_classifier_path="models/unet_model318.pth", load_discriminator_path="models/discriminator42.pth")
     else:
         detector = get_classifier_s2(name, n_channels, dropout, load_classifier_path="models/unet_model318.pth")
-        
+
     train_mean, train_std = trainMeanStd(channels=channels, sample_dir=sample_dir, label_dir=label_dir)
     standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
 
@@ -514,7 +514,7 @@ def main(size, channels, name="unet", format="tif", dropout=0.2, replace=True, i
                 # skip if pre-precipitation event
                 if post and img_dt < event_dt:
                     continue
-            
+
                 if not replace and Path(dir_path + f'/pred_{dt}_{eid}.tif').exists():
                     continue
                 else:
@@ -526,7 +526,7 @@ def main(size, channels, name="unet", format="tif", dropout=0.2, replace=True, i
                         with rasterio.open(dir_path + f'/tci_{dt}_{eid}.tif') as src:
                             transform = src.transform
                             crs = src.crs
-                            
+
                         mult_pred = pred * 255
                         broadcasted = np.broadcast_to(mult_pred, (3, *pred.shape)).astype(np.uint8)
                         with rasterio.open(dir_path + f'/pred_{dt}_{eid}.tif', 'w', driver='Gtiff', count=3, height=pred.shape[-2], width=pred.shape[-1], dtype=np.uint8, crs=crs, transform=transform) as dst:
@@ -536,7 +536,7 @@ def main(size, channels, name="unet", format="tif", dropout=0.2, replace=True, i
                     else:
                         raise Exception("format unknown")
 
-if __name__ == '__main__':            
+if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='inference', description='Generate 2 head model predictions for ground truthing.')
 
     def bool_indices(s):
@@ -547,7 +547,7 @@ if __name__ == '__main__':
                 raise argparse.ArgumentTypeError("Invalid boolean string: '{}'".format(s))
         else:
             raise argparse.ArgumentTypeError("Boolean string must be of length 10 and have binary digits")
-            
+
     parser.add_argument('-x', '--size', dest='size', type=int, default=64, help='pixel width of patch (default: 64)')
     parser.add_argument('-c', '--channels', type=bool_indices, default="1111111111", help='string of 10 binary digits for selecting among the 10 available channels (R, G, B, B08, NDWI, DEM, SlopeY, SlopeX, Water, Roads) (default: 1111111111)')
     parser.add_argument('-f', '--format', default="tif", choices=["npy", "tif"], help='prediction label format: npy, tif (default: tif)')

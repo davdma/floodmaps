@@ -6,92 +6,117 @@ ALPHA = 0.3
 BETA = 0.7
 
 class LossConfig():
-    def __init__(self, config, device='cpu'):
+    """Special loss handling object for training SAR flood mapping models. Includes
+    logic for handling shift invariant loss calculation, adjusting the window
+    inside the true label to align it properly with the SAR patch."""
+    def __init__(self, cfg, ad_cfg=None, device='cpu'):
         """Sets up train, validation, test losses."""
-        self.config = config
-        self.uses_autodespeckler = config['autodespeckler'] is not None
+        self.cfg = cfg
+        self.ad_cfg = ad_cfg
+        self.uses_autodespeckler = ad_cfg is not None
 
-        # final logit output losses
-        train_loss_fn, val_loss_fn, test_loss_fn = self.get_losses(config, device)
-        self.train_loss_fn = train_loss_fn
-        self.val_loss_fn = val_loss_fn
-        self.test_loss_fn = test_loss_fn
+        # classifier logit output losses
+        self.train_loss_fn, self.val_loss_fn, self.test_loss_fn = self.get_losses(cfg, device)
 
         # autodespeckler reconstruction losses
-        self.autodespeckler_loss_fn = nn.MSELoss if self.uses_autodespeckler else None
+        self.ad_loss_fn = get_ad_loss(ad_cfg).to(device) if self.uses_autodespeckler else None
 
     def compute_loss(self, out_dict, targets, typ='train'):
-        """For autodespeckler architecture, will add reconstruction loss from output of despeckler to the final loss."""
+        """For autodespeckler architecture, will add reconstruction loss
+        from output of despeckler to the final loss."""
         # autodespeckler loss component - calculate reconstruction loss with respect to sar input
+        loss_dict = dict()
         if self.uses_autodespeckler:
-            recons_loss = nn.functional.mse_loss(out_dict['despeckler_output'], out_dict['despeckler_input'])
-            if self.config['autodespeckler'] == 'VAE':
+            recons_loss = self.ad_loss_fn(out_dict['despeckler_output'], out_dict['despeckler_input'])
+            if self.ad_cfg.model.autodespeckler == 'VAE':
                 # beta hyperparameter
-                log_var = out_dict['log_var']
+                log_var = torch.clamp(out_dict['log_var'], min=-6, max=6)
                 mu = out_dict['mu']
                 kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
                 recons_loss = recons_loss + self.config['VAE_beta'] * self.config['kld_weight'] * kld_loss
-        else:
-            recons_loss = None
+                loss_dict['recons_loss'] = recons_loss
+                loss_dict['kld_loss'] = kld_loss
+                recons_loss = recons_loss + self.ad_cfg.model.vae.VAE_beta * kld_loss
 
-        # final output loss component
-        loss_dict = {}
+                if torch.isnan(recons_loss).any() or torch.isinf(recons_loss).any():
+                    print(f'min mu: {mu.min().item()}')
+                    print(f'max mu: {mu.max().item()}')
+                    print(f'min log_var: {log_var.min().item()}')
+                    print(f'max log_var: {log_var.max().item()}')
+                    raise Exception('recons_loss + kld_loss is nan or inf')
+
+        # classifier loss component
         if typ == 'train':
-            main_loss, y_shifted = self.train_loss_fn(out_dict['final_output'], targets)
+            main_loss, y_shifted = self.train_loss_fn(out_dict['classifier_output'], targets)
         elif typ == 'val':
-            main_loss, y_shifted = self.val_loss_fn(out_dict['final_output'], targets)
+            main_loss, y_shifted = self.val_loss_fn(out_dict['classifier_output'], targets)
         elif typ == 'test':
-            main_loss, y_shifted = self.test_loss_fn(out_dict['final_output'], targets)
+            main_loss, y_shifted = self.test_loss_fn(out_dict['classifier_output'], targets)
         else:
             raise Exception('Invalid argument: typ not equal to one of train, val, test.')
 
-        total_loss = recons_loss + main_loss if recons_loss is not None else main_loss
-        loss_dict = {"total_loss": total_loss,
-                     "recons_loss": recons_loss,
-                     "shifted_label": y_shifted}
+        total_loss = (
+            self.cfg.train.balance_coeff * recons_loss + main_loss
+            if self.uses_autodespeckler else main_loss
+        )
+        loss_dict['total_loss'] = total_loss
+        loss_dict['classifier_loss'] = main_loss
+        loss_dict['shifted_label'] = y_shifted
         return loss_dict
 
     def get_label_alignment(self, inputs, targets):
+        """Get the window of the target label that aligns best with the
+        prediction."""
         _, y_shifted = self.val_loss_fn(inputs, targets)
         return y_shifted
 
-    def get_losses(self, config, device):
-        """Chooses the loss used for training and validation loop, and also determining whether they are shift invariant."""
-        if config['loss'] == 'BCELoss':
-            if config['shift_invariant']:
+    def get_losses(self, cfg, device):
+        """Chooses the type of loss used for training, validation, testing loop,
+        and also based on whether losses used are shift invariant and
+        best for memory performance."""
+        if cfg.train.loss == 'BCELoss':
+            if cfg.train.shift_invariant:
                 train_loss_fn = TrainShiftInvariantLoss(InvariantBCELoss(), device=device)
                 val_loss_fn = ShiftInvariantLoss(InvariantBCELoss(), device=device)
                 test_loss_fn = val_loss_fn
             else:
                 # non shift wrapper
                 train_loss_fn = NonShiftInvariantLoss(nn.BCEWithLogitsLoss(),
-                                                    size=config['size'],
-                                                    window=config['window'],
+                                                    size=cfg.data.size,
+                                                    window=cfg.data.window,
                                                     device=device)
                 val_loss_fn = train_loss_fn
                 test_loss_fn = train_loss_fn
-        elif config['loss'] == 'BCEDiceLoss':
-            if config['shift_invariant']:
+        elif cfg.train.loss == 'BCEDiceLoss':
+            if cfg.train.shift_invariant:
                 train_loss_fn = TrainShiftInvariantLoss(InvariantBCEDiceLoss(), device=device)
                 val_loss_fn = ShiftInvariantLoss(InvariantBCEDiceLoss(), device=device)
                 test_loss_fn = val_loss_fn
             else:
                 train_loss_fn = NonShiftInvariantLoss(BCEDiceLoss(),
-                                                    size=config['size'],
-                                                    window=config['window'],
+                                                    size=cfg.data.size,
+                                                    window=cfg.data.window,
                                                     device=device)
                 val_loss_fn = train_loss_fn
                 test_loss_fn = train_loss_fn
-        elif config['loss'] == 'TverskyLoss':
-            if config['shift_invariant']:
-                train_loss_fn = TrainShiftInvariantLoss(InvariantTverskyLoss(alpha=config['alpha'], beta=config['beta']), device=device)
-                val_loss_fn = ShiftInvariantLoss(InvariantTverskyLoss(alpha=config['alpha'], beta=config['beta']), device=device)
+        elif cfg.train.loss == 'TverskyLoss':
+            if cfg.train.shift_invariant:
+                train_loss_fn = TrainShiftInvariantLoss(
+                    InvariantTverskyLoss(alpha=cfg.train.tversky.alpha,
+                                         beta=1-cfg.train.tversky.alpha),
+                                         device=device)
+                val_loss_fn = ShiftInvariantLoss(
+                    InvariantTverskyLoss(alpha=cfg.train.tversky.alpha,
+                                         beta=1-cfg.train.tversky.alpha),
+                                         device=device)
                 test_loss_fn = val_loss_fn
             else:
-                train_loss_fn = NonShiftInvariantLoss(TverskyLoss(alpha=config['alpha'], beta=config['beta']),
-                                                    size=config['size'],
-                                                    window=config['window'],
-                                                    device=device)
+                train_loss_fn = NonShiftInvariantLoss(
+                    TverskyLoss(alpha=cfg.train.tversky.alpha,
+                                beta=1-cfg.train.tversky.alpha),
+                                size=cfg.data.size,
+                                window=cfg.data.window,
+                                device=device)
                 val_loss_fn = train_loss_fn
                 test_loss_fn = train_loss_fn
         else:
@@ -101,6 +126,28 @@ class LossConfig():
 
     def contains_reconstruction_loss(self):
         return self.uses_autodespeckler
+
+def get_ad_loss(cfg):
+    """Note: important to consider scale of losses if summing different components.
+    For our purposes and stability, better to make all losses calculated per patch instead of per pixel."""
+    # SPECKLE OPTIMIZED LOSS? Note: compare between models on same scale
+    # choose universal scale/metric - use dB scale and evaluate using RMSE, MSE, MAE, R^2 (when benchmarking)
+    if cfg.train.loss == 'MSELoss':
+        # scales mseloss to per sample (64 x 64 patch)
+        return PatchMSELoss()
+    elif cfg.train.loss == 'L1Loss':
+        return PatchL1Loss()
+    elif cfg.train.loss == 'PseudoHuberLoss':
+         # pseudo huber - https://arxiv.org/pdf/2310.14189
+        return PseudoHuberLoss(c=0.03)
+    elif cfg.train.loss == 'HuberLoss':
+        return PatchHuberLoss()
+    elif cfg.train.loss == 'LogCoshLoss':
+        return LogCoshLoss()
+    elif cfg.train.loss == 'JSDLoss':
+        return JSD()
+    else:
+        raise Exception(f"Loss must be one of: {', '.join(LOSS_NAMES)}")
 
 class PatchMSELoss(nn.Module):
     def __init__(self):

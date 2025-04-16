@@ -19,12 +19,10 @@ import numpy as np
 import sys
 import pickle
 
-from models.model import SARClassifier
+from models.model import SARPixelDetector
 from utils.config import Config
-from utils.utils import EarlyStopper, SARChannelIndexer, SaveMetrics, get_model_params
-from training.loss import (InvariantBCELoss, InvariantBCEDiceLoss, InvariantTverskyLoss,
-                           ShiftInvariantLoss, TrainShiftInvariantLoss, NonShiftInvariantLoss,
-                           BCEDiceLoss, TverskyLoss, LossConfig)
+from utils.utils import Metrics, EarlyStopper, SARChannelIndexer, SaveMetrics, get_model_params
+from training.loss import LossConfig
 from training.dataset import FloodSampleSARDataset
 from training.optim import get_optimizer
 from training.scheduler import get_scheduler
@@ -35,16 +33,23 @@ NOISE_NAMES = ['normal', 'masking', 'log_gamma']
 LOSS_NAMES = ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
 
 # get our optimizer and metrics
-def train_loop(dataloader, model, device, loss_config, optimizer, minibatches, c, epoch):
+def train_loop(dataloader, model, device, loss_config, optimizer, minibatches,
+               c, run, epoch, cfg, ad_cfg=None):
     running_loss = torch.tensor(0.0, device=device)
-    running_recons_loss = torch.tensor(0.0, device=device)
+    if ad_cfg is not None:
+        running_recons_loss = torch.tensor(0.0, device=device)
+        if ad_cfg.model.autodespeckler == 'VAE':
+            running_kld_loss = torch.tensor(0.0, device=device)
+            # for VAE monitoring
+            all_mu = []
+            all_log_var = []
+
     metric_collection = MetricCollection([
         BinaryAccuracy(threshold=0.5),
         BinaryPrecision(threshold=0.5),
         BinaryRecall(threshold=0.5),
         BinaryF1Score(threshold=0.5)
     ]).to(device)
-
     all_preds = []
     all_targets = []
 
@@ -60,7 +65,6 @@ def train_loop(dataloader, model, device, loss_config, optimizer, minibatches, c
         # also pass SAR layers for reconstruction loss
         loss_dict = loss_config.compute_loss(out_dict, y.float(), typ='train')
         loss = loss_dict['total_loss']
-        recons_loss = loss_dict['recons_loss']
         y_shifted = loss_dict['shifted_label']
 
         optimizer.zero_grad()
@@ -74,8 +78,16 @@ def train_loop(dataloader, model, device, loss_config, optimizer, minibatches, c
         all_preds.append(pred_y)
         all_targets.append(target)
         running_loss += loss.detach()
-        if loss_config.contains_reconstruction_loss():
-            running_recons_loss += recons_loss.detach()
+
+        if ad_cfg is not None:
+            running_recons_loss += loss_dict['recons_loss'].detach()
+
+            # for VAE monitoring only
+            if ad_cfg.model.autodespeckler == 'VAE':
+                # Collect mu and log_var for the whole epoch
+                all_mu.append(out_dict['mu'].detach().cpu())
+                all_log_var.append(out_dict['log_var'].detach().cpu())
+                running_kld_loss += loss_dict['kld_loss'].detach()
 
         if batch_i >= minibatches:
             break
@@ -93,11 +105,29 @@ def train_loop(dataloader, model, device, loss_config, optimizer, minibatches, c
     epoch_loss = running_loss.item() / minibatches
 
     # wandb tracking loss and metrics per epoch - track recons loss as well
-    loss_log = {"train accuracy": epoch_acc, "train precision": epoch_pre,
+    log_dict = {"train accuracy": epoch_acc, "train precision": epoch_pre,
                "train recall": epoch_rec, "train f1": epoch_f1, "train loss": epoch_loss}
     if loss_config.contains_reconstruction_loss():
-        loss_log['train reconstruction loss'] = running_recons_loss.item() / minibatches
-    wandb.log(loss_log, step=epoch)
+        log_dict['train reconstruction loss'] = running_recons_loss.item() / minibatches
+
+    # VAE mu and log_var monitoring
+    if ad_cfg is not None and ad_cfg.model.autodespeckler == 'VAE':
+        # full histogram monitoring
+        all_mu = torch.cat(all_mu, dim=0).numpy()
+        all_log_var = torch.cat(all_log_var, dim=0).numpy()
+        ratio = (running_recons_loss.item()
+                 / (beta * running_kld_loss.item())
+                if beta > 0
+                else 400)
+        log_dict.update({"mu_mean": all_mu.mean(),
+                    "mu_std": all_mu.std(),
+                    "log_var_mean": all_log_var.mean(),
+                    "log_var_std": all_log_var.std(),
+                    "train_recons_loss": running_recons_loss.item() / minibatches,
+                    "train_kld_loss": running_kld_loss.item() / minibatches,
+                    "train_ratio": ratio,
+                    "beta": beta})
+    run.log(log_dict, step=epoch)
     metric_collection.reset()
 
     return epoch_loss
@@ -165,7 +195,7 @@ def test_loop(dataloader, model, device, loss_config, c, epoch, logging=True):
 
     return epoch_vloss, epoch_vmetrics
 
-def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, run):
+def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, ad_cfg, run):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     logging.info(f'''Starting training:
         Date:            {timestamp}
@@ -193,6 +223,12 @@ def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, r
     c = (center_1, center_2)
     for epoch in range(cfg.train.epochs):
         try:
+            if (ad_cfg is not None
+                and cfg.model.autodespeckler.freeze
+                and epoch == cfg.model.autodespecker.freeze_epochs):
+                print(f"Unfreezing backbone at epoch {epoch}")
+                model.unfreeze_ad_weights()
+
             # train loop
             avg_loss = train_loop(train_loader, model, device, loss_cfg, optimizer, minibatches, c, epoch)
 
@@ -216,8 +252,7 @@ def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, r
 
     # Save our model
     ### IMPLEMENT METRICS WITH SHIFT INVARIANCE!!!
-    fmetrics = Metrics() # SaveMetrics(shift_invariant=config['shift_invariant'])
-    PATH = 'models/' + save + '.pth'
+    fmetrics = Metrics(use_partition=cfg.train.shift_invariant)
     model_weights = None
     if cfg.train.early_stopping:
         model_weights = early_stopper.get_best_weights()
@@ -374,8 +409,16 @@ def sample_predictions(model, sample_set, mean, std, loss_config, config, seed=2
 
     return table
 
-def run_experiment_s1(cfg):
-    """Run a single S1 SAR model experiment given the configuration parameters."""
+def run_experiment_s1(cfg, ad_cfg=None):
+    """Run a single S1 SAR model experiment given the configuration parameters.
+
+    Parameters
+    ----------
+    cfg : object
+        Config object for the SAR classifier.
+    ad_cfg : object, optional
+        Config object for an optional SAR autodespeckler attachment.
+    """
     if wandb.login():
         raise Exception("Failed to login to wandb.")
 
@@ -393,10 +436,11 @@ def run_experiment_s1(cfg):
     )
 
     # setup model
-    ad_config_path = cfg.model.autodespeckler.ad_config
-    ad_cfg = Config(config_file=ad_config_path) if ad_config_path is not None else None
-    model = SARClassifier(cfg, ad_cfg=ad_cfg).to(device)
-    # potentially freeze AD weights?
+    model = SARPixelDetector(cfg, ad_cfg=ad_cfg).to(device)
+
+    # freeze AD weights
+    if ad_cfg is not None and cfg.model.autodespeckler.freeze:
+        model.freeze_ad_weights()
 
     # dataset and transforms
     print(f"Using {device} device")
@@ -405,7 +449,6 @@ def run_experiment_s1(cfg):
     size = cfg.data.size
     samples = cfg.data.samples
     sample_dir = f'data/sar/minibatch/{filter}/samples_{size}_{samples}/'
-    save_file = f"sar_{model_name}_model{len(glob(f'models/sar_{model_name}_model*.pth'))}"
 
     # load in mean and std
     channels = [bool(int(x)) for x in cfg.data.channels]
@@ -466,12 +509,12 @@ def run_experiment_s1(cfg):
             "training_size": len(train_set),
             "validation_size": len(val_set),
             "test_size": len(test_set) if cfg.eval.mode == 'test' else None,
-            "val_percent": len(val_set) / (len(train_set) + len(val_set))
+            "val_percent": len(val_set) / (len(train_set) + len(val_set)),
+            "total_parameters": total_params,
+            "trainable_parameters": trainable_params,
+            "parameter_size_mb": param_size_in_mb
         }
     )
-
-    # initialize loss functions - train loss function is optimized for gradient calculations
-    loss_cfg = LossConfig(cfg, device=device)
 
     try:
         if cfg.save:
@@ -481,19 +524,21 @@ def run_experiment_s1(cfg):
                 run.config.update({"save_path": cfg.save_path}, allow_val_change=True)
             print(f'Save path set to: {cfg.save_path}')
 
+        # initialize loss functions - train loss function is optimized for gradient calculations
+        loss_cfg = LossConfig(cfg, ad_cfg=ad_cfg, device=device)
+
         # train and save results metrics
         weights, fmetrics = train(model, train_loader, val_loader, test_loader, device,
-                                loss_cfg, cfg, run)
+                                loss_cfg, cfg, ad_cfg, run)
 
         # summary metrics
-        final_vacc, final_vpre, final_vrec, final_vf1 = final_vmetrics.get_val_metrics()
+        final_vacc, final_vpre, final_vrec, final_vf1 = fmetrics.get_metrics(split=None, partition=None)
         run.summary["final_acc"] = final_vacc
         run.summary["final_pre"] = final_vpre
         run.summary["final_rec"] = final_vrec
         run.summary["final_f1"] = final_vf1
 
         # log predictions on validation set using wandb
-
         pred_table = sample_predictions(model, test_set if cfg.eval.mode == 'test' else val_set,
                                         train_mean, train_std, loss_cfg, cfg)
         run.log({"model_val_predictions": pred_table})
@@ -515,10 +560,10 @@ def run_experiment_s1(cfg):
         run.finish()
 
     # if want test metrics calculate model score on test set
-    return final_vmetrics
+    return fmetrics
 
-def main(cfg):
-    run_experiment_s1(cfg)
+def main(cfg, ad_cfg):
+    run_experiment_s1(cfg, ad_cfg=ad_cfg)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='train_sar_classifier', description='Trains SAR classifier model from patches. The classifier inputs a patch with n channels and outputs a binary patch with water pixels labeled 1.')
@@ -602,4 +647,6 @@ if __name__ == '__main__':
 
     _args = parser.parse_args()
     cfg = Config(**_args.__dict__)
-    sys.exit(main(cfg))
+    ad_config_path = cfg.model.autodespeckler.ad_config
+    ad_cfg = Config(config_file=ad_config_path) if ad_config_path is not None else None
+    sys.exit(main(cfg, ad_cfg))

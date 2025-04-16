@@ -92,7 +92,7 @@ class WaterPixelDetector(nn.Module):
 
         return pred
 
-class SARClassifier(nn.Module):
+class SARPixelDetector(nn.Module):
     """General S1 water pixel detection model with classifier and optional autodespeckler.
     The autodespeckler is an autoencoder for the SAR channels that aimed to extract salient features
     from speckled SAR data for improving labeling performance.
@@ -150,12 +150,12 @@ class SARClassifier(nn.Module):
         load_model_weights(self.classifier, weight_path, device,
                            model_name=f"{self.cfg.model.classifier} classifier")
 
-    def freeze_autodespeckler_weights(self):
+    def freeze_ad_weights(self):
         """Freeze the weights of the autodespeckler during training."""
         for param in self.autodespeckler.parameters():
             param.requires_grad = False
 
-    def unfreeze_autodespeckler_weights(self):
+    def unfreeze_ad_weights(self):
         """Unfreeze the weights of the autodespeckler during training."""
         for param in self.autodespeckler.parameters():
             param.requires_grad = True

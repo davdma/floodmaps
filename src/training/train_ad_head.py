@@ -24,7 +24,7 @@ from models.model import build_autodespeckler
 from training.dataset import DespecklerSARDataset
 from training.optim import get_optimizer
 from training.scheduler import get_scheduler
-from training.loss import PseudoHuberLoss, LogCoshLoss, JSD, PatchMSELoss, PatchL1Loss, PatchHuberLoss
+from training.loss import get_ad_loss
 from utils.config import Config
 from utils.utils import (ADEarlyStopper, Metrics, BetaScheduler, get_gradient_norm,
                    get_model_params, print_model_params_and_grads, denormalize,
@@ -32,33 +32,10 @@ from utils.utils import (ADEarlyStopper, Metrics, BetaScheduler, get_gradient_no
 
 AUTODESPECKLER_NAMES = ['CNN1', 'CNN2', 'DAE', 'VAE']
 NOISE_NAMES = ['normal', 'masking', 'log_gamma']
-LOSS_NAMES = ['L1Loss', 'MSELoss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss', 'JSDLoss']
+AD_LOSS_NAMES = ['L1Loss', 'MSELoss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss', 'JSDLoss']
 SCHEDULER_NAMES = ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR'] # 'CosWarmRestarts'
 
-def get_loss(cfg):
-    """Note: important to consider scale of losses if summing different components.
-    For our purposes and stability, better to make all losses calculated per patch instead of per pixel."""
-    # SPECKLE OPTIMIZED LOSS? Note: compare between models on same scale
-    # choose universal scale/metric - use dB scale and evaluate using RMSE, MSE, MAE, R^2 (when benchmarking)
-    if cfg.train.loss == 'MSELoss':
-        # scales mseloss to per sample (64 x 64 patch)
-        return PatchMSELoss()
-    elif cfg.train.loss == 'L1Loss':
-        return PatchL1Loss()
-    elif cfg.train.loss == 'PseudoHuberLoss':
-         # pseudo huber - https://arxiv.org/pdf/2310.14189
-        return PseudoHuberLoss(c=0.03)
-    elif cfg.train.loss == 'HuberLoss':
-        return PatchHuberLoss()
-    elif cfg.train.loss == 'LogCoshLoss':
-        return LogCoshLoss()
-    elif cfg.train.loss == 'JSDLoss':
-        return JSD()
-    else:
-        raise Exception(f"Loss must be one of: {', '.join(LOSS_NAMES)}")
-
 def compute_loss(out_dict, targets, loss_fn, cfg, beta_scheduler=None, debug=False):
-    despeckler_output = out_dict['despeckler_output']
     recons_loss = loss_fn(out_dict['despeckler_output'], targets)
     loss_dict = dict()
     if cfg.model.autodespeckler == 'VAE':
@@ -228,7 +205,7 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
 
     run.define_metric("val reconstruction loss", summary="min")
     minibatches = int(len(train_loader) * cfg.train.subset)
-    loss_fn = get_loss(cfg).to(device)
+    loss_fn = get_ad_loss(cfg).to(device)
     for epoch in range(cfg.train.epochs):
         try:
             # train loop
@@ -774,8 +751,8 @@ if __name__ == '__main__':
     parser.add_argument('--num_workers', type=int)
 
     # loss
-    parser.add_argument('--loss', choices=LOSS_NAMES,
-                        help=f"loss: {', '.join(LOSS_NAMES)}")
+    parser.add_argument('--loss', choices=AD_LOSS_NAMES,
+                        help=f"loss: {', '.join(AD_LOSS_NAMES)}")
     parser.add_argument('--clip', type=float, help="Gradient clipping max norm")
     # print statistics of current gradient and adjust norm used to clip according to the statistics
     # heuristically use 1

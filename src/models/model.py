@@ -109,11 +109,8 @@ class SARPixelDetector(nn.Module):
         self.cfg = cfg
         self.ad_cfg = ad_cfg
         self.classifier = self.build_sar_classifier(cfg)
-
-        if ad_cfg is not None:
-            self.autodespeckler = self.build_autodespeckler(ad_cfg)
-        else:
-            self.autodespeckler = None
+        self.autodespeckler = (self.build_autodespeckler(ad_cfg)
+                                if ad_cfg is not None else None)
 
     def get_classifier(self):
         return self.classifier

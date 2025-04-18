@@ -28,14 +28,15 @@ class LossConfig():
         loss_dict = dict()
         if self.uses_autodespeckler:
             recons_loss = self.ad_loss_fn(out_dict['despeckler_output'], out_dict['despeckler_input'])
+            loss_dict['recons_loss'] = recons_loss
+
             if self.ad_cfg.model.autodespeckler == 'VAE':
                 # beta hyperparameter
                 log_var = torch.clamp(out_dict['log_var'], min=-6, max=6)
                 mu = out_dict['mu']
                 kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
-                recons_loss = recons_loss + self.config['VAE_beta'] * self.config['kld_weight'] * kld_loss
-                loss_dict['recons_loss'] = recons_loss
                 loss_dict['kld_loss'] = kld_loss
+
                 recons_loss = recons_loss + self.ad_cfg.model.vae.VAE_beta * kld_loss
 
                 if torch.isnan(recons_loss).any() or torch.isinf(recons_loss).any():
@@ -45,13 +46,13 @@ class LossConfig():
                     print(f'max log_var: {log_var.max().item()}')
                     raise Exception('recons_loss + kld_loss is nan or inf')
 
-        # classifier loss component
+        # classifier loss component + true label (shifted or not)
         if typ == 'train':
-            main_loss, y_shifted = self.train_loss_fn(out_dict['classifier_output'], targets)
+            main_loss, y_true = self.train_loss_fn(out_dict['classifier_output'], targets)
         elif typ == 'val':
-            main_loss, y_shifted = self.val_loss_fn(out_dict['classifier_output'], targets)
+            main_loss, y_true = self.val_loss_fn(out_dict['classifier_output'], targets)
         elif typ == 'test':
-            main_loss, y_shifted = self.test_loss_fn(out_dict['classifier_output'], targets)
+            main_loss, y_true = self.test_loss_fn(out_dict['classifier_output'], targets)
         else:
             raise Exception('Invalid argument: typ not equal to one of train, val, test.')
 
@@ -61,7 +62,7 @@ class LossConfig():
         )
         loss_dict['total_loss'] = total_loss
         loss_dict['classifier_loss'] = main_loss
-        loss_dict['shifted_label'] = y_shifted
+        loss_dict['true_label'] = y_true
         return loss_dict
 
     def get_label_alignment(self, inputs, targets):

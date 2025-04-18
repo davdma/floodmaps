@@ -19,6 +19,7 @@ PREPROCESS_DIR = SRC_DIR / 'preprocess'
 MODELS_DIR = SRC_DIR / 'models'
 OUTPUT_DIR = SRC_DIR / 'outputs'
 CONFIG_DIR = SRC_DIR / 'configs'
+RESULTS_DIR = SRC_DIR / 'results'
 
 TRAIN_LABELS = ["label_20150919_20150917_496_811.tif", "label_20150919_20150917_497_812.tif",
                 "label_20151112_20151109_472_940.tif", "label_20151112_20151109_473_939.tif",
@@ -119,35 +120,6 @@ class Metrics:
         """
         with open(filename, "w") as f:
             json.dump(self.metrics, f, indent=4)
-
-class SaveMetrics:
-    """Object interface to handle storing and retrieving shift invariant and non shift invariant metrics."""
-    def __init__(self, shift_invariant=True):
-        self.shift_invariant = shift_invariant
-        self.val_metrics = None
-        self.test_metrics = None
-
-    def save_metrics(self, vmetrics, typ='val'):
-        if typ == 'val':
-            self.val_metrics = vmetrics
-        elif typ == 'test':
-            self.test_metrics = vmetrics
-        else:
-            raise Exception('Invalid argument typ: must be val, test.')
-
-    def get_metrics(self, typ='val'):
-        if typ == 'val':
-            return self.val_metrics
-        elif typ == 'test':
-            return self.test_metrics
-        else:
-            raise Exception('Invalid argument typ: must be val, test.')
-
-    def get_val_metrics(self):
-        return self.val_metrics
-
-    def get_test_metrics(self):
-        return self.test_metrics
 
 class ChannelIndexer:
     """Abstract class for wrapping list of S2 dataset channels used for input.
@@ -474,7 +446,7 @@ class EarlyStopper:
         self.counter = 0
         self.best = True
         self.min_validation_loss = float('inf')
-        self.metric = None
+        self.metrics = None
         self.best_model_weights = None
 
     def step(self, validation_loss, model):
@@ -488,6 +460,14 @@ class EarlyStopper:
             self.best = False
         else:
             self.best = False
+
+    def store_best_metrics(self, metrics):
+        """For storing any additional metrics besides loss during best epoch."""
+        self.metrics = metrics
+
+    def get_best_metrics(self):
+        """Retrieving additional metrics besides loss from best epoch."""
+        return self.metrics
 
     def is_stopped(self):
         """Check whether training has stopped."""

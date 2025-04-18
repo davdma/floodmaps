@@ -68,7 +68,7 @@ def compute_loss(out_dict, targets, loss_fn, cfg, beta_scheduler=None, debug=Fal
     loss_dict['final_loss'] = recons_loss
     return loss_dict
 
-def train_loop(dataloader, model, device, optimizer, minibatches, loss_fn, cfg, run, epoch, beta_scheduler=None):
+def train_loop(model, dataloader, device, optimizer, minibatches, loss_fn, cfg, run, epoch, beta_scheduler=None):
     running_tot_loss = torch.tensor(0.0, device=device)
     if cfg.model.autodespeckler == 'VAE':
         running_recons_loss = torch.tensor(0.0, device=device)
@@ -148,7 +148,7 @@ def train_loop(dataloader, model, device, optimizer, minibatches, loss_fn, cfg, 
 
     return epoch_tot_loss
 
-def test_loop(dataloader, model, device, loss_fn, cfg, run, epoch, beta_scheduler=None):
+def test_loop(model, dataloader, device, loss_fn, cfg, run, epoch, beta_scheduler=None):
     running_tot_vloss = torch.tensor(0.0, device=device)
     num_batches = len(dataloader)
 
@@ -209,12 +209,12 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
     for epoch in range(cfg.train.epochs):
         try:
             # train loop
-            avg_loss = train_loop(train_loader, model, device, optimizer,
+            avg_loss = train_loop(model, train_loader, device, optimizer,
                                   minibatches, loss_fn, cfg, run, epoch,
                                   beta_scheduler=beta_scheduler)
 
             # at the end of each training epoch compute validation
-            avg_vloss = test_loop(val_loader, model, device, loss_fn, cfg, run,
+            avg_vloss = test_loop(model, val_loader, device, loss_fn, cfg, run,
                                   epoch, beta_scheduler=beta_scheduler)
         except Exception as err:
             raise RuntimeError(f'Error while training occurred at epoch {epoch}.') from err

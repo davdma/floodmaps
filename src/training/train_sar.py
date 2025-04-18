@@ -18,10 +18,13 @@ from glob import glob
 import numpy as np
 import sys
 import pickle
+import json
+from pathlib import Path
 
 from models.model import SARPixelDetector
 from utils.config import Config
-from utils.utils import Metrics, EarlyStopper, SARChannelIndexer, SaveMetrics, get_model_params
+from utils.utils import (SRC_DIR, RESULTS_DIR, Metrics, EarlyStopper,
+                         SARChannelIndexer, get_model_params)
 from training.loss import LossConfig
 from training.dataset import FloodSampleSARDataset
 from training.optim import get_optimizer
@@ -33,14 +36,16 @@ NOISE_NAMES = ['normal', 'masking', 'log_gamma']
 LOSS_NAMES = ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
 
 # get our optimizer and metrics
-def train_loop(dataloader, model, device, loss_config, optimizer, minibatches,
-               c, run, epoch, cfg, ad_cfg=None):
-    running_loss = torch.tensor(0.0, device=device)
+def train_loop(model, dataloader, device, optimizer, minibatches, loss_config,
+                ad_cfg, c, run, epoch):
+    running_tot_loss = torch.tensor(0.0, device=device) # all loss components
+    running_cls_loss = torch.tensor(0.0, device=device) # only classifier loss
     if ad_cfg is not None:
         running_recons_loss = torch.tensor(0.0, device=device)
+
+        # for VAE monitoring
         if ad_cfg.model.autodespeckler == 'VAE':
             running_kld_loss = torch.tensor(0.0, device=device)
-            # for VAE monitoring
             all_mu = []
             all_log_var = []
 
@@ -65,19 +70,20 @@ def train_loop(dataloader, model, device, loss_config, optimizer, minibatches,
         # also pass SAR layers for reconstruction loss
         loss_dict = loss_config.compute_loss(out_dict, y.float(), typ='train')
         loss = loss_dict['total_loss']
-        y_shifted = loss_dict['shifted_label']
+        y_true = loss_dict['true_label']
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        logits = out_dict['final_output']
-        pred_y = nn.functional.sigmoid(logits).flatten() > 0.5
-        target = y_shifted.flatten() > 0.5
+        logits = out_dict['classifier_output']
+        y_pred = nn.functional.sigmoid(logits).flatten() > 0.5
+        target = y_true.flatten() > 0.5
 
-        all_preds.append(pred_y)
+        all_preds.append(y_pred)
         all_targets.append(target)
-        running_loss += loss.detach()
+        running_tot_loss += loss.detach()
+        running_cls_loss += loss_dict['classifier_loss'].detach()
 
         if ad_cfg is not None:
             running_recons_loss += loss_dict['recons_loss'].detach()
@@ -98,43 +104,65 @@ def train_loop(dataloader, model, device, loss_config, optimizer, minibatches,
 
     metric_collection.update(all_preds, all_targets)
     metric_results = metric_collection.compute()
-    epoch_acc = metric_results['BinaryAccuracy'].item()
-    epoch_pre = metric_results['BinaryPrecision'].item()
-    epoch_rec = metric_results['BinaryRecall'].item()
-    epoch_f1 = metric_results['BinaryF1Score'].item()
-    epoch_loss = running_loss.item() / minibatches
+    epoch_loss = running_tot_loss.item() / minibatches
 
     # wandb tracking loss and metrics per epoch - track recons loss as well
-    log_dict = {"train accuracy": epoch_acc, "train precision": epoch_pre,
-               "train recall": epoch_rec, "train f1": epoch_f1, "train loss": epoch_loss}
-    if loss_config.contains_reconstruction_loss():
-        log_dict['train reconstruction loss'] = running_recons_loss.item() / minibatches
+    log_dict = {"train accuracy": metric_results['BinaryAccuracy'].item(),
+                "train precision": metric_results['BinaryPrecision'].item(),
+                "train recall": metric_results['BinaryRecall'].item(),
+                "train f1": metric_results['BinaryF1Score'].item(),
+                "train tot loss": epoch_loss,
+                "train cls loss": running_cls_loss.item() / minibatches}
 
-    # VAE mu and log_var monitoring
-    if ad_cfg is not None and ad_cfg.model.autodespeckler == 'VAE':
-        # full histogram monitoring
-        all_mu = torch.cat(all_mu, dim=0).numpy()
-        all_log_var = torch.cat(all_log_var, dim=0).numpy()
-        ratio = (running_recons_loss.item()
-                 / (beta * running_kld_loss.item())
-                if beta > 0
-                else 400)
-        log_dict.update({"mu_mean": all_mu.mean(),
-                    "mu_std": all_mu.std(),
-                    "log_var_mean": all_log_var.mean(),
-                    "log_var_std": all_log_var.std(),
-                    "train_recons_loss": running_recons_loss.item() / minibatches,
-                    "train_kld_loss": running_kld_loss.item() / minibatches,
-                    "train_ratio": ratio,
-                    "beta": beta})
+    # autodespeckler monitoring
+    if ad_cfg is not None:
+        log_dict['train_recons_loss'] = running_recons_loss.item() / minibatches
+
+        epoch_ad_loss = (
+            running_recons_loss.item() + ad_cfg.model.vae.VAE_beta * running_kld_loss.item()
+            if ad_cfg.model.autodespeckler == 'VAE' else running_recons_loss.item()
+        )
+        log_dict['train_ad_loss'] = cfg.train.balance_coeff * epoch_ad_loss / minibatches
+
+        # ad loss percentage of total loss
+        ad_loss_percentage = (cfg.train.balance_coeff * epoch_ad_loss / running_tot_loss)
+        log_dict['ad_loss_percentage'] = ad_loss_percentage
+
+        # VAE mu and log_var monitoring
+        if ad_cfg.model.autodespeckler == 'VAE':
+            all_mu = torch.cat(all_mu, dim=0).numpy()
+            all_log_var = torch.cat(all_log_var, dim=0).numpy()
+
+            # kld loss as percentage of total ad loss
+            kld_loss_percentage = (ad_cfg.model.vae.VAE_beta
+                                   * running_kld_loss.item()
+                                   / epoch_ad_loss)
+            log_dict.update({
+                "train_mu_mean": all_mu.mean(),
+                "train_mu_std": all_mu.std(),
+                "train_log_var_mean": all_log_var.mean(),
+                "train_log_var_std": all_log_var.std(),
+                "train_kld_loss": running_kld_loss.item() / minibatches,
+                "train_kld_loss_percentage": kld_loss_percentage,
+                "beta": ad_cfg.model.vae.VAE_beta
+            })
     run.log(log_dict, step=epoch)
     metric_collection.reset()
 
     return epoch_loss
 
-def test_loop(dataloader, model, device, loss_config, c, epoch, logging=True):
-    running_vloss = torch.tensor(0.0, device=device)
-    running_recons_vloss = torch.tensor(0.0, device=device)
+def test_loop(model, dataloader, device, loss_config, ad_cfg, c, run, epoch):
+    running_tot_vloss = torch.tensor(0.0, device=device) # all loss components
+    running_cls_vloss = torch.tensor(0.0, device=device) # only classifier loss
+    if ad_cfg is not None:
+        running_recons_vloss = torch.tensor(0.0, device=device)
+
+        # for VAE monitoring
+        if ad_cfg.model.autodespeckler == 'VAE':
+            running_kld_vloss = torch.tensor(0.0, device=device)
+            all_mu = []
+            all_log_var = []
+
     num_batches = len(dataloader)
     metric_collection = MetricCollection([
         BinaryAccuracy(threshold=0.5),
@@ -142,7 +170,6 @@ def test_loop(dataloader, model, device, loss_config, c, epoch, logging=True):
         BinaryRecall(threshold=0.5),
         BinaryF1Score(threshold=0.5)
     ]).to(device)
-
     all_preds = []
     all_targets = []
 
@@ -157,19 +184,26 @@ def test_loop(dataloader, model, device, loss_config, c, epoch, logging=True):
             out_dict = model(X_c)
             loss_dict = loss_config.compute_loss(out_dict, y.float(), typ='val')
             loss = loss_dict['total_loss']
-            recons_vloss = loss_dict['recons_loss']
-            y_shifted = loss_dict['shifted_label']
+            y_true = loss_dict['true_label']
 
-            running_vloss += loss.detach()
-            if loss_config.contains_reconstruction_loss():
-                running_recons_vloss += recons_vloss.detach()
+            logits = out_dict['classifier_output']
+            y_pred = nn.functional.sigmoid(logits).flatten() > 0.5
+            target = y_true.flatten() > 0.5
 
-            logits = out_dict['final_output']
-            pred_y = nn.functional.sigmoid(logits).flatten() > 0.5
-            target = y_shifted.flatten() > 0.5
-
-            all_preds.append(pred_y)
+            all_preds.append(y_pred)
             all_targets.append(target)
+            running_tot_vloss += loss.detach()
+            running_cls_vloss += loss_dict['classifier_loss'].detach()
+
+            if ad_cfg is not None:
+                running_recons_vloss += loss_dict['recons_loss'].detach()
+
+                # for VAE monitoring only
+                if ad_cfg.model.autodespeckler == 'VAE':
+                    # Collect mu and log_var for the whole epoch
+                    all_mu.append(out_dict['mu'].detach().cpu())
+                    all_log_var.append(out_dict['log_var'].detach().cpu())
+                    running_kld_vloss += loss_dict['kld_loss'].detach()
 
     # calculate metrics
     all_preds = torch.cat(all_preds)
@@ -177,23 +211,108 @@ def test_loop(dataloader, model, device, loss_config, c, epoch, logging=True):
 
     metric_collection.update(all_preds, all_targets)
     metric_results = metric_collection.compute()
-    epoch_vacc = metric_results['BinaryAccuracy'].item()
-    epoch_vpre = metric_results['BinaryPrecision'].item()
-    epoch_vrec = metric_results['BinaryRecall'].item()
-    epoch_vf1 = metric_results['BinaryF1Score'].item()
-    epoch_vloss = running_vloss.item() / num_batches
+    epoch_vloss = running_tot_vloss.item() / num_batches
 
-    if logging:
-        loss_log = {"val accuracy": epoch_vacc, "val precision": epoch_vpre,
-                    "val recall": epoch_vrec, "val f1": epoch_vf1, "val loss": epoch_vloss}
-        if loss_config.contains_reconstruction_loss():
-            loss_log['val reconstruction loss'] = running_recons_vloss.item() / num_batches
-        wandb.log(loss_log, step=epoch)
+    metrics_dict = {
+        "val accuracy": metric_results['BinaryAccuracy'].item(),
+        "val precision": metric_results['BinaryPrecision'].item(),
+        "val recall": metric_results['BinaryRecall'].item(),
+        "val f1": metric_results['BinaryF1Score'].item()
+    }
+    log_dict = metrics_dict.copy().update({
+        "val tot loss": epoch_vloss,
+        "val cls loss": running_cls_vloss / num_batches
+    })
 
+    # autodespeckler monitoring
+    if ad_cfg is not None:
+        log_dict['val_recons_loss'] = running_recons_vloss.item() / num_batches
+
+        epoch_ad_vloss = (
+            running_recons_vloss.item() + ad_cfg.model.vae.VAE_beta * running_kld_vloss.item()
+            if ad_cfg.model.autodespeckler == 'VAE' else running_recons_vloss.item()
+        )
+        log_dict['val_ad_loss'] = cfg.train.balance_coeff * epoch_ad_vloss / num_batches
+
+        # ad loss percentage of total loss
+        ad_loss_percentage = (cfg.train.balance_coeff * epoch_ad_vloss / running_tot_vloss)
+        log_dict['val_ad_loss_percentage'] = ad_loss_percentage
+
+        # VAE mu and log_var monitoring
+        if ad_cfg.model.autodespeckler == 'VAE':
+            all_mu = torch.cat(all_mu, dim=0).numpy()
+            all_log_var = torch.cat(all_log_var, dim=0).numpy()
+
+            # kld loss as percentage of total ad loss
+            kld_loss_percentage = (ad_cfg.model.vae.VAE_beta
+                                   * running_kld_vloss.item()
+                                   / epoch_ad_vloss)
+            log_dict.update({
+                "val_mu_mean": all_mu.mean(),
+                "val_mu_std": all_mu.std(),
+                "val_log_var_mean": all_log_var.mean(),
+                "val_log_var_std": all_log_var.std(),
+                "val_kld_loss": running_kld_vloss.item() / num_batches,
+                "val_kld_loss_percentage": kld_loss_percentage
+            })
+
+    run.log(log_dict, step=epoch)
     metric_collection.reset()
-    epoch_vmetrics = (epoch_vacc, epoch_vpre, epoch_vrec, epoch_vf1)
 
-    return epoch_vloss, epoch_vmetrics
+    return epoch_vloss, metrics_dict
+
+def evaluate(model, dataloader, device, loss_config, ad_cfg, c):
+    """Evaluate metrics on test set without logging."""
+    running_tot_vloss = torch.tensor(0.0, device=device)
+
+    num_batches = len(dataloader)
+    metric_collection = MetricCollection([
+        BinaryAccuracy(threshold=0.5),
+        BinaryPrecision(threshold=0.5),
+        BinaryRecall(threshold=0.5),
+        BinaryF1Score(threshold=0.5)
+    ]).to(device)
+    all_preds = []
+    all_targets = []
+
+    model.eval()
+    with torch.no_grad():
+        for X, y in dataloader:
+            X = X.to(device)
+            y = y.to(device)
+
+            X_c = X[:, :, c[0]:c[1], c[0]:c[1]]
+
+            out_dict = model(X_c)
+            loss_dict = loss_config.compute_loss(out_dict, y.float(), typ='val')
+            loss = loss_dict['total_loss']
+            y_true = loss_dict['true_label']
+
+            logits = out_dict['classifier_output']
+            y_pred = nn.functional.sigmoid(logits).flatten() > 0.5
+            target = y_true.flatten() > 0.5
+
+            all_preds.append(y_pred)
+            all_targets.append(target)
+            running_tot_vloss += loss.detach()
+
+    # calculate metrics
+    all_preds = torch.cat(all_preds)
+    all_targets = torch.cat(all_targets)
+
+    metric_collection.update(all_preds, all_targets)
+    metric_results = metric_collection.compute()
+    epoch_vloss = running_tot_vloss.item() / num_batches
+
+    metrics_dict = {
+        "test accuracy": metric_results['BinaryAccuracy'].item(),
+        "test precision": metric_results['BinaryPrecision'].item(),
+        "test recall": metric_results['BinaryRecall'].item(),
+        "test f1": metric_results['BinaryF1Score'].item()
+    }
+    metric_collection.reset()
+
+    return epoch_vloss, metrics_dict
 
 def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, ad_cfg, run):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -230,15 +349,18 @@ def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, a
                 model.unfreeze_ad_weights()
 
             # train loop
-            avg_loss = train_loop(train_loader, model, device, loss_cfg, optimizer, minibatches, c, epoch)
+            avg_loss = train_loop(model, train_loader, device, optimizer, minibatches,
+                                  loss_cfg, ad_cfg, c, run, epoch)
 
             # at the end of each training epoch compute validation
-            avg_vloss, avg_vmetrics = test_loop(val_loader, model, device, loss_cfg, c, epoch)
+            avg_vloss, val_set_metrics = test_loop(model, val_loader, device, loss_cfg,
+                                                   ad_cfg, c, run, epoch)
         except Exception as err:
             raise RuntimeError(f'Error while training occurred at epoch {epoch}.') from err
 
         if cfg.train.early_stopping:
             early_stopper.step(avg_vloss, model)
+            early_stopper.store_best_metrics(val_set_metrics)
             if early_stopper.is_stopped():
                 break
 
@@ -251,24 +373,67 @@ def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, a
         run.log({"learning_rate": scheduler.get_last_lr()[0] if scheduler is not None else cfg.train.lr}, step=epoch)
 
     # Save our model
-    ### IMPLEMENT METRICS WITH SHIFT INVARIANCE!!!
-    fmetrics = Metrics(use_partition=cfg.train.shift_invariant)
+    fmetrics = Metrics(use_partition=True)
     model_weights = None
+    partition = 'shift_invariant' if cfg.train.shift_invariant else 'non_shift_invariant'
     if cfg.train.early_stopping:
         model_weights = early_stopper.get_best_weights()
+        best_val_metrics = early_stopper.get_best_metrics()
         # reset model to checkpoint for later sample prediction
         model.load_state_dict(model_weights)
-        fmetrics.save_metrics('val', loss=early_stopper.get_min_validation_loss())
+        ad_weights = (model.autodespeckler.state_dict()
+                      if model.uses_autodespeckler() else None)
+        fmetrics.save_metrics('val', partition=partition,
+                              loss=early_stopper.get_min_validation_loss(),
+                              **best_val_metrics)
+        run.summary.update({f'final model {key}': value for key, value in best_val_metrics.items()})
     else:
         model_weights = model.state_dict()
-        fmetrics.save_metrics('val', loss=avg_vloss)
+        ad_weights = (model.autodespeckler.state_dict()
+                      if model.uses_autodespeckler() else None)
+        fmetrics.save_metrics('val', partition=partition,
+                              loss=avg_vloss,
+                              **val_set_metrics)
+        run.summary.update({f'final model {key}': value for key, value in val_set_metrics.items()})
 
     # for benchmarking purposes
     if cfg.eval.mode == 'test':
-        _, test_vmetrics = test_loop(test_loader, model, device, loss_cfg, c, logging=False)
-        # fmetrics.save_metrics(test_vmetrics, typ='test') ???
+        test_loss, test_set_metrics = evaluate(model, test_loader, device, loss_cfg, ad_cfg, c)
+        fmetrics.save_metrics('test', partition=partition, loss=test_loss, **test_set_metrics)
+        run.summary.update({f'final model {key}': value for key, value in test_set_metrics.items()})
 
-    return model_weights, fmetrics
+    return model_weights, ad_weights, fmetrics
+
+def save_experiment(weights, ad_weights, metrics, cfg, ad_cfg, run):
+    """Save experiment files to directory specified by config save_path."""
+    path = Path(cfg.save_path)
+    path.mkdir(parents=True, exist_ok=True)
+
+    if weights is not None:
+        torch.save(weights, path / "model.pth")
+    if ad_weights is not None:
+        torch.save(ad_weights, path / f"{ad_cfg.model.autodespeckler}_ad.pth")
+
+    # save config
+    cfg.save2yaml(path / "config.yaml")
+    if ad_cfg is not None:
+        ad_cfg.save2yaml(path / "ad_config.yaml")
+
+    # save metrics
+    metrics.to_json(path / "metrics.json")
+
+    # save wandb id info to json
+    wandb_info = {
+        "entity": run.entity,
+        "project": run.project,
+        "group": run.group,
+        "run_id": run.id,
+        "name": run.name,
+        "url": run.url,
+        "dir": run.dir
+    }
+    with open(path / f"wandb_info.json", "w") as f:
+        json.dump(wandb_info, f, indent=4)
 
 def sample_predictions(model, sample_set, mean, std, loss_config, config, seed=24330):
     """Generate predictions on a subset of images in the dataset for wandb logging."""
@@ -320,7 +485,7 @@ def sample_predictions(model, sample_set, mean, std, loss_config, config, seed=2
 
         with torch.no_grad():
             out_dict = model(X_c.unsqueeze(0))
-            logits = out_dict['final_output']
+            logits = out_dict['classifier_output']
             despeckler_output = out_dict['despeckler_output'].squeeze(0) if model.uses_autodespeckler() else None
             y_shifted = loss_config.get_label_alignment(logits, y.unsqueeze(0).float()).squeeze(0)
 
@@ -438,6 +603,12 @@ def run_experiment_s1(cfg, ad_cfg=None):
     # setup model
     model = SARPixelDetector(cfg, ad_cfg=ad_cfg).to(device)
 
+    # load weights
+    if cfg.model.weights is not None:
+        model.load_classifier_weights(cfg.model.weights, device)
+    if cfg.model.autodespeckler.ad_weights is not None:
+        model.load_autodespeckler_weights(cfg.model.autodespeckler.ad_weights)
+
     # freeze AD weights
     if ad_cfg is not None and cfg.model.autodespeckler.freeze:
         model.freeze_ad_weights()
@@ -448,12 +619,12 @@ def run_experiment_s1(cfg, ad_cfg=None):
     filter = 'lee' if cfg.data.use_lee else 'raw'
     size = cfg.data.size
     samples = cfg.data.samples
-    sample_dir = f'data/sar/minibatch/{filter}/samples_{size}_{samples}/'
+    sample_dir = SRC_DIR / f'data/sar/minibatch/{filter}/samples_{size}_{samples}/'
 
     # load in mean and std
     channels = [bool(int(x)) for x in cfg.data.channels]
     b_channels = sum(channels[-2:])
-    with open(f'data/sar/stats/minibatch_{filter}_{size}_{samples}.pkl', 'rb') as f:
+    with open(SRC_DIR / f'data/sar/stats/minibatch_{filter}_{size}_{samples}.pkl', 'rb') as f:
         train_mean, train_std = pickle.load(f)
 
         train_mean = torch.from_numpy(train_mean[channels])
@@ -528,15 +699,11 @@ def run_experiment_s1(cfg, ad_cfg=None):
         loss_cfg = LossConfig(cfg, ad_cfg=ad_cfg, device=device)
 
         # train and save results metrics
-        weights, fmetrics = train(model, train_loader, val_loader, test_loader, device,
-                                loss_cfg, cfg, ad_cfg, run)
-
-        # summary metrics
-        final_vacc, final_vpre, final_vrec, final_vf1 = fmetrics.get_metrics(split=None, partition=None)
-        run.summary["final_acc"] = final_vacc
-        run.summary["final_pre"] = final_vpre
-        run.summary["final_rec"] = final_vrec
-        run.summary["final_f1"] = final_vf1
+        weights, ad_weights, fmetrics = train(model, train_loader, val_loader,
+                                              test_loader, device, loss_cfg,
+                                              cfg, ad_cfg, run)
+        if cfg.save:
+            save_experiment(weights, ad_weights, fmetrics, cfg, ad_cfg, run)
 
         # log predictions on validation set using wandb
         pred_table = sample_predictions(model, test_set if cfg.eval.mode == 'test' else val_set,
@@ -559,7 +726,6 @@ def run_experiment_s1(cfg, ad_cfg=None):
     finally:
         run.finish()
 
-    # if want test metrics calculate model score on test set
     return fmetrics
 
 def main(cfg, ad_cfg):

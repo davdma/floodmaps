@@ -41,53 +41,28 @@ def print_best_params(save_file):
 # tuning autodespeckler + unet architecture
 # need to fill in need fields for loading, freezing, watching weights
 def run_s1(job):
-    config = {
-        'size': 68,
-        'window': 64,
-        'samples': 1000,
-        'method': 'minibatch',
-        'filter': 'raw',
-        'channels': [bool(int(x)) for x in '1111111'],
-        'project': 'SAR_AD_Tuning',
-        'group': 'VAE_autodespeckler',
-        'num_sample_predictions': 60,
-        'mode': 'val',
-        'epochs': 250,
-        'batch_size': 256,
-        'subset': 0.5,
+    override = {
+        'project': 'S',
+        'group': '_',
+        'loss': 's',
         'learning_rate': job.parameters['learning_rate'],
-        'early_stopping': True,
-        'patience': 10,
-        'name': 'unet++',
-        'load_classifier': None,
-        'deep_supervision': job.parameters['deep_supervision'],
-        'dropout': job.parameters['dropout'],
-        'autodespeckler': 'VAE', # if not None need to specify additional autodespeckler args
-        'load_autodespeckler': None,
-        'freeze_autodespeckler': True,
         'latent_dim': job.parameters['latent_dim'],
-        'noise_type': None,
-        'noise_coeff': None,
-        'AD_num_layers': None,
-        'AD_kernel_size': None, # optional
-        'AD_dropout': None, # optional
-        'AD_activation_func': None,
-        'VAE_beta': job.parameters['VAE_beta'],
-        'num_workers': 10,
-        'loss': job.parameters['loss'],
-        'alpha': job.parameters['alpha'],
-        'beta': 1 - job.parameters['alpha'],
-        'optimizer': "Adam",
-        'seed': 19935,
-        'random_flip': False,
-        'shift_invariant': True,
-        'watch_weights_grad': True
+        'beta_period': job.parameters['beta_period'],
+        'beta_cycles': job.parameters['beta_cycles']
     }
-    final_vmetrics = run_experiment_s1(config)
-    final_vacc, final_vpre, final_vrec, final_vf1 = final_vmetrics.get_val_metrics()
-    return final_vf1
+    cfg = Config(config_file="configs/VAE_tuning.yaml", **override)
+    ad_cfg = Config(config_file="configs/VAE_tuning.yaml", **override)
+    fmetrics = run_experiment_s1(cfg, ad_cfg=ad_cfg)
+    results = fmetrics.get_metrics(split='val', partition='shift_invariant')
+    return results['final model val f1']
 
 def tuning_s1(file_index, max_evals, experiment_name, early_stopping, random_state=930):
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    hostname = socket.gethostname()
+    print("----------------------------------")
+    print("Running tuning script on:", hostname)
+    print("Current timestamp:", timestamp)
+    print(f'Beginning tuning for s1 experiment {experiment_name} for {max_evals} max evals using random seed {random_state}.')
     search_dir = './tuning/s1/' + experiment_name
 
     if not os.path.exists(search_dir):
@@ -111,8 +86,16 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping, random_sta
     problem.add_hyperparameter([128, 256, 512], "latent_dim")
     problem.add_hyperparameter([0, 0.001, 0.01, 0.05, 0.1, 1, 4, 10, 20], "VAE_beta")
 
-    # define the evaluator to distribute the computation
-    method_kwargs = {"callbacks": [SearchEarlyStopping(patience=10)]} if early_stopping else dict()
+    # load in early stopping metrics if available
+    if early_stopping:
+        early_stopper = SearchEarlyStopping(patience=10)
+        if os.path.exists(search_dir + '/stopper.json'):
+            _best_objective, _n_lower = load_stopper_info(search_dir + '/stopper.json')
+            early_stopper._best_objective = _best_objective
+            early_stopper._n_lower = _n_lower
+        method_kwargs = {"callbacks": [early_stopper]}
+    else:
+        method_kwargs = dict()
 
     with Evaluator.create(run_s1, method="serial", method_kwargs=method_kwargs) as evaluator:
         search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=random_state)
@@ -126,6 +109,8 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping, random_sta
         else:
             results = search.search(max_evals=max_evals, timeout=23*3600)
 
+        print('Saving stopper and eval results to file...')
+        save_stopper_info(early_stopper, search_dir + '/stopper.json')
         # save results to collective file
         save_file = search_dir + '/all.csv'
         if os.path.exists(save_file):
@@ -137,6 +122,10 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping, random_sta
             results.to_csv(save_file, mode='a', index=False, header=False)
         else:
             results.to_csv(save_file, index=False)
+
+        # if search stopped print params of best run
+        if early_stopping and early_stopper.search_stopped:
+            print_best_params(save_file)
 
 # tuning autodespeckler alone
 def run_vae(job):

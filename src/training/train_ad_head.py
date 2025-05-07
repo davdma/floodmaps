@@ -90,6 +90,7 @@ def train_loop(model, dataloader, device, optimizer, minibatches, loss_fn, cfg, 
         # also pass SAR layers for reconstruction loss
         loss_dict = compute_loss(out_dict, sar_in, loss_fn, cfg, beta_scheduler=beta_scheduler)
         loss = loss_dict['final_loss']
+
         if torch.isnan(loss).any():
             err_file_name=f"outputs/ad_param_err_train_{cfg.model.autodespeckler}.json"
             stats_dict = print_model_params_and_grads(model, file_name=err_file_name)

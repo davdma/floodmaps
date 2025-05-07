@@ -1,5 +1,5 @@
-from deephyper.problem import HpProblem
-from deephyper.search.hps import CBO
+from deephyper.hpo import HpProblem
+from deephyper.hpo import CBO
 from deephyper.evaluator import Evaluator
 from deephyper.evaluator.callback import SearchEarlyStopping
 from training.train_sar import run_experiment_s1
@@ -28,7 +28,7 @@ def save_stopper_info(stopper, filepath):
     with open(filepath, 'w') as f:
         json.dump(state, f)
 
-def print_best_params(save_file):
+def print_save_best_params(save_file, file_path):
     """Prints the parameters of the best tuning run so far."""
     df = pd.read_csv(save_file)
     best_idx = df["objective"].idxmax()
@@ -38,17 +38,21 @@ def print_best_params(save_file):
     p_vars = best_row.filter(like="p:").to_dict()
     print(p_vars)
 
+    # save best params to file
+    with open(file_path, 'w') as f:
+        json.dump(p_vars, f)
+
 # tuning autodespeckler + unet architecture
 # need to fill in need fields for loading, freezing, watching weights
-def run_s1(job):
+def run_s1(parameters):
     override = {
         'project': 'S',
         'group': '_',
         'loss': 's',
-        'learning_rate': job.parameters['learning_rate'],
-        'latent_dim': job.parameters['latent_dim'],
-        'beta_period': job.parameters['beta_period'],
-        'beta_cycles': job.parameters['beta_cycles']
+        'lr': parameters['learning_rate'],
+        'latent_dim': parameters['latent_dim'],
+        'beta_period': parameters['beta_period'],
+        'beta_cycles': parameters['beta_cycles']
     }
     cfg = Config(config_file="configs/VAE_tuning.yaml", **override)
     ad_cfg = Config(config_file="configs/VAE_tuning.yaml", **override)
@@ -128,54 +132,54 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping, random_sta
             print_best_params(save_file)
 
 # tuning autodespeckler alone
-def run_vae(job):
+def run_vae(parameters):
     override = {
         'project': 'SAR_AD_Tuning_Head_3',
         'group': 'VAE_L2',
         'loss': 'MSELoss',
-        'learning_rate': job.parameters['learning_rate'],
-        'latent_dim': job.parameters['latent_dim'],
-        'beta_period': job.parameters['beta_period'],
-        'beta_cycles': job.parameters['beta_cycles']
+        'lr': parameters['learning_rate'],
+        'latent_dim': parameters['latent_dim'],
+        'beta_period': parameters['beta_period'],
+        'beta_cycles': parameters['beta_cycles']
     }
     cfg = Config(config_file="configs/VAE_tuning.yaml", **override)
     fmetrics = run_experiment_ad(cfg)
     floss = fmetrics.get_metrics(split='val')['loss']
     return 0 - floss
 
-def run_cnn1(job):
+def run_cnn1(parameters):
     override = {
         'project': 'SAR_AD_Tuning_Head_3',
         'group': 'CNN1_L2',
         'loss': 'MSELoss',
-        'learning_rate': job.parameters['learning_rate'],
-        'latent_dim': job.parameters['latent_dim'],
-        'AD_dropout': job.parameters['AD_dropout'],
-        'AD_activation_func': job.parameters['AD_activation_func']
+        'lr': parameters['learning_rate'],
+        'latent_dim': parameters['latent_dim'],
+        'AD_dropout': parameters['AD_dropout'],
+        'AD_activation_func': parameters['AD_activation_func']
     }
     cfg = Config(config_file="configs/CNN1_tuning.yaml", **override)
     fmetrics = run_experiment_ad(cfg)
     floss = fmetrics.get_metrics(split='val')['loss']
     return 0 - floss
 
-def run_cnn2(job):
+def run_cnn2(parameters):
     override = {
         'project': 'SAR_AD_Tuning_Head_3',
-        'group': 'CNN2_L1',
-        'loss': 'L1Loss',
-        'learning_rate': job.parameters['learning_rate']
+        'group': 'CNN2_L2',
+        'loss': 'MSELoss',
+        'lr': parameters['learning_rate']
     }
     cfg = Config(config_file="configs/CNN1_tuning.yaml", **override)
     fmetrics = run_experiment_ad(cfg)
     floss = fmetrics.get_metrics(split='val')['loss']
     return 0 - floss
 
-def run_dae(job):
+def run_dae(parameters):
     override = {
         'project': 'SAR_AD_Tuning_Head_3',
         'group': 'DAE_L1',
         'loss': 'L1Loss',
-        'learning_rate': job.parameters['learning_rate']
+        'lr': parameters['learning_rate']
     }
     cfg = Config(config_file="configs/DAE_tuning.yaml", **override)
     fmetrics = run_experiment_ad(cfg)
@@ -189,7 +193,7 @@ def tuning_ad(file_index, max_evals, model, experiment_name, early_stopping, ran
     print("Running tuning script on:", hostname)
     print("Current timestamp:", timestamp)
     print(f'Beginning tuning for {model} experiment {experiment_name} for {max_evals} max evals using random seed {random_state}.')
-    search_dir = './tuning/ad_3/' + experiment_name
+    search_dir = './results/tuning/ad_3/' + experiment_name
 
     if not os.path.exists(search_dir):
         os.makedirs(search_dir)
@@ -238,7 +242,9 @@ def tuning_ad(file_index, max_evals, model, experiment_name, early_stopping, ran
         method_kwargs = dict()
 
     # define the evaluator to distribute the computation
-    with Evaluator.create(obj_func, method="serial", method_kwargs=method_kwargs) as evaluator:
+    with Evaluator.create(obj_func, method="process", method_kwargs=method_kwargs) as evaluator:
+        print(f"Created new evaluator with {evaluator.num_workers} \
+            worker{'s' if evaluator.num_workers > 1 else ''} and config: {method_kwargs}")
         search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=random_state)
 
         if int(file_index) >= 1:
@@ -266,7 +272,7 @@ def tuning_ad(file_index, max_evals, model, experiment_name, early_stopping, ran
 
         # if search stopped print params of best run
         if early_stopping and early_stopper.search_stopped:
-            print_best_params(save_file)
+            print_save_best_params(save_file, search_dir + '/best.json')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

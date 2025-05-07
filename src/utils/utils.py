@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader, Subset
 import rasterio
 import numpy as np
-from dataset import FloodSampleMeanStd
+from training.dataset import FloodSampleMeanStd
 from math import exp
 import json
 import copy
@@ -219,6 +219,9 @@ class SARChannelIndexer:
 
     def get_channel_names(self):
         return self.names
+    
+    def get_map(self):
+        return [name for name, include in zip(self.names, self.channels) if include]
 
 def load_model_weights(model, weight_path, device, model_name="Model"):
     """Shared weight loading util.

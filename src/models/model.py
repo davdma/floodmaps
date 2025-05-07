@@ -44,7 +44,7 @@ def build_sar_classifier(cfg):
     cfg : obj
         SAR classifier config instance specified in config.py.
     """
-    channels = cfg.data.channels
+    channels = [bool(int(x)) for x in cfg.data.channels]
     n_channels = sum(channels)
     if cfg.model.classifier == 'unet':
         return UNet(n_channels, dropout=cfg.model.unet.dropout)
@@ -108,8 +108,8 @@ class SARPixelDetector(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.ad_cfg = ad_cfg
-        self.classifier = self.build_sar_classifier(cfg)
-        self.autodespeckler = (self.build_autodespeckler(ad_cfg)
+        self.classifier = build_sar_classifier(cfg)
+        self.autodespeckler = (build_autodespeckler(ad_cfg)
                                 if ad_cfg is not None else None)
 
     def get_classifier(self):
@@ -131,8 +131,16 @@ class SARPixelDetector(nn.Module):
             Path to the .pth file containing the autodespeckler weights.
         device: torch.device
         """
-        load_model_weights(self.autodespeckler, weight_path, device,
-                           model_name=f"{self.ad_cfg.model.autodespeckler} autodespeckler")
+        try:
+            load_model_weights(self.autodespeckler, weight_path, device,
+                                model_name=f"{self.ad_cfg.model.autodespeckler} autodespeckler")
+        except RuntimeError as e:
+            print(f"Error loading autodespeckler weights: {e}")
+            print("Attempting to load weights from old model without autodespeckler prefix...")
+            state_dict = torch.load(weight_path, map_location=device)
+            new_state_dict = {k.replace("autodespeckler.", ""): v for k, v in state_dict.items()}
+            self.autodespeckler.load_state_dict(new_state_dict)
+            print(f"{self.ad_cfg.model.autodespeckler} autodespeckler weights loaded successfully.")
 
     def load_classifier_weights(self, weight_path, device):
         """
@@ -144,8 +152,16 @@ class SARPixelDetector(nn.Module):
             Path to the .pth file containing the autodespeckler weights.
         device: torch.device
         """
-        load_model_weights(self.classifier, weight_path, device,
-                           model_name=f"{self.cfg.model.classifier} classifier")
+        try:
+            load_model_weights(self.classifier, weight_path, device,
+                               model_name=f"{self.cfg.model.classifier} classifier")
+        except RuntimeError as e:
+            print(f"Error loading classifier weights: {e}")
+            print("Attempting to load weights from old model without classifier prefix...")
+            state_dict = torch.load(weight_path, map_location=device)
+            new_state_dict = {k.replace("classifier.", ""): v for k, v in state_dict.items()}
+            self.classifier.load_state_dict(new_state_dict, strict=False)
+            print(f"{self.cfg.model.classifier} classifier weights loaded successfully.")
 
     def freeze_ad_weights(self):
         """Freeze the weights of the autodespeckler during training."""

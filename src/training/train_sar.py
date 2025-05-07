@@ -116,7 +116,7 @@ def train_loop(model, dataloader, device, optimizer, minibatches, loss_config,
 
     # autodespeckler monitoring
     if ad_cfg is not None:
-        log_dict['train_recons_loss'] = running_recons_loss.item() / minibatches
+        log_dict['train_recons_loss'] = cfg.train.balance_coeff * running_recons_loss.item() / minibatches
 
         epoch_ad_loss = (
             running_recons_loss.item() + ad_cfg.model.vae.VAE_beta * running_kld_loss.item()
@@ -142,7 +142,7 @@ def train_loop(model, dataloader, device, optimizer, minibatches, loss_config,
                 "train_mu_std": all_mu.std(),
                 "train_log_var_mean": all_log_var.mean(),
                 "train_log_var_std": all_log_var.std(),
-                "train_kld_loss": running_kld_loss.item() / minibatches,
+                "train_kld_loss": cfg.train.balance_coeff * running_kld_loss.item() / minibatches,
                 "train_kld_loss_percentage": kld_loss_percentage,
                 "beta": ad_cfg.model.vae.VAE_beta
             })
@@ -212,6 +212,7 @@ def test_loop(model, dataloader, device, loss_config, ad_cfg, c, run, epoch):
     metric_collection.update(all_preds, all_targets)
     metric_results = metric_collection.compute()
     epoch_vloss = running_tot_vloss.item() / num_batches
+    epoch_cls_vloss = running_cls_vloss.item() / num_batches
 
     metrics_dict = {
         "val accuracy": metric_results['BinaryAccuracy'].item(),
@@ -219,14 +220,15 @@ def test_loop(model, dataloader, device, loss_config, ad_cfg, c, run, epoch):
         "val recall": metric_results['BinaryRecall'].item(),
         "val f1": metric_results['BinaryF1Score'].item()
     }
-    log_dict = metrics_dict.copy().update({
+    log_dict = metrics_dict.copy()
+    log_dict.update({
         "val tot loss": epoch_vloss,
-        "val cls loss": running_cls_vloss / num_batches
+        "val cls loss": epoch_cls_vloss
     })
 
     # autodespeckler monitoring
     if ad_cfg is not None:
-        log_dict['val_recons_loss'] = running_recons_vloss.item() / num_batches
+        log_dict['val_recons_loss'] = cfg.train.balance_coeff * running_recons_vloss.item() / num_batches
 
         epoch_ad_vloss = (
             running_recons_vloss.item() + ad_cfg.model.vae.VAE_beta * running_kld_vloss.item()
@@ -252,14 +254,14 @@ def test_loop(model, dataloader, device, loss_config, ad_cfg, c, run, epoch):
                 "val_mu_std": all_mu.std(),
                 "val_log_var_mean": all_log_var.mean(),
                 "val_log_var_std": all_log_var.std(),
-                "val_kld_loss": running_kld_vloss.item() / num_batches,
+                "val_kld_loss": cfg.train.balance_coeff * running_kld_vloss.item() / num_batches,
                 "val_kld_loss_percentage": kld_loss_percentage
             })
 
     run.log(log_dict, step=epoch)
     metric_collection.reset()
 
-    return epoch_vloss, metrics_dict
+    return epoch_vloss, epoch_cls_vloss, metrics_dict
 
 def evaluate(model, dataloader, device, loss_config, ad_cfg, c):
     """Evaluate metrics on test set without logging."""
@@ -333,6 +335,9 @@ def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, a
     optimizer = get_optimizer(model, cfg)
     scheduler = get_scheduler(optimizer, cfg)
 
+    ignore_ad_loss = (ad_cfg is not None
+                and cfg.model.autodespeckler.freeze
+                and cfg.model.autodespeckler.freeze_epochs >= cfg.train.epochs)
     if cfg.train.early_stopping:
         early_stopper = EarlyStopper(patience=cfg.train.patience)
 
@@ -344,7 +349,7 @@ def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, a
         try:
             if (ad_cfg is not None
                 and cfg.model.autodespeckler.freeze
-                and epoch == cfg.model.autodespecker.freeze_epochs):
+                and epoch == cfg.model.autodespeckler.freeze_epochs):
                 print(f"Unfreezing backbone at epoch {epoch}")
                 model.unfreeze_ad_weights()
 
@@ -353,13 +358,14 @@ def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, a
                                   loss_cfg, ad_cfg, c, run, epoch)
 
             # at the end of each training epoch compute validation
-            avg_vloss, val_set_metrics = test_loop(model, val_loader, device, loss_cfg,
+            avg_vloss, avg_cls_vloss, val_set_metrics = test_loop(model, val_loader, device, loss_cfg,
                                                    ad_cfg, c, run, epoch)
         except Exception as err:
             raise RuntimeError(f'Error while training occurred at epoch {epoch}.') from err
 
         if cfg.train.early_stopping:
-            early_stopper.step(avg_vloss, model)
+            # use only classifier component for early stopping if AD is frozen
+            early_stopper.step(avg_cls_vloss if ignore_ad_loss else avg_vloss, model)
             early_stopper.store_best_metrics(val_set_metrics)
             if early_stopper.is_stopped():
                 break
@@ -373,14 +379,15 @@ def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, a
         run.log({"learning_rate": scheduler.get_last_lr()[0] if scheduler is not None else cfg.train.lr}, step=epoch)
 
     # Save our model
-    fmetrics = Metrics(use_partition=True)
-    model_weights = None
+    fmetrics = Metrics(use_partitions=True)
+    cls_weights = None
     partition = 'shift_invariant' if cfg.train.shift_invariant else 'non_shift_invariant'
     if cfg.train.early_stopping:
         model_weights = early_stopper.get_best_weights()
         best_val_metrics = early_stopper.get_best_metrics()
         # reset model to checkpoint for later sample prediction
         model.load_state_dict(model_weights)
+        cls_weights = model.classifier.state_dict()
         ad_weights = (model.autodespeckler.state_dict()
                       if model.uses_autodespeckler() else None)
         fmetrics.save_metrics('val', partition=partition,
@@ -388,7 +395,7 @@ def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, a
                               **best_val_metrics)
         run.summary.update({f'final model {key}': value for key, value in best_val_metrics.items()})
     else:
-        model_weights = model.state_dict()
+        cls_weights = model.classifier.state_dict()
         ad_weights = (model.autodespeckler.state_dict()
                       if model.uses_autodespeckler() else None)
         fmetrics.save_metrics('val', partition=partition,
@@ -402,15 +409,15 @@ def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, a
         fmetrics.save_metrics('test', partition=partition, loss=test_loss, **test_set_metrics)
         run.summary.update({f'final model {key}': value for key, value in test_set_metrics.items()})
 
-    return model_weights, ad_weights, fmetrics
+    return cls_weights, ad_weights, fmetrics
 
-def save_experiment(weights, ad_weights, metrics, cfg, ad_cfg, run):
+def save_experiment(cls_weights, ad_weights, metrics, cfg, ad_cfg, run):
     """Save experiment files to directory specified by config save_path."""
     path = Path(cfg.save_path)
     path.mkdir(parents=True, exist_ok=True)
 
-    if weights is not None:
-        torch.save(weights, path / "model.pth")
+    if cls_weights is not None:
+        torch.save(cls_weights, path / f"{cfg.model.classifier}_cls.pth")
     if ad_weights is not None:
         torch.save(ad_weights, path / f"{ad_cfg.model.autodespeckler}_ad.pth")
 
@@ -435,14 +442,15 @@ def save_experiment(weights, ad_weights, metrics, cfg, ad_cfg, run):
     with open(path / f"wandb_info.json", "w") as f:
         json.dump(wandb_info, f, indent=4)
 
-def sample_predictions(model, sample_set, mean, std, loss_config, config, seed=24330):
+def sample_predictions(model, sample_set, mean, std, loss_config, cfg, seed=24330):
     """Generate predictions on a subset of images in the dataset for wandb logging."""
-    if config['num_sample_predictions'] <= 0:
+    if cfg.wandb.num_sample_predictions <= 0:
         return None
 
     loss_config.val_loss_fn.change_device('cpu')
     columns = ["id"]
-    my_channels = SARChannelIndexer(config['channels'])
+    channels = [bool(int(x)) for x in cfg.data.channels]
+    my_channels = SARChannelIndexer(channels)
     # initialize wandb table given the channel settings
     columns += my_channels.get_channel_names()
     if model.uses_autodespeckler():
@@ -465,7 +473,7 @@ def sample_predictions(model, sample_set, mean, std, loss_config, config, seed=2
     # get map of each channel to index of resulting tensor
     n = 0
     channel_indices = [-1] * 7
-    for i, channel in enumerate(config['channels']):
+    for i, channel in enumerate(channels):
         if channel:
             channel_indices[i] = n
             n += 1
@@ -473,10 +481,10 @@ def sample_predictions(model, sample_set, mean, std, loss_config, config, seed=2
     model.to('cpu')
     model.eval()
     rng = Random(seed)
-    samples = rng.sample(range(0, len(sample_set)), config['num_sample_predictions'])
+    samples = rng.sample(range(0, len(sample_set)), cfg.wandb.num_sample_predictions)
 
-    center_1 = (config['size'] - config['window']) // 2
-    center_2 = center_1 + config['window']
+    center_1 = (cfg.data.size - cfg.data.window) // 2
+    center_2 = center_1 + cfg.data.window
     for id, k in enumerate(samples):
         # get all images to shape (H, W, C) with C = 1 or 3 (1 for grayscale, 3 for RGB)
         X, y = sample_set[k]
@@ -584,13 +592,13 @@ def run_experiment_s1(cfg, ad_cfg=None):
     ad_cfg : object, optional
         Config object for an optional SAR autodespeckler attachment.
     """
-    if wandb.login():
+    if not wandb.login():
         raise Exception("Failed to login to wandb.")
 
     # seeding
-    np.random.seed(cfg['seed'])
-    random.seed(cfg['seed'])
-    torch.manual_seed(cfg['seed'])
+    np.random.seed(cfg.seed)
+    random.seed(cfg.seed)
+    torch.manual_seed(cfg.seed)
 
     device = (
         "cuda"
@@ -607,7 +615,7 @@ def run_experiment_s1(cfg, ad_cfg=None):
     if cfg.model.weights is not None:
         model.load_classifier_weights(cfg.model.weights, device)
     if cfg.model.autodespeckler.ad_weights is not None:
-        model.load_autodespeckler_weights(cfg.model.autodespeckler.ad_weights)
+        model.load_autodespeckler_weights(cfg.model.autodespeckler.ad_weights, device)
 
     # freeze AD weights
     if ad_cfg is not None and cfg.model.autodespeckler.freeze:
@@ -690,7 +698,7 @@ def run_experiment_s1(cfg, ad_cfg=None):
     try:
         if cfg.save:
             if cfg.save_path is None:
-                default_path = f"experiments/{datetime.today().strftime('%Y-%m-%d')}_{cfg.model.classifier}_{run.id}/"
+                default_path = f"results/experiments/{datetime.today().strftime('%Y-%m-%d')}_{cfg.model.classifier}_{run.id}/"
                 cfg.save_path = default_path
                 run.config.update({"save_path": cfg.save_path}, allow_val_change=True)
             print(f'Save path set to: {cfg.save_path}')
@@ -699,11 +707,11 @@ def run_experiment_s1(cfg, ad_cfg=None):
         loss_cfg = LossConfig(cfg, ad_cfg=ad_cfg, device=device)
 
         # train and save results metrics
-        weights, ad_weights, fmetrics = train(model, train_loader, val_loader,
+        cls_weights, ad_weights, fmetrics = train(model, train_loader, val_loader,
                                               test_loader, device, loss_cfg,
                                               cfg, ad_cfg, run)
         if cfg.save:
-            save_experiment(weights, ad_weights, fmetrics, cfg, ad_cfg, run)
+            save_experiment(cls_weights, ad_weights, fmetrics, cfg, ad_cfg, run)
 
         # log predictions on validation set using wandb
         pred_table = sample_predictions(model, test_set if cfg.eval.mode == 'test' else val_set,
@@ -740,76 +748,63 @@ if __name__ == '__main__':
     def bool_indices(s):
         if len(s) == 7 and all(c in '01' for c in s):
             try:
-                return [bool(int(x)) for x in s]
+                return s
             except ValueError:
-                raise argparse.ArgumentTypeError("Invalid boolean string: '{}'".format(s))
+                raise argparse.ArgumentTypeError(f"Invalid boolean string: '{s}'")
         else:
             raise argparse.ArgumentTypeError("Boolean string must be of length 7 and have binary digits")
-
-    # preprocessing
-    parser.add_argument('-x', '--size', type=int, default=68, help='pixel width of dataset patches (default: 68)')
-    parser.add_argument('-w', '--window', type=int, default=64, help='pixel width of model input/output (default: 64)')
-    parser.add_argument('-n', '--samples', type=int, default=1000, help='number of patches sampled per image (default: 1000)')
-    # parser.add_argument('-m', '--method', default='minibatch', choices=['minibatch', 'individual'], help='sampling method (default: minibatch)')
-    parser.add_argument('--filter', default='raw', choices=['lee', 'raw'], help=f"filters: enhanced lee, raw (default: raw)")
-    parser.add_argument('-c', '--channels', default="1111111", help='string of 7 binary digits for selecting among the 10 available channels (VV, VH, DEM, SlopeY, SlopeX, Water, Roads) (default: 1111111)')
-
+        
     # wandb
-    parser.add_argument('--project', default="SARClassifier", help='Wandb project where run will be logged')
-    parser.add_argument('--group', default=None, help='Optional group name for model experiments (default: None)')
-    parser.add_argument('--num_sample_predictions', type=int, default=40, help='number of predictions to visualize (default: 40)')
+    parser.add_argument('--project', help='Wandb project where run will be logged')
+    parser.add_argument('--group', help='Optional group name for model experiments (default: None)')
+    parser.add_argument('--num_sample_predictions', type=int, help='number of predictions to visualize (default: 40)')
 
     # evaluation
     parser.add_argument('--mode', default='val', choices=['val', 'test'], help=f"dataset used for evaluation metrics (default: val)")
 
     # ml
-    parser.add_argument('-e', '--epochs', type=int, default=30, help='(default: 30)')
-    parser.add_argument('-b', '--batch_size', type=int, default=32, help='(default: 32)')
-    parser.add_argument('-s', '--subset', dest='subset', type=float, default=1.0, help='percentage of training dataset to use per epoch (default: 1.0)')
-    parser.add_argument('-l', '--learning_rate', type=float, default=0.0001, help='(default: 0.0001)')
-    parser.add_argument('--early_stopping', action='store_true', help='early stopping (default: False)')
-    parser.add_argument('-p', '--patience', type=int, default=5, help='(default: 5)')
+    parser.add_argument('-e', '--epochs', type=int)
+    parser.add_argument('-b', '--batch_size', type=int)
+    parser.add_argument('-s', '--subset', dest='subset', type=float, help='percentage of training dataset to use per epoch (default: 1.0)')
+    parser.add_argument('-l', '--lr', type=float)
+    parser.add_argument('-p', '--patience', type=int, help='early stopping patience')
 
     # model
-    parser.add_argument('--name', default='unet', choices=MODEL_NAMES,
-                        help=f"models: {', '.join(MODEL_NAMES)} (default: unet)")
+    parser.add_argument('--name', choices=MODEL_NAMES,
+                        help=f"models: {', '.join(MODEL_NAMES)}")
     # unet
-    parser.add_argument('--dropout', type=float, default=0.2, help=f"(default: 0.2)")
-    # unet++
-    parser.add_argument('--deep_supervision', action='store_true', help='(default: False)')
+    parser.add_argument('--dropout', type=float)
 
     # autodespeckler
-    parser.add_argument('--autodespeckler', default=None, choices=AUTODESPECKLER_NAMES,
-                        help=f"models: {', '.join(AUTODESPECKLER_NAMES)} (default: None)")
-    parser.add_argument('--noise_type', default=None, choices=NOISE_NAMES,
-                        help=f"models: {', '.join(NOISE_NAMES)} (default: None)")
-    parser.add_argument('--noise_coeff', type=float, default=None,  help=f"noise coefficient (default: 0.1)")
-    parser.add_argument('--latent_dim', default=None, type=int, help='latent dimensions (default: 200)')
-    parser.add_argument('--AD_num_layers', default=None, type=int, help='Autoencoder layers (default: 5)')
-    parser.add_argument('--AD_kernel_size', default=None, type=int, help='Autoencoder kernel size (default: 3)')
-    parser.add_argument('--AD_dropout', default=None, type=float, help=f"(default: 0.1)")
-    parser.add_argument('--AD_activation_func', default=None, choices=['leaky_relu', 'relu'], help=f'activations: leaky_relu, relu (default: leaky_relu)')
-    parser.add_argument('--VAE_beta', default=1.0, type=float, help=f"(default: 1.0)")
+    parser.add_argument('--autodespeckler', choices=AUTODESPECKLER_NAMES,
+                        help=f"models: {', '.join(AUTODESPECKLER_NAMES)}")
+    parser.add_argument('--noise_type', choices=NOISE_NAMES,
+                        help=f"models: {', '.join(NOISE_NAMES)}")
+    parser.add_argument('--noise_coeff', type=float, help='noise coefficient')
+    parser.add_argument('--latent_dim', type=int, help='latent dimensions')
+    parser.add_argument('--AD_num_layers', type=int, help='Autoencoder layers')
+    parser.add_argument('--AD_kernel_size', type=int, help='Autoencoder kernel size')
+    parser.add_argument('--AD_dropout', type=float, help='Autoencoder dropout')
+    parser.add_argument('--AD_activation_func', choices=['leaky_relu', 'relu'], help=f'activations: leaky_relu, relu')
+    parser.add_argument('--VAE_beta', type=float)
 
     # load weights
-    parser.add_argument('--load_autodespeckler', default=None, help='File path to .pth')
-    parser.add_argument('--freeze_autodespeckler', default=False, help='Freeze autodespeckler weights during training (default: False)')
+    parser.add_argument('--load_autodespeckler', help='File path to .pth')
+    parser.add_argument('--freeze_autodespeckler', type=bool,help='Freeze autodespeckler weights during training')
 
     # data loading
-    parser.add_argument('--num_workers', type=int, default=10, help='(default: 10)')
+    parser.add_argument('--num_workers', type=int)
 
     # loss
-    parser.add_argument('--loss', default='BCELoss', choices=LOSS_NAMES,
-                        help=f"loss: {', '.join(LOSS_NAMES)} (default: BCELoss)")
-    parser.add_argument('--alpha', type=float, default=0.3, help='Tversky Loss alpha value (default: 0.3)')
-    parser.add_argument('--beta', type=float, default=0.7, help='Tversky Loss beta value (default: 0.7)')
+    parser.add_argument('--loss', choices=LOSS_NAMES,
+                        help=f"loss: {', '.join(LOSS_NAMES)}")
 
     # optimizer
-    parser.add_argument('--optimizer', default='Adam', choices=['Adam', 'SGD'],
-                        help=f"optimizer: {', '.join(['Adam', 'SGD'])} (default: Adam)")
+    parser.add_argument('--optimizer', choices=['Adam', 'SGD'],
+                        help=f"optimizer: {', '.join(['Adam', 'SGD'])}")
 
     # reproducibility
-    parser.add_argument('--seed', type=int, default=831002, help='seed (default: 831002)')
+    parser.add_argument('--seed', type=int, help='seeding')
 
     _args = parser.parse_args()
     cfg = Config(**_args.__dict__)

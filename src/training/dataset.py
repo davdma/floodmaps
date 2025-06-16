@@ -11,6 +11,87 @@ from pathlib import Path
 import ctypes
 import multiprocessing as mp
 
+class ConditionalSARDataset(Dataset):
+    """Multitemporal SAR dataset for conditional despeckled SAR generation.
+    
+    The class assumes 4 channels being:
+    1. Single-slice SAR VV
+    2. Single-slice SAR VH
+    3. Composite SAR VV
+    4. Composite SAR VH
+    
+    The 5th channel is DEM which can be toggled for visualization (NOT IMPLEMENTED YET).
+    
+    Parameters
+    ----------
+    sample_dir : str
+        Path to directory containing dataset (in npy file).
+    typ : str
+        The subset of the dataset to load: train, val, test.
+    transform : obj
+        PyTorch transform.
+    include_dem : bool
+        Whether to include the DEM channel in the output.
+    seed : int
+        Random seed.
+    """
+    def __init__(self, sample_dir, typ="train", random_flip=False, transform=None, include_dem=False, seed=3200):
+        self.sample_dir = Path(sample_dir)
+        self.typ = typ
+        self.random_flip = random_flip
+        self.transform = transform
+        self.include_dem = include_dem
+        self.seed = seed
+
+        # first load data in
+        self.dataset = np.load(self.sample_dir / f"{typ}_patches.npy")
+        self.speckled = self.dataset[:, :2, :, :]
+        self.composite = self.dataset[:, 2:4, :, :]
+        # self.dem = self.dataset[:, 4:, :, :]
+
+        if random_flip:
+            self.random = Random(seed)
+
+    def __len__(self):
+        return self.dataset.shape[0]
+
+    def __getitem__(self, idx):
+        sar_image = torch.from_numpy(self.speckled[idx])
+        clean_sar_image = torch.from_numpy(self.composite[idx])
+
+        if self.transform:
+            # for standardization only standardize the non-binary channels!
+            sar_image = self.transform(sar_image)
+            clean_sar_image = self.transform(clean_sar_image)
+
+        # if self.include_dem:
+        #     # add on dem if needed for visual purposes
+        #     dem = torch.from_numpy(self.dem[idx])
+        #     sar_image = torch.cat((sar_image, dem), dim=0)
+
+        # add random flips and rotations? Could help prevent learning constant shift...
+        if self.random_flip and self.typ == "train":
+            # perform the same flip on both the speckled and clean SAR images
+            sar_image, clean_sar_image = self.hv_random_flip(sar_image, clean_sar_image)
+
+        return sar_image, clean_sar_image
+
+    def hv_random_flip(self, x, y):
+        # Random horizontal flipping
+        if self.random.random() > 0.5:
+            x = torch.flip(x, [2])
+            y = torch.flip(y, [2])
+
+        # Random vertical flipping
+        if self.random.random() > 0.5:
+            x = torch.flip(x, [1])
+            y = torch.flip(y, [1])
+
+        return x, y
+
+    def set_include_dem(self, val):
+        self.include_dem = val
+
 class DespecklerSARDataset(Dataset):
     """An abstract class representing the SAR autodespeckler dataset. The entire dataset is
     lazily loaded into CPU memory at initialization and then retrieved by indexing. Subsetting
@@ -34,6 +115,10 @@ class DespecklerSARDataset(Dataset):
         The subset of the dataset to load: train, val, test.
     transform : obj
         PyTorch transform.
+    include_dem : bool
+        Whether to include the DEM channel in the output.
+    seed : int
+        Random seed.
     """
     def __init__(self, sample_dir, typ="train", random_flip=False, transform=None, include_dem=False, seed=3200):
         self.sample_dir = Path(sample_dir)

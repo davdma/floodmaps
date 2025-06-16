@@ -27,8 +27,9 @@ from training.scheduler import get_scheduler
 from training.loss import get_ad_loss
 from utils.config import Config
 from utils.utils import (ADEarlyStopper, Metrics, BetaScheduler, get_gradient_norm,
-                   get_model_params, print_model_params_and_grads, denormalize,
-                   TV_loss, var_laplacian, ssi, get_random_batch, enl, RIS, quality_m)
+                   get_model_params, print_model_params_and_grads)
+from utils.metrics import (denormalize, TV_loss, var_laplacian, ssi, get_random_batch,
+                    enl, RIS, quality_m)
 
 AUTODESPECKLER_NAMES = ['CNN1', 'CNN2', 'DAE', 'VAE']
 NOISE_NAMES = ['normal', 'masking', 'log_gamma']
@@ -200,9 +201,13 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
         beta_scheduler = None
 
     if cfg.train.early_stopping:
-        early_stopper = ADEarlyStopper(patience=cfg.train.patience, beta_annealing=cfg.model.vae.beta_annealing,
-                                      period=cfg.model.vae.beta_period, n_cycle=cfg.model.vae.beta_cycles,
-                                      count_cycles=False)
+        if cfg.model.autodespeckler == 'VAE':
+            early_stopper = ADEarlyStopper(patience=cfg.train.patience, beta_annealing=cfg.model.vae.beta_annealing,
+                                        period=cfg.model.vae.beta_period, n_cycle=cfg.model.vae.beta_cycles,
+                                        count_cycles=False)
+        else:
+            early_stopper = ADEarlyStopper(patience=cfg.train.patience, beta_annealing=False,
+                                        period=None, n_cycle=None, count_cycles=False)
 
     run.define_metric("val reconstruction loss", summary="min")
     minibatches = int(len(train_loader) * cfg.train.subset)
@@ -523,7 +528,6 @@ def sample_examples(model, sample_set, cfg, idxs=[14440, 3639, 7866]):
         # Channels are descaled using linear variance scaling
         X = X.permute(1, 2, 0)
 
-        row = [k]
         # inputs, outputs and their ranges for converting to grayscale
         vv = X[:, :, 0].numpy()
         en_vv = X[:, :, 2].numpy()

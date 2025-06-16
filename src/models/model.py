@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from models.unet import UNet
 from models.unet_plus import NestedUNet
-from models.autodespeckler import ConvAutoencoder1, ConvAutoencoder2, DenoiseAutoencoder, VarAutoencoder
+from models.autodespeckler import ConvAutoencoder1, ConvAutoencoder2, DenoiseAutoencoder, VarAutoencoder, CVAE
 from utils.utils import load_model_weights
 
 def build_autodespeckler(cfg):
@@ -31,8 +31,12 @@ def build_autodespeckler(cfg):
                                   noise_type=cfg.model.dae.noise_type,
                                   activation_func=cfg.model.dae.AD_activation_func)
     elif cfg.model.autodespeckler == "VAE":
-        # need to modify with new AE architecture parametersi
+        # need to modify with new AE architecture parameters
         return VarAutoencoder(latent_dim=cfg.model.vae.latent_dim) # more hyperparameters
+    elif cfg.model.autodespeckler == "CVAE":
+        # conditional VAE
+        return CVAE(in_channels=2, out_channels=2, latent_dim=cfg.model.cvae.latent_dim,
+                    unet_features=cfg.model.cvae.features)
     else:
         raise Exception('Invalid autodespeckler config.')
 

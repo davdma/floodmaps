@@ -14,6 +14,7 @@ from rasterio.vrt import WarpedVRT
 import os
 import sys
 from glob import glob
+from pathlib import Path
 from typing import List, Tuple, Dict
 from fiona.transform import transform
 
@@ -23,6 +24,13 @@ logging.basicConfig(level = logging.INFO)
 os.environ['PC_SDK_SUBSCRIPTION_KEY'] = 'a613baefa08445269838bc3bc0dfe2d9'
 PRISM_CRS = "EPSG:4269"
 SEARCH_CRS = "EPSG:4326"
+
+def is_completed(sample_dir: Path) -> bool:
+    """Check if the sample has already been processed."""
+    return sample_dir.exists() and \
+        any(sample_dir.glob("vv_*.tif")) and \
+        any(sample_dir.glob("vh_*.tif")) and \
+        any(sample_dir.glob("metadata.json"))
 
 def get_bbox(sample: str) -> Tuple[float, float, float, float]:
     with open(sample + 'metadata.json') as json_data:
@@ -54,13 +62,13 @@ def setup_logging(output_dir: str) -> logging.Logger:
     """Setup logging configuration."""
     start_time = datetime.now().strftime("%Y-%m-%d_%H-%M")
     logger = logging.getLogger('multitemporal_sar')
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
     
     # Create output directory if it doesn't exist
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     
     fh = logging.FileHandler(os.path.join(output_dir, f'multitemporal_sar_{start_time}.log'))
-    fh.setLevel(logging.INFO)
+    fh.setLevel(logging.DEBUG)
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     fh.setFormatter(formatter)
     logger.addHandler(fh)
@@ -160,6 +168,7 @@ def download_and_process_sar(items: List,
                            output_dir: str,
                            bbox: Tuple[float, float, float, float],
                            acquisitions: int,
+                           allow_missing: bool,
                            logger: logging.Logger) -> Dict[str, np.ndarray]:
     """Download and process SAR data for each acquisition date.
     
@@ -173,6 +182,8 @@ def download_and_process_sar(items: List,
         Bounding box of the search area in SEARCH_CRS = EPSG:4326.
     acquisitions : int
         Number of acquisitions to download.
+    allow_missing : bool
+        If True, allow missing data in the multitemporal SAR data.
     logger : logging.Logger
         Logger for logging messages.
 
@@ -191,6 +202,11 @@ def download_and_process_sar(items: List,
     # choose one sample to extract reference parameters
     crs = pe.ext(items[0]).crs_string
     for item in items:
+        # skip if item has no vv or vh
+        if "vv" not in item.assets or "vh" not in item.assets:
+            logger.info(f"Skipping {item.id} due to missing vv or vh")
+            continue
+
         date = item.datetime.strftime('%Y-%m-%d')
         if date in items_by_date:
             items_by_date[date].append(item)
@@ -246,8 +262,16 @@ def download_and_process_sar(items: List,
 
             # skip if vv or vh contains no data
             if np.any(vv_image[0] <= 0) or np.any(vh_image[0] <= 0):
-                logger.info(f"Missing data found for date: {date}. Skipping...")
-                continue
+                if allow_missing:
+                    logger.info(f"Missing data found for date: {date}.")
+                    # only skip if missing data percentage is greater than 30%
+                    missing_percentage = np.sum(vv_image[0] <= 0) / vv_image[0].size
+                    if missing_percentage > 0.3:
+                        logger.info(f"Missing data percentage {missing_percentage * 100}% is greater than 30%. Skipping...")
+                        continue
+                else:
+                    logger.info(f"Missing data found for date: {date}. Skipping...")
+                    continue
 
             vv_db = db_scale(vv_image[0])
             vh_db = db_scale(vh_image[0])
@@ -333,7 +357,7 @@ def save_multitemporal(temporal_data: Dict[str, np.ndarray],
 
 def download_multi(search_bbox: Tuple[float, float, float, float], search_start_dt: object,
                 search_end_dt: object, event_dt: object, acquisitions: int, time_interval: int, 
-                num_days: int, output_dir: str, eid: str, logger: logging.Logger):
+                num_days: int, allow_missing: bool, output_dir: str, eid: str, logger: logging.Logger):
     """Downloads and composites SAR data for a given time interval and stack size.
     
     Parameters
@@ -352,10 +376,14 @@ def download_multi(search_bbox: Tuple[float, float, float, float], search_start_
         Time interval in days used as sliding window to find acquisitions.
     num_days : int
         Number of days before and after the flood event date to avoid sampling.
+    allow_missing : bool
+        If True, allow missing data in the multitemporal SAR data.
     output_dir : str
         Output directory for saving files.
     eid : str
         Event ID of the flood event.
+    logger : logging.Logger
+        Logger for logging messages.
     """
     # should log and save the time interval of composite: i.e. the date of the
     # first and last acquisitions
@@ -366,6 +394,7 @@ def download_multi(search_bbox: Tuple[float, float, float, float], search_start_
     current_start = search_start_dt
     current_end = current_start + timedelta(days=time_interval)
     found = False
+    fails = 0
     while current_end <= search_end_dt:
         # if search interval within num_days of event_date, skip
         if (event_dt - current_end).days < num_days and (current_start - event_dt).days < num_days:
@@ -380,12 +409,22 @@ def download_multi(search_bbox: Tuple[float, float, float, float], search_start_
         if len(items) >= acquisitions:
             logger.info(f'{len(items)} >= {acquisitions} minimum acquisitions found...')
             # Download and process SAR data
-            temporal_data, metadata = download_and_process_sar(items, args.output_dir, search_bbox, acquisitions, logger)
+            temporal_data, metadata = download_and_process_sar(items, args.output_dir,
+                                                              search_bbox, acquisitions,
+                                                              allow_missing,
+                                                              logger)
             if temporal_data is None:
                 logger.debug(f"Not enough data found after merging. Trying next interval...")
+                fails += 1
             else:
                 found = True
                 break
+
+        if fails >= 3:
+            logger.error(f"No SAR scenes found after 3 consecutive failed download attempts. Skipping search for bbox {search_bbox} \
+                        with time interval {time_interval} between {search_start_dt} and {search_end_dt}.")
+            return
+
         current_start += timedelta(days=time_interval)
         current_end = current_start + timedelta(days=time_interval)
 
@@ -393,7 +432,7 @@ def download_multi(search_bbox: Tuple[float, float, float, float], search_start_
         error_msg = f"No SAR scenes found. Skipping search for bbox {search_bbox} \
                     with time interval {time_interval} between {search_start_dt} and {search_end_dt}."
         logger.error(error_msg)
-        return 1
+        return
     
     # Create and save multitemporal composite
     metadata.update({'search_start_dt': current_start.strftime('%Y-%m-%d'),
@@ -409,7 +448,7 @@ def download_multi(search_bbox: Tuple[float, float, float, float], search_start_
 
 
 def main(output_dir: str, time_interval: int, acquisitions: int, num_days: int,
-        bbox: Tuple[float, float, float, float]):
+        bbox: Tuple[float, float, float, float], allow_missing: bool):
     """Initializes multitemporal SAR data collection. Compositing should be done
     during preprocessing of the data, not here.
 
@@ -432,6 +471,8 @@ def main(output_dir: str, time_interval: int, acquisitions: int, num_days: int,
         Number of days before and after flood event date to avoid sampling.
     bbox : Tuple[float, float, float, float]
         Bounding box of the search area in PRISM_CRS = EPSG:4269.
+    allow_missing : bool
+        If True, allow missing data in the multitemporal SAR data.
     """
     # Setup logging
     logger = setup_logging(output_dir)
@@ -451,13 +492,19 @@ def main(output_dir: str, time_interval: int, acquisitions: int, num_days: int,
 
         search_bbox = (conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1])
         download_multi(search_bbox, search_start_dt, search_end_dt, event_dt,
-                        acquisitions, time_interval, num_days, output_dir, eid, logger)
+                        acquisitions, time_interval, num_days, allow_missing, output_dir, eid, logger)
     else:
         # get all bboxes in the sample directory
         samples = glob('samples_200_6_4_10_sar/*_*_*/')
         test = 0
         for sample in samples:
+            # first check if the sample has already been processed
             eid = sample.split('/')[-2]
+            sample_dir = Path(output_dir) / eid
+            if is_completed(sample_dir):
+                logger.info(f"Sample {eid} already processed. Skipping...")
+                continue
+
             event_date, minx, miny, maxx, maxy = get_bbox(sample)
             conversion = transform(PRISM_CRS, SEARCH_CRS, (minx, maxx), (miny, maxy))
             search_bbox = (conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1])
@@ -465,8 +512,7 @@ def main(output_dir: str, time_interval: int, acquisitions: int, num_days: int,
 
             logger.info(f'Downloading multitemporal sar for EID {eid}...')
             download_multi(search_bbox, search_start_dt, search_end_dt, event_dt,
-                        acquisitions, time_interval, num_days, output_dir, eid, logger)
-            break
+                        acquisitions, time_interval, num_days, allow_missing, output_dir, eid, logger)
     
     return 0
 
@@ -483,6 +529,8 @@ if __name__ == '__main__':
                         help='Days before and after flood event date to avoid sampling')
     parser.add_argument('--bbox', nargs=4, type=float, default=None,
                       help='Bounding box coordinates (minx miny maxx maxy) in EPSG:4326')
+    parser.add_argument('--allow_missing', action='store_true',
+                        help='Allow missing data in the time interval')
     
     args = parser.parse_args()
-    sys.exit(main(args.output_dir, args.time_interval, args.acquisitions, args.num_days, args.bbox))
+    sys.exit(main(args.output_dir, args.time_interval, args.acquisitions, args.num_days, args.bbox, args.allow_missing))

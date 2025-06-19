@@ -1,10 +1,10 @@
 import torch
 from torch import nn
 from torchvision import transforms
-from model import WaterPixelDetector, SARClassifier
-from architectures.unet import UNet
-from architectures.unet_plus import NestedUNet
-from architectures.discriminator import Classifier1, Classifier2, Classifier3
+from models.model import S2WaterDetector, SARClassifier
+from models.unet import UNet
+from models.unet_plus import NestedUNet
+from models.discriminator import Classifier1, Classifier2, Classifier3
 from utils import trainMeanStd, ChannelIndexer, SARChannelIndexer
 from glob import glob
 from datetime import datetime
@@ -49,7 +49,7 @@ def get_detector(name, n_channels, dropout, load_classifier_path="", load_discri
     discriminator = Classifier1(n_channels).to('cpu')
     discriminator.load_state_dict(torch.load(load_discriminator_path, map_location=torch.device('cpu')))
 
-    detector = WaterPixelDetector(model, n_channels=n_channels, discriminator=discriminator)
+    detector = S2WaterDetector(model, n_channels=n_channels, discriminator=discriminator)
     detector.eval()
     return detector
 
@@ -77,7 +77,7 @@ def get_classifier_s2(name, n_channels, dropout, load_classifier_path=""):
     else:
         raise Exception("model unknown")
     model.load_state_dict(torch.load(load_classifier_path, map_location=torch.device('cpu')))
-    detector = WaterPixelDetector(model, n_channels=n_channels)
+    detector = S2WaterDetector(model, n_channels=n_channels)
     detector.eval()
     return detector
 

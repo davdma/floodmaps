@@ -2,7 +2,15 @@ import torch
 from torch import nn
 from models.unet import UNet
 from models.unet_plus import NestedUNet
-from models.autodespeckler import ConvAutoencoder1, ConvAutoencoder2, DenoiseAutoencoder, VarAutoencoder, CVAE
+from models.discriminator import Classifier1, Classifier2, Classifier3
+from models.autodespeckler import (
+    ConvAutoencoder1, 
+    ConvAutoencoder2, 
+    DenoiseAutoencoder, 
+    VarAutoencoder, 
+    CVAE,
+    CVAE_no_cond
+)
 from utils.utils import load_model_weights
 
 def build_autodespeckler(cfg):
@@ -34,9 +42,13 @@ def build_autodespeckler(cfg):
         # need to modify with new AE architecture parameters
         return VarAutoencoder(latent_dim=cfg.model.vae.latent_dim) # more hyperparameters
     elif cfg.model.autodespeckler == "CVAE":
+        if cfg.model.cvae.no_cond:
+            # TEMP: conditional VAE without conditioning signal in the encoder
+            return CVAE_no_cond(in_channels=2, out_channels=2, latent_dim=cfg.model.cvae.latent_dim,
+                                unet_features=cfg.model.cvae.features, dropout=cfg.model.cvae.decoder_dropout)
         # conditional VAE
         return CVAE(in_channels=2, out_channels=2, latent_dim=cfg.model.cvae.latent_dim,
-                    unet_features=cfg.model.cvae.features)
+                    unet_features=cfg.model.cvae.features, dropout=cfg.model.cvae.decoder_dropout)
     else:
         raise Exception('Invalid autodespeckler config.')
 
@@ -58,45 +70,139 @@ def build_sar_classifier(cfg):
     else:
         raise Exception('Invalid classifier config.')
 
-class WaterPixelDetector(nn.Module):
-    """General S2 water pixel detection model with classifier and optional discriminator.
+def build_multispectral_classifier(cfg):
+    """Factory function for S2 classifier model construction.
 
     Parameters
     ----------
-    model : obj
-        UNet or UNet++ classifer or any water segmentation model.
-    n_channels : int
-        Number of input channels used.
-    size : int
-        Size of input patches.
-    discriminator : obj, optional
-        Discriminator predicts whether a patch contains water first. If water is present in the
-        patch, the classifier is then used to label the areas of water presence.
+    cfg : obj
+        S2 model config instance specified in config.py.
     """
-    def __init__(self, model, n_channels=5, size=64, discriminator=None):
+    n_channels = sum([bool(int(x)) for x in cfg.data.channels])
+    if cfg.model.classifier == "unet":
+        return UNet(n_channels, dropout=cfg.model.unet.dropout).to('cpu')
+    elif cfg.model.classifier == "unet++":
+        return NestedUNet(n_channels, dropout=cfg.model.unetpp.dropout, deep_supervision=cfg.model.unetpp.deep_supervision).to('cpu')
+    else:
+        raise Exception("model unknown")
+
+def build_multispectral_discriminator(cfg):
+    """Factory function for S2 discriminator model construction. Discriminators
+    are an optional component to reduce computational cost for dry patches.
+
+    Note: currently discriminators are defunct. New discriminators will be implemented in the future.
+
+    Parameters
+    ----------
+    cfg : obj
+        S2 model config instance specified in config.py.
+    """
+    n_channels = sum([bool(int(x)) for x in cfg.data.channels])
+    if cfg.model.discriminator is None:
+        return None
+    elif cfg.model.discriminator == "classifier1":
+        return Classifier1(n_channels).to('cpu')
+    elif cfg.model.discriminator == "classifier2":
+        return Classifier2(n_channels).to('cpu')
+    elif cfg.model.discriminator == "classifier3":
+        return Classifier3(n_channels).to('cpu')
+    else:
+        raise Exception("discriminator unknown")
+
+class S2WaterDetector(nn.Module):
+    """General S2 water pixel detection model with classifier and optional discriminator.
+    The discriminator is an optional component to reduce computational cost for dry patches
+    by only running the classifier on patches containing water.
+
+    Parameters
+    ----------
+    cfg: obj
+        S2 classifier config instance as defined in config.py.
+    """
+    def __init__(self, cfg): # model, n_channels=5, size=64, discriminator=None):
         super().__init__()
-        self.model = model
-        self.discriminator = discriminator
-        self.n_channels = n_channels
-        self.size = size
+        self.cfg = cfg
+        self.size = cfg.data.size
+        self.n_channels = sum([bool(int(x)) for x in cfg.data.channels])
+        self.classifier = build_multispectral_classifier(cfg)
+        self.discriminator = build_multispectral_discriminator(cfg)
+
+        # load weights
+        if cfg.model.weights is not None:
+            self.load_classifier_weights(cfg.model.weights)
+        if cfg.model.discriminator is not None and cfg.model.discriminator.weights is not None:
+            self.load_discriminator_weights(cfg.model.discriminator.weights)
+
+    def get_classifier(self):
+        return self.classifier
+
+    def get_discriminator(self):
+        return self.discriminator
+
+    def uses_discriminator(self):
+        return self.discriminator is not None
+
+    def load_discriminator_weights(self, weight_path):
+        """
+        Load weights for the discriminator from a .pth file.
+
+        Parameters
+        ----------
+        weight_path : str
+            Path to the .pth file containing the discriminator weights.
+        device: torch.device
+        """
+        try:
+            load_model_weights(self.discriminator, weight_path, device='cpu',
+                                model_name=f"{self.cfg.model.discriminator} discriminator")
+        except RuntimeError as e:
+            print(f"Error loading discriminator weights: {e}")
+            print("Attempting to load weights from old model without discriminator prefix...")
+            state_dict = torch.load(weight_path, map_location='cpu')
+            new_state_dict = {k.replace("discriminator.", ""): v for k, v in state_dict.items()}
+            self.discriminator.load_state_dict(new_state_dict)
+            print(f"{self.cfg.model.discriminator} discriminator weights loaded successfully.")
+
+    def load_classifier_weights(self, weight_path):
+        """
+        Load weights for the sar classifier from a .pth file.
+
+        Parameters
+        ----------
+        weight_path : str
+            Path to the .pth file containing the autodespeckler weights.
+        device: torch.device
+        """
+        try:
+            load_model_weights(self.classifier, weight_path, device='cpu',
+                               model_name=f"{self.cfg.model.classifier} classifier")
+        except RuntimeError as e:
+            print(f"Error loading classifier weights: {e}")
+            print("Attempting to load weights from old model without classifier prefix...")
+            state_dict = torch.load(weight_path, map_location='cpu')
+            new_state_dict = {k.replace("classifier.", ""): v for k, v in state_dict.items()}
+            self.classifier.load_state_dict(new_state_dict, strict=False)
+            print(f"{self.cfg.model.classifier} classifier weights loaded successfully.")
 
     def forward(self, x):
-        # assume x = [1, n_channels, SIZE, SIZE]
-        assert x.shape[0] == 1 and x.shape[1] == self.n_channels and x.shape[2] == self.size and x.shape[3] == self.size, "invalid shape"
+        # x: [B, n_channels, SIZE, SIZE]
+        assert x.shape[1] == self.n_channels and x.shape[2] == self.size and x.shape[3] == self.size, "invalid shape"
+        B = x.shape[0]
+        device = x.device
         if self.discriminator is not None:
-            wet = self.discriminator(x)
-            if wet > 0.5:
-                logits = self.model(x)
-                pred = torch.where(nn.functional.sigmoid(logits) > 0.5, 1.0, 0.0).byte()
-            else:
-                pred = torch.zeros((1, 1, self.size, self.size), dtype=torch.uint8)
+            wet_probs = self.discriminator(x).view(-1)  # [B]
+            wet_mask = wet_probs > 0.5  # [B] boolean
+            pred = torch.zeros((B, 1, self.size, self.size), dtype=torch.uint8, device=device)
+            if wet_mask.any():
+                logits = self.classifier(x[wet_mask])  # [N_wet, 1, SIZE, SIZE]
+                pred_wet = torch.where(nn.functional.sigmoid(logits) > 0.5, 1.0, 0.0).byte()
+                pred[wet_mask] = pred_wet
         else:
-            logits = self.model(x)
-            pred = torch.where(nn.functional.sigmoid(logits) > 0.5, 1.0, 0.0).byte() # [1, 1, SIZE, SIZE]
-
+            logits = self.classifier(x)
+            pred = torch.where(nn.functional.sigmoid(logits) > 0.5, 1.0, 0.0).byte() # [B, 1, SIZE, SIZE]
         return pred
 
-class SARPixelDetector(nn.Module):
+class SARWaterDetector(nn.Module):
     """General S1 water pixel detection model with classifier and optional autodespeckler.
     The autodespeckler is an autoencoder for the SAR channels that aimed to extract salient features
     from speckled SAR data for improving labeling performance.
@@ -116,6 +222,12 @@ class SARPixelDetector(nn.Module):
         self.autodespeckler = (build_autodespeckler(ad_cfg)
                                 if ad_cfg is not None else None)
 
+        # load weights
+        if cfg.model.weights is not None:
+            self.load_classifier_weights(cfg.model.weights)
+        if ad_cfg is not None and cfg.model.autodespeckler.ad_weights is not None:
+            self.load_autodespeckler_weights(cfg.model.autodespeckler.ad_weights)
+
     def get_classifier(self):
         return self.classifier
 
@@ -125,7 +237,7 @@ class SARPixelDetector(nn.Module):
     def uses_autodespeckler(self):
         return self.autodespeckler is not None
 
-    def load_autodespeckler_weights(self, weight_path, device):
+    def load_autodespeckler_weights(self, weight_path):
         """
         Load weights for the autodespeckler from a .pth file.
 
@@ -133,36 +245,34 @@ class SARPixelDetector(nn.Module):
         ----------
         weight_path : str
             Path to the .pth file containing the autodespeckler weights.
-        device: torch.device
         """
         try:
-            load_model_weights(self.autodespeckler, weight_path, device,
+            load_model_weights(self.autodespeckler, weight_path, device='cpu',
                                 model_name=f"{self.ad_cfg.model.autodespeckler} autodespeckler")
         except RuntimeError as e:
             print(f"Error loading autodespeckler weights: {e}")
             print("Attempting to load weights from old model without autodespeckler prefix...")
-            state_dict = torch.load(weight_path, map_location=device)
+            state_dict = torch.load(weight_path, map_location='cpu')
             new_state_dict = {k.replace("autodespeckler.", ""): v for k, v in state_dict.items()}
             self.autodespeckler.load_state_dict(new_state_dict)
             print(f"{self.ad_cfg.model.autodespeckler} autodespeckler weights loaded successfully.")
 
-    def load_classifier_weights(self, weight_path, device):
+    def load_classifier_weights(self, weight_path):
         """
         Load weights for the sar classifier from a .pth file.
 
         Parameters
         ----------
         weight_path : str
-            Path to the .pth file containing the autodespeckler weights.
-        device: torch.device
+            Path to the .pth file containing the classifier weights.
         """
         try:
-            load_model_weights(self.classifier, weight_path, device,
+            load_model_weights(self.classifier, weight_path, device='cpu',
                                model_name=f"{self.cfg.model.classifier} classifier")
         except RuntimeError as e:
             print(f"Error loading classifier weights: {e}")
             print("Attempting to load weights from old model without classifier prefix...")
-            state_dict = torch.load(weight_path, map_location=device)
+            state_dict = torch.load(weight_path, map_location='cpu')
             new_state_dict = {k.replace("classifier.", ""): v for k, v in state_dict.items()}
             self.classifier.load_state_dict(new_state_dict, strict=False)
             print(f"{self.cfg.model.classifier} classifier weights loaded successfully.")

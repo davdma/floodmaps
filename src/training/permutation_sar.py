@@ -20,7 +20,7 @@ import pickle
 import json
 from pathlib import Path
 
-from models.model import SARPixelDetector
+from models.model import SARWaterDetector
 from utils.config import Config
 from utils.utils import (SRC_DIR, RESULTS_DIR, SARChannelIndexer)
 from training.loss import LossConfig
@@ -140,7 +140,7 @@ def permutation_importance(cfg, ad_cfg=None, dir_path=None):
     )
 
     # setup model
-    model = SARPixelDetector(cfg, ad_cfg=ad_cfg).to(device)
+    model = SARWaterDetector(cfg, ad_cfg=ad_cfg).to(device)
 
     # load weights
     if cfg.model.weights is not None:

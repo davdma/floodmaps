@@ -21,7 +21,7 @@ import pickle
 import json
 from pathlib import Path
 
-from models.model import SARPixelDetector
+from models.model import SARWaterDetector
 from utils.config import Config
 from utils.utils import (SRC_DIR, RESULTS_DIR, Metrics, EarlyStopper,
                          SARChannelIndexer, get_model_params)
@@ -609,13 +609,7 @@ def run_experiment_s1(cfg, ad_cfg=None):
     )
 
     # setup model
-    model = SARPixelDetector(cfg, ad_cfg=ad_cfg).to(device)
-
-    # load weights
-    if cfg.model.weights is not None:
-        model.load_classifier_weights(cfg.model.weights, device)
-    if cfg.model.autodespeckler.ad_weights is not None:
-        model.load_autodespeckler_weights(cfg.model.autodespeckler.ad_weights, device)
+    model = SARWaterDetector(cfg, ad_cfg=ad_cfg).to(device)
 
     # freeze AD weights
     if ad_cfg is not None and cfg.model.autodespeckler.freeze:

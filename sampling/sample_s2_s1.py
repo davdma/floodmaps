@@ -338,8 +338,8 @@ def sar_missing_percentage(dir_path, item, item_crs, bbox):
     return int((np.sum(out_image <= 0) / out_image.size) * 100)
 
 # we will choose a UTM zone CRS already given and stick to it for rest of sample data!
-def pipeline_S2(dir_path, save_as, dst_crs, item, bbox):
-    """Generates RGB raster of S2 multispectral file.
+def pipeline_TCI(dir_path, save_as, dst_crs, item, bbox):
+    """Generates TCI (True Color Image) raster of S2 multispectral file.
 
     Parameters
     ----------
@@ -1005,8 +1005,8 @@ def event_sample_sar(threshold, days_before, days_after, maxcoverpercentage, wit
                 continue
             else:
                 s2_completed_dt.add(dt)
-            dst_shape, dst_transform = pipeline_S2(dir_path, f'tci_{dt}_{eid}', valid_crs, item, cbbox)
-            logger.debug(f'S2 raster completed for {dt}.')
+            dst_shape, dst_transform = pipeline_TCI(dir_path, f'tci_{dt}_{eid}', valid_crs, item, cbbox)
+            logger.debug(f'TCI raster completed for {dt}.')
             pipeline_B08(dir_path, f'b08_{dt}_{eid}', valid_crs, item, cbbox)
             logger.debug(f'B08 raster completed for {dt}.')
             pipeline_NDWI(dir_path, f'ndwi_{dt}_{eid}', valid_crs, item, cbbox)

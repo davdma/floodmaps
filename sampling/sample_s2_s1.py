@@ -371,6 +371,37 @@ def pipeline_TCI(dir_path, save_as, dst_crs, item, bbox):
 
     return (out_image.shape[-2], out_image.shape[-1]), out_transform
 
+def pipeline_RGB(dir_path, save_as, dst_crs, item, bbox):
+    """Generates B02 (B), B03 (G), B04 (R) rasters of S2 multispectral file.
+
+    Parameters
+    ----------
+    dir_path : str
+        Path for saving generated raster. 
+    save_as : str
+        Name of file to be saved (do not include extension!).
+    dst_crs : obj
+        Coordinate reference system of output raster.
+    items : list[Item]
+        List of PyStac Item objects.
+    box : (float, float, float, float)
+        Tuple in the order minx, miny, maxx, maxy, representing bounding box, 
+        should be in CRS specified by dst_crs.
+    """
+    b02_item_href = planetary_computer.sign(item.assets["B02"].href) # B
+    b03_item_href = planetary_computer.sign(item.assets["B03"].href) # G
+    b04_item_href = planetary_computer.sign(item.assets["B04"].href) # R
+
+    # stack the three bands as rgb channels
+    blue_image, out_transform = rasterio.merge.merge([b02_item_href], bounds=bbox, nodata=0)
+    green_image, _ = rasterio.merge.merge([b03_item_href], bounds=bbox, nodata=0)
+    red_image, _ = rasterio.merge.merge([b04_item_href], bounds=bbox, nodata=0)
+
+    out_image = np.stack([red_image, green_image, blue_image], axis=0)
+
+    with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=3, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=0) as dst:
+        dst.write(out_image)
+
 def pipeline_B08(dir_path, save_as, dst_crs, item, bbox):
     """Generates NIR B8 band raster of S2 multispectral file.
 
@@ -1007,6 +1038,7 @@ def event_sample_sar(threshold, days_before, days_after, maxcoverpercentage, wit
                 s2_completed_dt.add(dt)
             dst_shape, dst_transform = pipeline_TCI(dir_path, f'tci_{dt}_{eid}', valid_crs, item, cbbox)
             logger.debug(f'TCI raster completed for {dt}.')
+            pipeline_RGB(dir_path, f'rgb_{dt}_{eid}', valid_crs, item, cbbox)
             pipeline_B08(dir_path, f'b08_{dt}_{eid}', valid_crs, item, cbbox)
             logger.debug(f'B08 raster completed for {dt}.')
             pipeline_NDWI(dir_path, f'ndwi_{dt}_{eid}', valid_crs, item, cbbox)

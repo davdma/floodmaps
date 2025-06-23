@@ -1039,6 +1039,7 @@ def event_sample_sar(threshold, days_before, days_after, maxcoverpercentage, wit
             dst_shape, dst_transform = pipeline_TCI(dir_path, f'tci_{dt}_{eid}', valid_crs, item, cbbox)
             logger.debug(f'TCI raster completed for {dt}.')
             pipeline_RGB(dir_path, f'rgb_{dt}_{eid}', valid_crs, item, cbbox)
+            logger.debug(f'RGB raster completed for {dt}.')
             pipeline_B08(dir_path, f'b08_{dt}_{eid}', valid_crs, item, cbbox)
             logger.debug(f'B08 raster completed for {dt}.')
             pipeline_NDWI(dir_path, f'ndwi_{dt}_{eid}', valid_crs, item, cbbox)

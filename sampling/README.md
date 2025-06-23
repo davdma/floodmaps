@@ -4,6 +4,11 @@ The method for data collection is as follows:
 * The resulting captures are stored in event directories, where each "event" we denote simply as a cell we queried with a high precipitation event at a specified date.
 * Each event has an event id or "eid" in the format `YYYYMMDD_YCoord_XCoord` where `YCoord` and `XCoord` is the position of the cell on the grid defined by the PRISM dataset.
 
+Scripts for downloading PRISM and supplementary datasets:
+* `get_prism.py` - for downloading OR updating PRISM precipitation files and data.
+* `get_supplementary.py` - for downloading TIGER roads, NHD, DEM, NLCD data.
+    * For the DEM data you will need to filter for 1/3 arc second DEM and download the txt file of products via https://apps.nationalmap.gov/downloader/ and save as `neddownload.txt`.
+
 There are several sampling scripts:
 * `sample_mpc.py` - this is for downloading the Sentinel-2 L2A Microsoft Planetary Computer dataset alongside any ancillary data (DEM, roads, flowlines, waterbodies etc.). This should be run to produce the S2 dataset used for training the optical model. NOTE: this is now deprecated so avoid using this script, use `sample_s2_s1.py` instead.
 * `sample_s2_s1.py` - this is for downloading both Sentinel-2 L2A Microsoft Planetary Computer dataset and Sentinel-1 GRD Microsoft Planetary Computer dataset captures that are temporally coincident. You will most likely only need to run this to produce the SAR dataset used for training the SAR model.

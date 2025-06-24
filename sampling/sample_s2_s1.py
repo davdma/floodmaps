@@ -18,8 +18,11 @@ import fiona
 import shutil
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+from matplotlib.colors import to_rgb
 from osgeo import gdal, ogr
-from rasterio.warp import calculate_default_transform, reproject, Resampling
+from rasterio.transform import array_bounds
+from rasterio.windows import from_bounds, Window
+from rasterio.warp import calculate_default_transform, reproject, Resampling, transform_bounds
 from rasterio.features import rasterize
 import rasterio.merge
 import rasterio
@@ -37,9 +40,48 @@ import tensorflow as tf
 
 PRISM_CRS = "EPSG:4269"
 SEARCH_CRS = "EPSG:4326"
+NLCD_RANGE = get_nlcd_range()
+
+# NLCD color mapping dictionary
+nlcd_colors = {
+    11: '#486da2',    # Open Water
+    12: '#e7effc',    # Perennial Ice/Snow
+    21: '#e1cdce',    # Developed, Open Space
+    22: '#dc9881',    # Developed, Low Intensity 
+    23: '#f10100',    # Developed, Medium Intensity
+    24: '#ab0101',    # Developed, High Intensity
+    31: '#b3afa4',    # Barren Land
+    41: '#6ca966',    # Deciduous Forest
+    42: '#1d6533',    # Evergreen Forest
+    43: '#bdcc93',    # Mixed Forest
+    51: '#b19943',    # Dwarf Scrub
+    52: '#d1bb82',    # Shrub/Scrub
+    71: '#edeccd',    # Grassland/Herbaceous
+    72: '#d0d181',    # Sedge/Herbaceous
+    73: '#a4cc51',    # Lichens
+    74: '#82ba9d',    # Moss
+    81: '#ddd83d',    # Pasture/Hay
+    82: '#ae7229',    # Cultivated Crops
+    90: '#bbd7ed',    # Woody Wetlands
+    95: '#71a4c1',     # Emergent Herbaceous Wetlands
+    250: '#000000'     # Missing
+}
+nlcd_code_to_rgb = {
+    code: tuple(int(255 * c) for c in to_rgb(hex_color))
+    for code, hex_color in nlcd_colors.items()
+}
 
 class NoElevationError(Exception):
     pass
+
+def get_nlcd_range():
+    """Returns a tuple of the earliest and latest year for which NLCD data is available."""
+    nlcd_files = glob('NLCD/LndCov*.tif')
+    if len(nlcd_files) == 0:
+        raise FileNotFoundError('No NLCD files found. Please run get_supplementary.py to download NLCD data.')
+    p = re.compile(r'LndCov(\d{4}).tif')
+    nlcd_years = [int(p.search(file).group(1)) for file in nlcd_files]
+    return min(nlcd_years), max(nlcd_years)
 
 def read_PRISM():
     """Reads the PRISM netCDF file and return the encoded data."""
@@ -314,6 +356,7 @@ def colormap_to_rgb(arr, cmap='viridis', r=None, no_data=None):
     rgb_array = np.zeros((3, arr.shape[0], arr.shape[1]), dtype=np.uint8)
 
     # Copy the RGB values from the colored_array to each channel
+    # Missing data will be all black (0, 0, 0)
     for i in range(3):
         rgb_array[i, :, :] = ma.filled(colored_array[:, :, i], 0)
 
@@ -366,7 +409,7 @@ def pipeline_TCI(dir_path, save_as, dst_crs, item, bbox):
 
     out_image, out_transform = rasterio.merge.merge([item_href], bounds=bbox, nodata=0)
 
-    with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=3, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=0) as dst:
+    with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=3, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=None) as dst:
         dst.write(out_image)
 
     return (out_image.shape[-2], out_image.shape[-1]), out_transform
@@ -461,7 +504,8 @@ def pipeline_NDWI(dir_path, save_as, dst_crs, item, bbox):
     # before writing to file, we will make matplotlib colormap!
     ndwi_colored = colormap_to_rgb(ndwi, cmap='seismic_r', r=(-1.0, 1.0), no_data=-999999)
     
-    with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=ndwi_colored.shape[-2], width=ndwi_colored.shape[-1], crs=dst_crs, dtype=ndwi_colored.dtype, transform=out_transform, nodata=0) as dst:
+    # nodata should not be set for cmap files
+    with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=ndwi_colored.shape[-2], width=ndwi_colored.shape[-1], crs=dst_crs, dtype=ndwi_colored.dtype, transform=out_transform, nodata=None) as dst:
         dst.write(ndwi_colored)
 
 def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, buffer=0):
@@ -597,7 +641,7 @@ def pipeline_dem_slope(dir_path, save_as, dst_shape, dst_crs, dst_transform, bou
         dst.write(destination, 1)
 
     # save dem cmap
-    with rasterio.open(dir_path + save_as[0] + '_cmap.tif', 'w', driver='Gtiff', count=3, height=dem_cmap.shape[-2], width=dem_cmap.shape[-1], crs=dst_crs, dtype=dem_cmap.dtype, transform=dst_transform, nodata=0) as dst:
+    with rasterio.open(dir_path + save_as[0] + '_cmap.tif', 'w', driver='Gtiff', count=3, height=dem_cmap.shape[-2], width=dem_cmap.shape[-1], crs=dst_crs, dtype=dem_cmap.dtype, transform=dst_transform, nodata=None) as dst:
         dst.write(dem_cmap)
 
     rda = rd.rdarray(destination, no_data=no_data)
@@ -612,7 +656,7 @@ def pipeline_dem_slope(dir_path, save_as, dst_shape, dst_crs, dst_transform, bou
 
     # cmap slope
     with rasterio.open(dir_path + save_as[1] + '_cmap.tif', 'w', driver='Gtiff', count=3, height=nprda_cmap.shape[-2], width=nprda_cmap.shape[-1], 
-                           crs=dst_crs, dtype=nprda_cmap.dtype, transform=dst_transform, nodata=0) as dst:
+                           crs=dst_crs, dtype=nprda_cmap.dtype, transform=dst_transform, nodata=None) as dst:
         dst.write(nprda_cmap)
 
 def pipeline_flowlines(dir_path, save_as, dst_shape, dst_crs, dst_transform, bbox, buffer=3, filter=['460\d{2}', '558\d{2}', '336\d{2}', '334\d{2}', '42801', '42802', '42805', '42806', '42809']):
@@ -683,7 +727,7 @@ def pipeline_flowlines(dir_path, save_as, dst_shape, dst_crs, dst_transform, bbo
         dst.write(flowlines, 1)
 
     # flowlines cmap
-    with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_flowlines.shape[-2], width=rgb_flowlines.shape[-1], crs=dst_crs, dtype=rgb_flowlines.dtype, transform=dst_transform, nodata=0) as dst:
+    with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_flowlines.shape[-2], width=rgb_flowlines.shape[-1], crs=dst_crs, dtype=rgb_flowlines.dtype, transform=dst_transform, nodata=None) as dst:
         dst.write(rgb_flowlines)
 
 def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, bbox):
@@ -750,8 +794,85 @@ def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, bbo
         dst.write(waterbody, 1)
 
     # waterbody cmap
-    with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_waterbody.shape[-2], width=rgb_waterbody.shape[-1], crs=dst_crs, dtype=rgb_waterbody.dtype, transform=dst_transform, nodata=0) as dst:
+    with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_waterbody.shape[-2], width=rgb_waterbody.shape[-1], crs=dst_crs, dtype=rgb_waterbody.dtype, transform=dst_transform, nodata=None) as dst:
         dst.write(rgb_waterbody)
+
+def pipeline_NLCD(dir_path, save_as, year, dst_shape, dst_crs, dst_transform, bbox):
+    """Generates raster with NLCD land cover classes. Uses windowed reading of NLCD raster
+    for speed (NLCD files are large).
+    
+    Parameters
+    ----------
+    dir_path : str
+        Path for saving generated raster. 
+    save_as : str
+        Name of file to be saved (no file extension!).
+    year : int
+        Year of NLCD data to use.
+    dst_shape : (int, int)
+        Shape of output raster.
+    dst_crs : str
+        Coordinate reference system of output raster.
+    dst_transform : rasterio.affine.Affine()
+        Transformation matrix for mapping pixel coordinates to coordinate system of output raster.
+    bbox : (float, float, float, float)
+        Tuple in the order minx, miny, maxx, maxy, representing bounding box.
+    """
+    # if year is after the most recent year, use the most recent year
+    if year > NLCD_RANGE[1]:
+        year = NLCD_RANGE[1]
+    elif year < NLCD_RANGE[0]:
+        year = NLCD_RANGE[0]
+
+    nlcd_file = f'NLCD/LndCov{year}.tif'
+    with rasterio.open(nlcd_file) as src:
+        # data array is of type uint8
+        nlcd_crs = src.crs
+        nlcd_transform = src.transform
+
+        # get bounds of destination raster in NLCD CRS for making window
+        dst_bounds = array_bounds(dst_shape[-2], dst_shape[-1], dst_transform)
+        dst_bounds_in_nlcd_crs = transform_bounds(dst_crs, nlcd_crs, *dst_bounds)
+
+        # now get window in nlcd raster, all in pixels not coordinates
+        nlcd_window = from_bounds(*dst_bounds_in_nlcd_crs, transform=nlcd_transform)
+
+        # pad bounds by one pixel for additional context
+        padded_nlcd_window = Window(nlcd_window.col_off - 1, nlcd_window.row_off - 1, nlcd_window.width + 2, nlcd_window.height + 2)
+
+        nlcd_data = src.read(1, window=padded_nlcd_window)
+        window_transform = src.window_transform(padded_nlcd_window)
+
+    # reproject to obtain NLCD raster in AOI
+    nlcd_arr = np.empty(dst_shape, dtype=np.uint8)
+    _, out_transform = reproject(
+        source=nlcd_data,
+        destination=nlcd_arr,
+        src_transform=window_transform,
+        src_crs=nlcd_crs,
+        dst_transform=dst_transform,
+        dst_crs=dst_crs,
+        dst_shape=dst_shape,
+        resampling=Resampling.nearest  # NLCD is categorical — nearest preserves class labels
+    )
+    
+    # save NLCD raster
+    with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=1, height=nlcd_arr.shape[-2], width=nlcd_arr.shape[-1], crs=dst_crs, dtype=nlcd_arr.dtype, transform=dst_transform, nodata=250) as dst:
+        dst.write(nlcd_arr, 1)
+
+    # create NLCD colormap
+    H, W = nlcd_arr.shape
+    rgb_img = np.zeros((H, W, 3), dtype=np.uint8)
+
+    # vectorized mapping
+    for code, rgb in nlcd_code_to_rgb.items():
+        mask = nlcd_arr == code
+        rgb_img[mask] = rgb
+
+    rgb_img = np.transpose(rgb_img, (2, 0, 1))
+
+    with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_img.shape[-2], width=rgb_img.shape[-1], crs=dst_crs, dtype=rgb_img.dtype, transform=dst_transform, nodata=None) as dst:
+        dst.write(rgb_img)
 
 def coincident(items_s2, items_s1, hours):
     """Checks if any S2 captures are within given number of hours of S1 captures."""
@@ -825,12 +946,12 @@ def pipeline_S1(dir_path, save_as, dst_crs, item, bbox):
 
     # color maps
     img_vv_cmap = colormap_to_rgb(db_vv, cmap='gray', no_data=-9999)
-    with rasterio.open(dir_path + save_as + '_vv_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vv_cmap.shape[-2], width=img_vv_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vv, nodata=0) as dst:
+    with rasterio.open(dir_path + save_as + '_vv_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vv_cmap.shape[-2], width=img_vv_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vv, nodata=None) as dst:
         # get color map
         dst.write(img_vv_cmap)
 
     img_vh_cmap = colormap_to_rgb(db_vh, cmap='gray', no_data=-9999)
-    with rasterio.open(dir_path + save_as + '_vh_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vh_cmap.shape[-2], width=img_vh_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vh, nodata=0) as dst:
+    with rasterio.open(dir_path + save_as + '_vh_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vh_cmap.shape[-2], width=img_vh_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vh, nodata=None) as dst:
         dst.write(img_vh_cmap)
 
 def event_sample_sar(threshold, days_before, days_after, maxcoverpercentage, within_hours, event_date, event_precip, minx, miny, maxx, maxy, eid, dir_path):
@@ -1044,6 +1165,8 @@ def event_sample_sar(threshold, days_before, days_after, maxcoverpercentage, wit
             logger.debug(f'B08 raster completed for {dt}.')
             pipeline_NDWI(dir_path, f'ndwi_{dt}_{eid}', valid_crs, item, cbbox)
             logger.debug(f'NDWI raster completed for {dt}.')
+            pipeline_NLCD(dir_path, f'nlcd_{dt}_{eid}', int(dt[:4]), valid_crs, item, cbbox)
+            logger.debug(f'NLCD raster completed for {dt}.')
             
         logger.debug(f'All S2, B08, NDWI rasters completed successfully.')
 

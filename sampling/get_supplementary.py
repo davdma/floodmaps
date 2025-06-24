@@ -91,7 +91,10 @@ def download_nhd():
 
 def download_nlcd():
     """Download NLCD data for each year. May need to update the list if new NLCD years
-    are released."""
+    are released.
+    
+    The NLCD data catalog is found here: https://www.mrlc.gov/data.
+    """
     os.makedirs('NLCD', exist_ok=True)
 
     years = ['2016', '2017', '2018', '2019', '2020', '2021', '2022', '2023']

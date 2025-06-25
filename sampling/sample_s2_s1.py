@@ -26,6 +26,7 @@ from rasterio.warp import calculate_default_transform, reproject, Resampling, tr
 from rasterio.features import rasterize
 import rasterio.merge
 import rasterio
+import geopandas as gpd
 from geopy.geocoders import Nominatim
 from fiona.transform import transform, transform_geom
 from pystac.extensions.projection import ProjectionExtension as pe
@@ -40,7 +41,9 @@ import tensorflow as tf
 
 PRISM_CRS = "EPSG:4269"
 SEARCH_CRS = "EPSG:4326"
-NLCD_RANGE = get_nlcd_range()
+NLCD_RANGE = None
+ELEVATION_LAT_LONG = None
+CURRENT_DATE = datetime.now().strftime('%Y-%m-%d')
 
 # NLCD color mapping dictionary
 nlcd_colors = {
@@ -71,28 +74,111 @@ nlcd_code_to_rgb = {
     for code, hex_color in nlcd_colors.items()
 }
 
+# patterns for checking if an event has been processed
+regex_patterns = [
+    r'dem_.*\.tif',
+    r'flowlines_.*\.tif',
+    r'roads_.*\.tif',
+    r'slope_.*\.tif',
+    r'waterbody_.*\.tif',
+    r'nlcd_.*\.tif',
+    r'tci_\d{8}.*\.tif',
+    r'rgb_\d{8}.*\.tif',
+    r'ndwi_\d{8}.*\.tif',
+    r'b08_\d{8}.*\.tif',
+    r'sar_\d{8}.*\.tif',
+    'metadata.json'
+]
+pattern_dict = {
+    r'dem_.*\.tif': 'DEM',
+    r'flowlines_.*\.tif': 'FLOWLINES',
+    r'roads_.*\.tif': 'ROADS',
+    r'slope_.*\.tif': 'SLOPE',
+    r'waterbody_.*\.tif': 'WATERBODY',
+    r'nlcd_.*\.tif': 'NLCD',
+    r'tci_\d{8}.*\.tif': 'S2 IMAGERY',
+    r'rgb_\d{8}.*\.tif': 'RGB',
+    r'ndwi_\d{8}.*\.tif': 'NDWI',
+    r'b08_\d{8}.*\.tif': 'B8 NIR',
+    r'sar_\d{8}.*\.tif': 'SAR',
+    'metadata.json': 'METADATA'
+}
+
 class NoElevationError(Exception):
     pass
 
+def get_elevation_nw():
+    """Extract all elevation file lat long pairs as well as the filename in tuple."""
+    global ELEVATION_LAT_LONG
+    if ELEVATION_LAT_LONG is None:
+        elevation_files = os.listdir('Elevation/')
+        if len(elevation_files) == 0:
+            raise FileNotFoundError('No elevation files found. Please run get_supplementary.py to download elevation data.')
+        p = re.compile(f"n(\d*)w(\d*).tif")
+        lst = []
+        for file in elevation_files:
+            m = p.match(file)
+            if m:
+                lst.append((m.group(1), m.group(2), file))
+        ELEVATION_LAT_LONG = lst
+    return ELEVATION_LAT_LONG
+
 def get_nlcd_range():
     """Returns a tuple of the earliest and latest year for which NLCD data is available."""
-    nlcd_files = glob('NLCD/LndCov*.tif')
-    if len(nlcd_files) == 0:
-        raise FileNotFoundError('No NLCD files found. Please run get_supplementary.py to download NLCD data.')
-    p = re.compile(r'LndCov(\d{4}).tif')
-    nlcd_years = [int(p.search(file).group(1)) for file in nlcd_files]
-    return min(nlcd_years), max(nlcd_years)
+    global NLCD_RANGE
+    if NLCD_RANGE is None:
+        nlcd_files = glob('NLCD/LndCov*.tif')
+        if len(nlcd_files) == 0:
+            raise FileNotFoundError('No NLCD files found. Please run get_supplementary.py to download NLCD data.')
+        p = re.compile(r'LndCov(\d{4}).tif')
+        nlcd_years = [int(p.search(file).group(1)) for file in nlcd_files]
+        NLCD_RANGE = (min(nlcd_years), max(nlcd_years))
+    return NLCD_RANGE
 
 def read_PRISM():
     """Reads the PRISM netCDF file and return the encoded data."""
-    with Dataset("PRISM/prismprecipnew.nc", "r", format="NETCDF4") as nc:
+    with Dataset("PRISM/prismprecip_20160801_20241130.nc", "r", format="NETCDF4") as nc:
         geotransform = nc["geotransform"][:]
         time_info = (nc["time"].units, nc["time"].calendar)
         precip_data = nc["precip"][:]
 
     return (geotransform, time_info, precip_data)
 
-def get_extreme_events(prism, history, threshold=300, n=None):
+def ceser_mask(precip_data):
+    """Masks the CESER AOI in the PRISM meshgrid. Set values outside mask to nan.
+    
+    Parameters
+    ----------
+    precip_data : numpy.ndarray
+        PRISM precipitation data ndarray with shape (time, y, x).
+
+    Returns
+    -------
+    numpy.ndarray
+        PRISM precipitation data ndarray with cells outside CESER boundary set to nan.
+    """
+    ceser_boundary = gpd.read_file('CESER/CESER_FM_potential_no-flow_boundary.shp')
+    meshgrid = gpd.read_file('PRISM/meshgrid/prism_4km_mesh.shp')
+    # Reproject ceser to prism grid
+    if ceser_boundary.crs != meshgrid.crs:
+        ceser_reprojected = ceser_boundary.to_crs(meshgrid.crs)
+    ref_shape = ceser_reprojected.geometry.iloc[0]
+    intersecting_shapes = meshgrid[meshgrid.geometry.intersects(ref_shape)]
+    filtered_indices = list(zip(intersecting_shapes['row'],intersecting_shapes['col']))
+
+    # filter our PRISM array by cells inside the CESER boundary
+    mask_2d = np.zeros((precip_data.shape[1], precip_data.shape[2]), dtype=bool)
+    for i, j in filtered_indices:
+        mask_2d[i, j] = True
+
+    # Broadcast the 2D mask to 3D to match precip_data shape
+    mask_3d = np.broadcast_to(mask_2d, precip_data.shape)
+
+    # set any cells outside mask to nan
+    masked_precip = np.where(mask_3d, precip_data, np.nan)
+    return masked_precip
+
+def get_extreme_events(prism, history, threshold=300, n=None, region=None):
     """
     Queries contents of PRISM netCDF file given the return value of read_PRISM(). Filters for 
     precipitation events that meet minimum threshold of precipitation and returns an iterator.
@@ -113,8 +199,16 @@ def get_extreme_events(prism, history, threshold=300, n=None):
         Iterator aggregates extreme event data with each tuple containing the date, cumulative day precipitation in mm, latitude longitude bounding box values and a unique event id.
     """
     geotransform, time_info, precip_data = prism
-    events = np.where(precip_data > threshold) #lat indices, lon indices, and time indices for target events
 
+    # for specific regions, mask the AOI
+    if region is not None:
+        if region == 'ceser':
+            precip_data = ceser_mask(precip_data)
+
+    # returns tuple of arrays of time, lat indices, lon indices for filtered target events
+    events = np.where(precip_data > threshold)
+
+    # float64 geotransform coefficients for PRISM grid
     upper_left_x, x_size, x_rotation, upper_left_y, y_rotation, y_size = geotransform
     event_dates = []
     event_precip = []
@@ -157,8 +251,6 @@ def event_completed(dir_path):
     """Returns whether or not event directory contains all generated rasters."""
     logger = logging.getLogger('main')
     logger.info('Confirming whether event has already been successfully processed before...')
-    regex_patterns = [r'dem_.*\.tif', r'flowlines_.*\.tif', r'roads_.*\.tif', r'slope_.*\.tif', r'waterbody_.*\.tif', r'tci_\d{8}.*\.tif', r'ndwi_\d{8}.*\.tif', r'b08_\d{8}.*\.tif', r'sar_\d{8}.*\.tif', 'metadata.json']
-    pattern_dict = {r'dem_.*\.tif': 'DEM', r'flowlines_.*\.tif': 'FLOWLINES', r'roads_.*\.tif': 'ROADS', r'slope_.*\.tif': 'SLOPE', r'waterbody_.*\.tif': 'WATERBODY', r'tci_\d{8}.*\.tif': 'S2 IMAGERY', r'ndwi_\d{8}.*\.tif': 'NDWI', r'b08_\d{8}.*\.tif': 'B8 NIR', r'sar_\d{8}.*\.tif': 'SAR', 'metadata.json': 'METADATA'}
     existing_files = os.listdir(dir_path)
     
     # Check if each file name in the list exists in the directory
@@ -407,7 +499,7 @@ def pipeline_TCI(dir_path, save_as, dst_crs, item, bbox):
     """
     item_href = planetary_computer.sign(item.assets["visual"].href)
 
-    out_image, out_transform = rasterio.merge.merge([item_href], bounds=bbox, nodata=0)
+    out_image, out_transform = rasterio.merge.merge([item_href], bounds=bbox, nodata=0, resampling=Resampling.bilinear)
 
     with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=3, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=None) as dst:
         dst.write(out_image)
@@ -436,9 +528,9 @@ def pipeline_RGB(dir_path, save_as, dst_crs, item, bbox):
     b04_item_href = planetary_computer.sign(item.assets["B04"].href) # R
 
     # stack the three bands as rgb channels
-    blue_image, out_transform = rasterio.merge.merge([b02_item_href], bounds=bbox, nodata=0)
-    green_image, _ = rasterio.merge.merge([b03_item_href], bounds=bbox, nodata=0)
-    red_image, _ = rasterio.merge.merge([b04_item_href], bounds=bbox, nodata=0)
+    blue_image, out_transform = rasterio.merge.merge([b02_item_href], bounds=bbox, nodata=0, resampling=Resampling.bilinear)
+    green_image, _ = rasterio.merge.merge([b03_item_href], bounds=bbox, nodata=0, resampling=Resampling.bilinear)
+    red_image, _ = rasterio.merge.merge([b04_item_href], bounds=bbox, nodata=0, resampling=Resampling.bilinear)
 
     out_image = np.stack([red_image, green_image, blue_image], axis=0)
 
@@ -464,7 +556,7 @@ def pipeline_B08(dir_path, save_as, dst_crs, item, bbox):
     """
     item_href = planetary_computer.sign(item.assets["B08"].href)
 
-    out_image, out_transform = rasterio.merge.merge([item_href], bounds=bbox, nodata=0)
+    out_image, out_transform = rasterio.merge.merge([item_href], bounds=bbox, nodata=0, resampling=Resampling.bilinear)
 
     with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=1, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=0) as dst:
         dst.write(out_image)
@@ -486,12 +578,12 @@ def pipeline_NDWI(dir_path, save_as, dst_crs, item, bbox):
     """
     b03_item_href = planetary_computer.sign(item.assets["B03"].href)
 
-    out_image1, _ = rasterio.merge.merge([b03_item_href], bounds=bbox, nodata=0)
+    out_image1, _ = rasterio.merge.merge([b03_item_href], bounds=bbox, nodata=0, resampling=Resampling.bilinear)
     green = out_image1[0].astype(np.int32)
 
     b08_item_href = planetary_computer.sign(item.assets["B08"].href)
 
-    out_image2, out_transform = rasterio.merge.merge([b08_item_href], bounds=bbox, nodata=0)
+    out_image2, out_transform = rasterio.merge.merge([b08_item_href], bounds=bbox, nodata=0, resampling=Resampling.bilinear)
     nir = out_image2[0].astype(np.int32)
     
     # calculate ndwi
@@ -587,17 +679,13 @@ def pipeline_dem_slope(dir_path, save_as, dst_shape, dst_crs, dst_transform, bou
     buffer = 0.02
     bounds = (bounds[0] - buffer, bounds[1] - buffer, bounds[2] + buffer, bounds[3] + buffer)
     
-    dir_names = os.listdir('Elevation/')
     lst = []
-    p = re.compile(f"n(\d*)w(\d*).tif")
-    for file in dir_names:
-        m = p.match(file)
+    for lat, long, file in get_elevation_nw():
         # we want the range of the lats and the range of the longs to intersect the bounds
-        if m:
-            # nxxwxx is TOP LEFT corner of tile!
-            tile_bounds = (int(m.group(2)) * (-1), int(m.group(1)) - 1, int(m.group(2)) * (-1) + 1, int(m.group(1)))
-            if tile_bounds[0] < bounds[2] and tile_bounds[2] > bounds[0] and tile_bounds[1] < bounds[3] and tile_bounds[3] > bounds[1]:
-                lst.append('Elevation/' + file)
+        # nxxwxx is TOP LEFT corner of tile!
+        tile_bounds = (int(long) * (-1), int(lat) - 1, int(long) * (-1) + 1, int(lat))
+        if tile_bounds[0] < bounds[2] and tile_bounds[2] > bounds[0] and tile_bounds[1] < bounds[3] and tile_bounds[3] > bounds[1]:
+            lst.append(file)
 
     # if no dem tile can be found, raise error
     if not lst:
@@ -619,7 +707,7 @@ def pipeline_dem_slope(dir_path, save_as, dst_shape, dst_crs, dst_transform, bou
     no_data = files_nodata[0]
         
     if all(item == files_crs[0] for item in files_crs) and all(item == files_nodata[0] for item in files_nodata):
-        src_image, src_transform = rasterio.merge.merge(lst, bounds=bounds, nodata=no_data)
+        src_image, src_transform = rasterio.merge.merge(lst, bounds=bounds, nodata=no_data, resampling=Resampling.bilinear)
         destination = np.zeros(dst_shape, src_image.dtype)
     else: 
         raise Exception("CRS and no data values of all files must match")
@@ -797,7 +885,7 @@ def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, bbo
     with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_waterbody.shape[-2], width=rgb_waterbody.shape[-1], crs=dst_crs, dtype=rgb_waterbody.dtype, transform=dst_transform, nodata=None) as dst:
         dst.write(rgb_waterbody)
 
-def pipeline_NLCD(dir_path, save_as, year, dst_shape, dst_crs, dst_transform, bbox):
+def pipeline_NLCD(dir_path, save_as, year, dst_shape, dst_crs, dst_transform):
     """Generates raster with NLCD land cover classes. Uses windowed reading of NLCD raster
     for speed (NLCD files are large).
     
@@ -815,14 +903,13 @@ def pipeline_NLCD(dir_path, save_as, year, dst_shape, dst_crs, dst_transform, bb
         Coordinate reference system of output raster.
     dst_transform : rasterio.affine.Affine()
         Transformation matrix for mapping pixel coordinates to coordinate system of output raster.
-    bbox : (float, float, float, float)
-        Tuple in the order minx, miny, maxx, maxy, representing bounding box.
     """
     # if year is after the most recent year, use the most recent year
-    if year > NLCD_RANGE[1]:
-        year = NLCD_RANGE[1]
-    elif year < NLCD_RANGE[0]:
-        year = NLCD_RANGE[0]
+    nlcd_range = get_nlcd_range()
+    if year > nlcd_range[1]:
+        year = nlcd_range[1]
+    elif year < nlcd_range[0]:
+        year = nlcd_range[0]
 
     nlcd_file = f'NLCD/LndCov{year}.tif'
     with rasterio.open(nlcd_file) as src:
@@ -933,8 +1020,8 @@ def pipeline_S1(dir_path, save_as, dst_crs, item, bbox):
     item_hrefs_vv = planetary_computer.sign(item.assets["vv"].href)
     item_hrefs_vh = planetary_computer.sign(item.assets["vh"].href)
 
-    out_image_vv, out_transform_vv = rasterio.merge.merge([item_hrefs_vv], bounds=bbox, nodata=0)
-    out_image_vh, out_transform_vh = rasterio.merge.merge([item_hrefs_vh], bounds=bbox, nodata=0)
+    out_image_vv, out_transform_vv = rasterio.merge.merge([item_hrefs_vv], bounds=bbox, nodata=0, resampling=Resampling.bilinear)
+    out_image_vh, out_transform_vh = rasterio.merge.merge([item_hrefs_vh], bounds=bbox, nodata=0, resampling=Resampling.bilinear)
 
     with rasterio.open(dir_path + save_as + '_vv.tif', 'w', driver='Gtiff', count=1, height=out_image_vv.shape[-2], width=out_image_vv.shape[-1], crs=dst_crs, dtype=out_image_vv.dtype, transform=out_transform_vv, nodata=-9999) as dst:
         db_vv = db_scale(out_image_vv[0])
@@ -1165,8 +1252,6 @@ def event_sample_sar(threshold, days_before, days_after, maxcoverpercentage, wit
             logger.debug(f'B08 raster completed for {dt}.')
             pipeline_NDWI(dir_path, f'ndwi_{dt}_{eid}', valid_crs, item, cbbox)
             logger.debug(f'NDWI raster completed for {dt}.')
-            pipeline_NLCD(dir_path, f'nlcd_{dt}_{eid}', int(dt[:4]), valid_crs, item, cbbox)
-            logger.debug(f'NLCD raster completed for {dt}.')
             
         logger.debug(f'All S2, B08, NDWI rasters completed successfully.')
 
@@ -1195,6 +1280,8 @@ def event_sample_sar(threshold, days_before, days_after, maxcoverpercentage, wit
         logger.debug(f'Flowlines raster completed successfully.')
         pipeline_waterbody(dir_path, f'waterbody_{eid}', dst_shape, valid_crs, dst_transform, (minx, miny, maxx, maxy))
         logger.debug(f'Waterbody raster completed successfully.')
+        pipeline_NLCD(dir_path, f'nlcd_{eid}', int(eid[:4]), dst_shape, valid_crs, dst_transform)
+        logger.debug(f'NLCD raster completed successfully.')
     except Exception as err:
         logger.error(f'Raster generation error: {err}, {type(err)}')
         logger.error(f'Raster generation failed for {event_date}, at {minx}, {miny}, {maxx}, {maxy}. Id: {eid}. Removing directory and contents.')
@@ -1205,6 +1292,7 @@ def event_sample_sar(threshold, days_before, days_after, maxcoverpercentage, wit
     logger.info(f'Generating metadata file...')
     metadata = {
         "metadata": {
+            "Download Date": CURRENT_DATE,
             "Sample ID": eid,
             "Precipitation Event Date": event_date,
             "Cumulative Daily Precipitation (mm)": float(event_precip),
@@ -1226,7 +1314,7 @@ def event_sample_sar(threshold, days_before, days_after, maxcoverpercentage, wit
     logger.info('Metadata and raster generation completed. Event finished.')
     return True
     
-def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_path=None, within_hours=12):
+def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_path=None, within_hours=12, region=None):
     """
     Samples imagery of events queried from PRISM using a given minimum precipitation threshold.
     Downloaded samples will contain multispectral data and sar data from within specified interval of event date, 
@@ -1252,14 +1340,20 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
     -------
     int
     """
+    def get_default_dir_path(region, threshold, days_before, days_after, maxcoverpercentage):
+        if region is None:
+            return f'samples_{threshold}_{days_before}_{days_after}_{maxcoverpercentage}/'
+        else:
+            return f'samples_{region}_{threshold}_{days_before}_{days_after}_{maxcoverpercentage}/'
+    
     # make directory
     if dir_path is None:
-        dir_path = f'samples_{threshold}_{days_before}_{days_after}_{maxcoverpercentage}/'
+        dir_path = get_default_dir_path(region, threshold, days_before, days_after, maxcoverpercentage)
         Path(dir_path).mkdir(parents=True, exist_ok=True)
     else:
         # edge case sanity checks (empty or invalid path strings)
         if not dir_path:
-            dir_path = f'samples_{threshold}_{days_before}_{days_after}_{maxcoverpercentage}/'
+            dir_path = get_default_dir_path(region, threshold, days_before, days_after, maxcoverpercentage)
             print(f"Invalid directory path specified. Defaulting to {dir_path} directory path.", file=sys.stderr)
         else:
             if not Path(dir_path).is_dir():
@@ -1298,7 +1392,7 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
         history = set()
 
     rootLogger.info("Finding candidate extreme precipitation events...")
-    events = get_extreme_events(prism, history, threshold=threshold)
+    events = get_extreme_events(prism, history, threshold=threshold, region=region)
 
     rootLogger.info("Initializing event sampling...")
     count = 0
@@ -1359,6 +1453,7 @@ if __name__ == '__main__':
     parser.add_argument('-s', '--maxevents', dest='maxevents', default=100, type=int, help='maximum number of extreme precipitation events to attempt downloading (default: 100)')
     parser.add_argument('-d', '--dir', dest='dir_path', help='specify a directory name for downloaded samples, format should end with backslash (default: None)')
     parser.add_argument('-w', '--within_hours', dest='within_hours', default=12, type=int, help='Floods event must have S1 and S2 data within this many hours. (default: 12)')
+    parser.add_argument('-r', '--region', default=None, choices=['ceser'], help='sample from supported regions: ["ceser"]. (default: None)')
     args = parser.parse_args()
     
-    sys.exit(main(args.threshold, args.days_before, args.days_after, args.maxcoverpercentage, args.maxevents, dir_path=args.dir_path, within_hours=args.within_hours))
+    sys.exit(main(args.threshold, args.days_before, args.days_after, args.maxcoverpercentage, args.maxevents, dir_path=args.dir_path, within_hours=args.within_hours, region=args.region))

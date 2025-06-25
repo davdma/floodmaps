@@ -532,7 +532,7 @@ def pipeline_RGB(dir_path, save_as, dst_crs, item, bbox):
     green_image, _ = rasterio.merge.merge([b03_item_href], bounds=bbox, nodata=0, resampling=Resampling.bilinear)
     red_image, _ = rasterio.merge.merge([b04_item_href], bounds=bbox, nodata=0, resampling=Resampling.bilinear)
 
-    out_image = np.stack([red_image, green_image, blue_image], axis=0)
+    out_image = np.vstack((red_image, green_image, blue_image))
 
     with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=3, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=0) as dst:
         dst.write(out_image)
@@ -1380,6 +1380,18 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     fh.setFormatter(formatter)
     logger.addHandler(fh)
+
+    # log sampling parameters used
+    rootLogger.info(
+        "Sampling parameters used:\n"
+        f"  Threshold: {threshold}\n"
+        f"  Days before precipitation event: {days_before}\n"
+        f"  Days after precipitation event: {days_after}\n"
+        f"  Max cloud/nodata cover percentage: {maxcoverpercentage}\n"
+        f"  Max events to sample: {maxevents}\n"
+        f"  S1 and S2 coincidence must be within # hours: {within_hours}\n"
+        f"  Region: {region}"
+    )
 
     rootLogger.info("Loading PRISM data...")
     prism = read_PRISM()

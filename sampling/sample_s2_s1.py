@@ -39,6 +39,12 @@ os.environ['PC_SDK_SUBSCRIPTION_KEY'] = 'a613baefa08445269838bc3bc0dfe2d9'
 from tensorflow.keras.layers import MaxPooling2D
 import tensorflow as tf
 
+# Import configuration
+from config import DataConfig
+
+# Initialize configuration with filepaths
+config = DataConfig()
+
 PRISM_CRS = "EPSG:4269"
 SEARCH_CRS = "EPSG:4326"
 NLCD_RANGE = None
@@ -108,16 +114,16 @@ class NoElevationError(Exception):
     pass
 
 def get_elevation_nw():
-    """Extract all elevation file lat long pairs as well as the filename in tuple."""
+    """Extract all elevation file lat long pairs as well as the filepath in tuple."""
     global ELEVATION_LAT_LONG
     if ELEVATION_LAT_LONG is None:
-        elevation_files = os.listdir('Elevation/')
+        elevation_files = [str(x) for x in Path(config.elevation_directory).glob('n*w*.tif')]
         if len(elevation_files) == 0:
             raise FileNotFoundError('No elevation files found. Please run get_supplementary.py to download elevation data.')
-        p = re.compile(f"n(\d*)w(\d*).tif")
+        p = re.compile(r"n(\d*)w(\d*).tif")
         lst = []
         for file in elevation_files:
-            m = p.match(file)
+            m = p.search(file)
             if m:
                 lst.append((m.group(1), m.group(2), file))
         ELEVATION_LAT_LONG = lst
@@ -127,7 +133,7 @@ def get_nlcd_range():
     """Returns a tuple of the earliest and latest year for which NLCD data is available."""
     global NLCD_RANGE
     if NLCD_RANGE is None:
-        nlcd_files = glob('NLCD/LndCov*.tif')
+        nlcd_files = [str(x) for x in Path(config.nlcd_directory).glob('LndCov*.tif')]
         if len(nlcd_files) == 0:
             raise FileNotFoundError('No NLCD files found. Please run get_supplementary.py to download NLCD data.')
         p = re.compile(r'LndCov(\d{4}).tif')
@@ -137,7 +143,7 @@ def get_nlcd_range():
 
 def read_PRISM():
     """Reads the PRISM netCDF file and return the encoded data."""
-    with Dataset("PRISM/prismprecip_20160801_20241130.nc", "r", format="NETCDF4") as nc:
+    with Dataset(config.prism_file, "r", format="NETCDF4") as nc:
         geotransform = nc["geotransform"][:]
         time_info = (nc["time"].units, nc["time"].calendar)
         precip_data = nc["precip"][:]
@@ -157,12 +163,14 @@ def ceser_mask(precip_data):
     numpy.ndarray
         PRISM precipitation data ndarray with cells outside CESER boundary set to nan.
     """
-    ceser_boundary = gpd.read_file('CESER/CESER_FM_potential_no-flow_boundary.shp')
-    meshgrid = gpd.read_file('PRISM/meshgrid/prism_4km_mesh.shp')
+    ceser_boundary = gpd.read_file(config.ceser_boundary_file)
+    meshgrid = gpd.read_file(config.prism_meshgrid_file)
     # Reproject ceser to prism grid
     if ceser_boundary.crs != meshgrid.crs:
         ceser_reprojected = ceser_boundary.to_crs(meshgrid.crs)
-    ref_shape = ceser_reprojected.geometry.iloc[0]
+        ref_shape = ceser_reprojected.geometry.iloc[0]
+    else:
+        ref_shape = ceser_boundary.geometry.iloc[0]
     intersecting_shapes = meshgrid[meshgrid.geometry.intersects(ref_shape)]
     filtered_indices = list(zip(intersecting_shapes['row'],intersecting_shapes['col']))
 
@@ -187,7 +195,7 @@ def get_extreme_events(prism, history, threshold=300, n=None, region=None):
     ----------
     prism : tuple returned by read_PRISM()
     history : set()
-        Set that holds all eids of previously processed events.
+        Set that holds all tuples of indices (from PRISM ndarray) of previously processed events.
     threshold : int, optional
         Minimum cumulative daily precipitation in mm for filtering PRISM tiles.
     n : int, optional
@@ -195,6 +203,8 @@ def get_extreme_events(prism, history, threshold=300, n=None, region=None):
 
     Returns
     -------
+    int
+        Number of extreme precipitation events found.
     Iterator
         Iterator aggregates extreme event data with each tuple containing the date, cumulative day precipitation in mm, latitude longitude bounding box values and a unique event id.
     """
@@ -217,6 +227,7 @@ def get_extreme_events(prism, history, threshold=300, n=None, region=None):
     maxx = []
     maxy = []
     eid = []
+    indices = []
 
     min_date = datetime(2016, 8, 1) # originally 2015, 9, 1
     count = 0
@@ -230,7 +241,7 @@ def get_extreme_events(prism, history, threshold=300, n=None, region=None):
         # must not be earlier than s2 launch, or previously queried in pipeline
         if event_date < min_date:
             continue
-        elif f'{threshold}_{event_date_str}_{y}_{x}' in history:
+        elif (time, y, x) in history:
             continue
 
         event_dates.append(event_date_str)
@@ -243,9 +254,10 @@ def get_extreme_events(prism, history, threshold=300, n=None, region=None):
         maxx.append((x + 1) * x_size + upper_left_x)
         maxy.append(y * y_size + upper_left_y)
         eid.append(f'{event_date_str}_{y}_{x}')
+        indices.append((time, y, x)) # indices for efficient tracking of completion
         count += 1
 
-    return zip(event_dates, event_precip, minx, miny, maxx, maxy, eid)
+    return count, zip(event_dates, event_precip, minx, miny, maxx, maxy, eid, indices)
 
 def event_completed(dir_path):
     """Returns whether or not event directory contains all generated rasters."""
@@ -393,9 +405,10 @@ def GetHU4Codes(bbox):
     list[str]
         HU4 codes.
     """
-    wbd = gdal.OpenEx('/vsizip/NHD/WBD_National.zip/WBD_National_GDB.gdb')
+    # TODO: for newer gdal add context manager for opening file
+    wbd = gdal.OpenEx(str('/vsizip/' / Path(config.nhd_wbd_file) / 'WBD_National_GDB.gdb'))
     wbdhu4 = wbd.GetLayerByIndex(4)
-    
+
     lst = []
     boundpoly = make_box(bbox)
     for feature in wbdhu4:
@@ -621,7 +634,7 @@ def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, 
         Buffer the geometry line thickness by certain number of pixels.
     """
     # find state shape file
-    with fiona.open(f'Roads/{state.strip().upper()}.shp', "r") as shapefile:
+    with fiona.open(Path(config.roads_directory) / f'{state.strip().upper()}.shp', "r") as shapefile:
         shapes = [transform_geom(shapefile.crs, dst_crs, feature["geometry"]) for feature in shapefile]
 
     if shapes:
@@ -771,6 +784,8 @@ def pipeline_flowlines(dir_path, save_as, dst_shape, dst_crs, dst_transform, bbo
     """
     with ExitStack() as stack:
         files = [stack.enter_context(fiona.open(f'/vsizip/NHD/NHDPLUS_H_{code}_HU4_GDB.zip/NHDPLUS_H_{code}_HU4_GDB.gdb', layer='NHDFlowline')) for code in GetHU4Codes(bbox)]
+        if not files:
+            raise Exception(f"No flowline files found for HU4 codes in bounding box {bbox}")
 
         files_crs = {file.crs for file in files}
         if len(files_crs) > 1:
@@ -819,7 +834,7 @@ def pipeline_flowlines(dir_path, save_as, dst_shape, dst_crs, dst_transform, bbo
         dst.write(rgb_flowlines)
 
 def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, bbox):
-    """Generates raster with burned in geometries of flowlines given destination raster properties.
+    """Generates raster with burned in geometries of waterbodies given destination raster properties.
 
     Parameters
     ----------
@@ -835,11 +850,11 @@ def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, bbo
         Transformation matrix for mapping pixel coordinates to coordinate system of output raster.
     bbox : (float, float, float, float)
         Tuple in the order minx, miny, maxx, maxy, representing bounding box.
-    buffer : int, optional
-        Buffer the geometry line thickness by certain number of pixels.
     """
     with ExitStack() as stack:
         files = [stack.enter_context(fiona.open(f'/vsizip/NHD/NHDPLUS_H_{code}_HU4_GDB.zip/NHDPLUS_H_{code}_HU4_GDB.gdb', layer='NHDWaterbody')) for code in GetHU4Codes(bbox)]
+        if not files:
+            raise Exception(f"No waterbody files found for HU4 codes in bounding box {bbox}")
 
         files_crs = {file.crs for file in files}
         if len(files_crs) > 1:
@@ -911,8 +926,7 @@ def pipeline_NLCD(dir_path, save_as, year, dst_shape, dst_crs, dst_transform):
     elif year < nlcd_range[0]:
         year = nlcd_range[0]
 
-    nlcd_file = f'NLCD/LndCov{year}.tif'
-    with rasterio.open(nlcd_file) as src:
+    with rasterio.open(Path(config.nlcd_directory) / f'LndCov{year}.tif') as src:
         # data array is of type uint8
         nlcd_crs = src.crs
         nlcd_transform = src.transform
@@ -1129,7 +1143,10 @@ def event_sample_sar(threshold, days_before, days_after, maxcoverpercentage, wit
     items_s2 = search_s2.item_collection()
     items_s1 = search_s1.item_collection()
     if len(items_s2) == 0 or len(items_s1) == 0:
-        logger.info(f'Zero coincident products from query for date interval {time_of_interest}.')
+        if len(items_s2) == 0:
+            logger.info(f'No S2 products found for date interval {time_of_interest}.')
+        if len(items_s1) == 0:
+            logger.info(f'No S1 products found for date interval {time_of_interest}.')
         return False
     elif not found_after_images(items_s2, event_date):
         logger.info(f'Products found but only before precipitation event date {event_date}.')
@@ -1314,7 +1331,7 @@ def event_sample_sar(threshold, days_before, days_after, maxcoverpercentage, wit
     logger.info('Metadata and raster generation completed. Event finished.')
     return True
     
-def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_path=None, within_hours=12, region=None):
+def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_path=None, within_hours=12, region=None, config_file=None):
     """
     Samples imagery of events queried from PRISM using a given minimum precipitation threshold.
     Downloaded samples will contain multispectral data and sar data from within specified interval of event date, 
@@ -1335,11 +1352,18 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
         Desired cloud cover percentage range for querying Copernicus Sentinel-2.
     maxevents: int or None
         Specify a limit to the number of extreme precipitation events to process.
+    config_file : str, optional
+        Path to custom configuration file.
         
     Returns
     -------
     int
     """
+    # Reinitialize config with custom file if provided
+    global config
+    if config_file:
+        config = DataConfig(config_file)
+    
     def get_default_dir_path(region, threshold, days_before, days_after, maxcoverpercentage):
         if region is None:
             return f'samples_{threshold}_{days_before}_{days_after}_{maxcoverpercentage}/'
@@ -1404,18 +1428,19 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
         history = set()
 
     rootLogger.info("Finding candidate extreme precipitation events...")
-    events = get_extreme_events(prism, history, threshold=threshold, region=region)
+    num_candidates, events = get_extreme_events(prism, history, threshold=threshold, region=region)
+    rootLogger.info(f"Found {num_candidates} candidate extreme precipitation events.")
 
     rootLogger.info("Initializing event sampling...")
     count = 0
     alr_completed = 0
     try:
-        for event_date, event_precip, minx, miny, maxx, maxy, eid in events:
+        for event_date, event_precip, minx, miny, maxx, maxy, eid, indices in events:
             if Path(dir_path + eid + '/').is_dir():
                 if event_completed(dir_path + eid + '/'):
                     rootLogger.debug(f'Event {eid} has already been processed before. Moving on to the next event...')
                     alr_completed += 1
-                    history.add(f'{threshold}_{eid}')
+                    history.add(indices)
                     continue
                 else:
                     rootLogger.debug(f'Event {eid} has already been processed before but unsuccessfully. Reprocessing...')
@@ -1427,7 +1452,7 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
                                         maxcoverpercentage, within_hours, event_date, event_precip, 
                                         minx, miny, maxx, maxy, eid, dir_path):
                         count += 1
-                    history.add(f'{threshold}_{eid}')
+                    history.add(indices)
                     break
                 except (rasterio.errors.WarpOperationError, rasterio.errors.RasterioIOError, pystac_client.exceptions.APIError) as err:
                     rootLogger.error(f"Connection error: {type(err)}")
@@ -1437,7 +1462,7 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
                         rootLogger.info(f'Retrying ({attempt}/{max_attempts})...')
                 except NoElevationError as err:
                     rootLogger.error(f'Elevation file missing, skipping event...')
-                    history.add(f'{threshold}_{eid}')
+                    history.add(indices)
                     break
                 except Exception as err:
                     raise err
@@ -1454,6 +1479,7 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
 
     rootLogger.debug(f"Number of events already completed: {alr_completed}")
     rootLogger.debug(f"Number of successful events sampled from this run: {count}")
+    rootLogger.debug(f"Searched through {count} PRISM indices.")
     return 0
 
 if __name__ == '__main__':
@@ -1466,6 +1492,7 @@ if __name__ == '__main__':
     parser.add_argument('-d', '--dir', dest='dir_path', help='specify a directory name for downloaded samples, format should end with backslash (default: None)')
     parser.add_argument('-w', '--within_hours', dest='within_hours', default=12, type=int, help='Floods event must have S1 and S2 data within this many hours. (default: 12)')
     parser.add_argument('-r', '--region', default=None, choices=['ceser'], help='sample from supported regions: ["ceser"]. (default: None)')
+    parser.add_argument('-f', '--config', dest='config_file', help='specify a custom configuration file path')
     args = parser.parse_args()
     
-    sys.exit(main(args.threshold, args.days_before, args.days_after, args.maxcoverpercentage, args.maxevents, dir_path=args.dir_path, within_hours=args.within_hours, region=args.region))
+    sys.exit(main(args.threshold, args.days_before, args.days_after, args.maxcoverpercentage, args.maxevents, dir_path=args.dir_path, within_hours=args.within_hours, region=args.region, config_file=args.config_file))

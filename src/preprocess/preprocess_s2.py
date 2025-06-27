@@ -112,7 +112,7 @@ def random_crop(label_names, size, num_samples, rng, pre_sample_dir, sample_dir,
             x = int(rng.uniform(0, HEIGHT - size))
             y = int(rng.uniform(0, WIDTH - size))
 
-            patch = stacked_tile[:, x : x + size, y : y + size]
+            patch = tile[:, x : x + size, y : y + size]
 
             # if contains missing values in tci or ndwi, toss out and resample
             if np.any(patch[0] == 0) or np.any(patch[4] == -999999):
@@ -151,13 +151,14 @@ def loadMaskedStack(img_dt, eid, sample_dir):
     # flowlines_file = sample_path / eid / f'flowlines_{eid}.tif' - currently not used in the dataset
 
     with rasterio.open(tci_file) as src:
-        tci_raster = src.read()
+        tci_raster = src.read().reshape((3, -1))
+        tci_floats = (tci_raster / 255).astype(np.float32) # first scale rgb to 0-1 then normalize
     
     with rasterio.open(b08_file) as src:
-        b08_raster = src.read()
+        b08_raster = src.read().reshape((1, -1))
     
     with rasterio.open(ndwi_file) as src:
-        ndwi_raster = src.read()
+        ndwi_raster = src.read().reshape((1, -1))
 
     with rasterio.open(dem_file) as src:
         dem_raster = src.read()
@@ -180,7 +181,7 @@ def loadMaskedStack(img_dt, eid, sample_dir):
 
     mask = (tci_raster[0] != 0) & (ndwi_raster[0] != -999999)
 
-    stack = np.vstack((tci_raster, b08_raster, ndwi_raster, dem_raster, slope_y_raster,
+    stack = np.vstack((tci_floats, b08_raster, ndwi_raster, dem_raster, slope_y_raster,
                         slope_x_raster, waterbody_raster, roads_raster), dtype=np.float32)
 
     masked_stack = stack[:, mask]
@@ -313,6 +314,7 @@ def main(size, samples, seed, method='random', sample_dir='samples_200_5_4_35/',
         random_crop(TRAIN_LABELS, size, samples, rng, pre_sample_dir, sample_dir, label_dir, typ="train")
         random_crop(VAL_LABELS, size, samples, rng, pre_sample_dir, sample_dir, label_dir, typ="val")
         random_crop(TEST_LABELS, size, samples, rng, pre_sample_dir, sample_dir, label_dir, typ="test")
+        logger.info('Random samples generated.')
 
     logger.debug('Preprocessing complete.')
 

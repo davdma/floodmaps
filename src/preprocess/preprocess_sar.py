@@ -433,8 +433,10 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
     val_events, test_events = train_test_split(val_test_events, test_size=0.5, random_state=seed + 1222)
 
     # calculate mean and std of train tiles
+    logger.info('Calculating mean and std of training tiles...')
     mean = trainMean(train_events, sample_dir, filter=filter)
     std = trainStd(train_events, mean, sample_dir, filter=filter)
+    logger.info('Mean and std of training tiles calculated.')
 
     # also store training mean std statistics in file
     stats_file = pre_sample_dir / f'mean_std_{size}_{samples}_{filter}.pkl'
@@ -447,6 +449,7 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
         random_crop(train_events, size, samples, rng, pre_sample_dir, sample_dir, cloud_threshold, filter=filter, typ="train")
         random_crop(val_events, size, samples, rng, pre_sample_dir, sample_dir, cloud_threshold, filter=filter, typ="val")
         random_crop(test_events, size, samples, rng, pre_sample_dir, sample_dir, cloud_threshold, filter=filter, typ="test")
+        logger.info('Random samples generated.')
 
     logger.debug('Preprocessing complete.')
 

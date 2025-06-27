@@ -302,8 +302,10 @@ def main(size, samples, seed, method='random', kernel_size=5, sample_dir='sample
     val_events, test_events = train_test_split(val_test_events, test_size=0.5, random_state=seed + 1222)
 
     # calculate mean and std of train tiles
+    logger.info('Calculating mean and std of training tiles...')
     mean = trainMean(train_events, sample_dir, kernel_size=kernel_size)
     std = trainStd(train_events, mean, sample_dir, kernel_size=kernel_size)
+    logger.info('Mean and std of training tiles calculated.')
 
     # also store training mean std statistics in file
     stats_file = pre_sample_dir / f'mean_std_{kernel_size}_{size}_{samples}_dem.pkl'
@@ -316,6 +318,7 @@ def main(size, samples, seed, method='random', kernel_size=5, sample_dir='sample
         generate_patches(train_events, size, samples, rng, pre_sample_dir, sample_dir, kernel_size=kernel_size, typ="train")
         generate_patches(val_events, size, samples, rng, pre_sample_dir, sample_dir, kernel_size=kernel_size, typ="val")
         generate_patches(test_events, size, samples, rng, pre_sample_dir, sample_dir, kernel_size=kernel_size, typ="test")
+        logger.info('Random samples generated.')
 
     logger.debug('Preprocessing complete.')
 

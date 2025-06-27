@@ -426,8 +426,10 @@ def main(size, samples, seed, method='random', sample_dir='samples_multi_sar_70_
     #     pickle.dump((min_val_vv, max_val_vv, min_val_vh, max_val_vh), f)
 
     # calculate mean and std of train tiles
+    logger.info('Calculating mean and std of training tiles...')
     mean = trainMean(train_events)
     std = trainStd(train_events, mean)
+    logger.info('Mean and std of training tiles calculated.')
 
     # also store training vv, vh mean std statistics in file
     stats_file = pre_sample_dir / f'mean_std_{size}_{samples}.pkl'
@@ -440,6 +442,7 @@ def main(size, samples, seed, method='random', sample_dir='samples_multi_sar_70_
         generate_patches(train_events, size, samples, rng, sample_dir, typ="train")
         generate_patches(val_events, size, samples, rng, sample_dir, typ="val")
         generate_patches(test_events, size, samples, rng, sample_dir, typ="test")
+        logger.info('Random samples generated.')
 
     logger.debug('Preprocessing complete.')
 

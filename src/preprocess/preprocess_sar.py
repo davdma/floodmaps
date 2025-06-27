@@ -11,16 +11,15 @@ import logging
 import pickle
 from sklearn.model_selection import train_test_split
 
-from utils.utils import SRC_DIR, SAMPLES_DIR, enhanced_lee_filter
-### TO IMPLEMENT: PATHS WITH SRC_DIR, SAMPLES_DIR
+from utils.utils import enhanced_lee_filter, SRC_DIR, DATA_DIR, SAMPLES_DIR
 
-def minibatch(events, size, num_samples, rng, sample_dir, cloud_threshold, filter='raw', typ="train"):
+def random_crop(events, size, num_samples, rng, pre_sample_dir, sample_dir, cloud_threshold, filter='raw', typ="train"):
     """Uniformly samples patches of dimension size x size across each dataset tile. The
     patches are saved together with labels into one file for minibatching.
 
     Parameters
     ----------
-    events : list[str]
+    events : list[Path]
         List of flood event folders where raw data tiles are stored.
     size : int
         Size of the sampled patches.
@@ -28,6 +27,8 @@ def minibatch(events, size, num_samples, rng, sample_dir, cloud_threshold, filte
         Number of patches to sample per raw S1 tile.
     rng : obj
         Random number generator.
+    pre_sample_dir : Path
+        Directory to save the sampled patches.
     sample_dir : str
         Directory containing raw S1 tiles for patch sampling.
     cloud_threshold : float
@@ -40,9 +41,6 @@ def minibatch(events, size, num_samples, rng, sample_dir, cloud_threshold, filte
     """
     logger = logging.getLogger('preprocessing')
 
-    pre_sample_dir = f'data/sar/minibatch/{filter}/samples_{size}_{num_samples}/'
-    Path(pre_sample_dir).mkdir(parents=True, exist_ok=True)
-
     # first load all samples into memory
     # SAR Preprocessing: labels will be stored in event sample folder
     logger.info('Loading tiles into memory...')
@@ -50,7 +48,8 @@ def minibatch(events, size, num_samples, rng, sample_dir, cloud_threshold, filte
     p1 = re.compile('\d{8}_\d+_\d+')
     p2 = re.compile('pred_(\d{8})_.+.tif')
     for event in events:
-        m = p1.search(event)
+        # Use Path.name to get just the directory name for regex matching
+        m = p1.search(event.name)
 
         if m:
             eid = m.group(0)
@@ -58,13 +57,13 @@ def minibatch(events, size, num_samples, rng, sample_dir, cloud_threshold, filte
             logger.info(f'No matching eid. Skipping {event}...')
             continue
 
-        # search for label file + sar file
+        # search for label file + sar file using Path.glob()
         # look for labels w tci + sar pairings
-        for label in glob(event + f'/pred_*.tif'):
-            m = p2.search(label)
+        for label in event.glob('pred_*.tif'):
+            m = p2.search(label.name)
             img_dt = m.group(1)
 
-            sar_vv_files = glob(event + f'/sar_{img_dt}_*_vv.tif')
+            sar_vv_files = list(event.glob(f'sar_{img_dt}_*_vv.tif'))
             if len(sar_vv_files) == 0:
                 # SKIP IF SAR NOT FOUND FOR A LABEL (THIS IS SOMETIMES POSSIBLE)
                 logger.info(f'SAR file not found for label {label}')
@@ -78,7 +77,7 @@ def minibatch(events, size, num_samples, rng, sample_dir, cloud_threshold, filte
                 label_raster = src.read([1, 2, 3])
                 # if label has any values != 0 or 255 then print to log!
                 if np.any((label_raster > 0) & (label_raster < 255)):
-                    logger.debug(f'{label_file} values are not 0 or 255.')
+                    logger.debug(f'{label.name} values are not 0 or 255.')
 
                 label_binary = np.where(label_raster[0] != 0, 1, 0)
                 label_binary = np.expand_dims(label_binary, axis = 0)
@@ -87,11 +86,12 @@ def minibatch(events, size, num_samples, rng, sample_dir, cloud_threshold, filte
                 WIDTH = src.width
 
             # skip missing data w tci and sar combined
-            tci_file = sample_dir + f'{eid}/tci_{img_dt}_{eid}.tif'
-            dem_file = sample_dir + f'{eid}/dem_{eid}.tif'
-            waterbody_file = sample_dir + f'{eid}/waterbody_{eid}.tif'
-            roads_file = sample_dir + f'{eid}/roads_{eid}.tif'
-            cloud_file = sample_dir + f'{eid}/clouds_{img_dt}_{eid}.tif'
+            sample_path = SAMPLES_DIR / sample_dir
+            tci_file = sample_path / eid / f'tci_{img_dt}_{eid}.tif'
+            dem_file = sample_path / eid / f'dem_{eid}.tif'
+            waterbody_file = sample_path / eid / f'waterbody_{eid}.tif'
+            roads_file = sample_path / eid / f'roads_{eid}.tif'
+            cloud_file = sample_path / eid / f'clouds_{img_dt}_{eid}.tif'
 
             with rasterio.open(tci_file) as src:
                 tci_raster = src.read()
@@ -168,7 +168,8 @@ def minibatch(events, size, num_samples, rng, sample_dir, cloud_threshold, filte
             dataset[i * num_samples + patches_sampled] = patch[:11]
             patches_sampled += 1
 
-    np.save(pre_sample_dir + f'{typ}_patches.npy', dataset)
+    output_file = pre_sample_dir / f'{typ}_patches.npy'
+    np.save(output_file, dataset)
 
     logger.info('Sampling complete.')
 
@@ -177,7 +178,7 @@ def trainMean(train_events, sample_dir, filter="raw"):
 
     Parameters
     ----------
-    train_events : list[str]
+    train_events : list[Path]
         List of training flood event folders where raw data tiles are stored.
     sample_dir : str
         Directory containing raw S1 tiles for patch sampling.
@@ -200,7 +201,7 @@ def trainMean(train_events, sample_dir, filter="raw"):
     p1 = re.compile('\d{8}_\d+_\d+')
     p2 = re.compile('pred_(\d{8})_.+.tif')
     for event in train_events:
-        m = p1.search(event)
+        m = p1.search(event.name)
 
         if m:
             eid = m.group(0)
@@ -208,13 +209,13 @@ def trainMean(train_events, sample_dir, filter="raw"):
             logger.info(f'No matching eid during mean std calculation. Skipping {event}...')
             continue
 
-        # search for label file + sar file
+        # search for label file + sar file using Path.glob()
         # look for labels w tci + sar pairings
-        for label in glob(event + f'/pred_*.tif'):
-            m = p2.search(label)
+        for label in event.glob('pred_*.tif'):
+            m = p2.search(label.name)
             img_dt = m.group(1)
 
-            sar_vv_files = glob(event + f'/sar_{img_dt}_*_vv.tif')
+            sar_vv_files = list(event.glob(f'sar_{img_dt}_*_vv.tif'))
             if len(sar_vv_files) == 0:
                 # SKIP IF SAR NOT FOUND FOR A LABEL (THIS IS SOMETIMES POSSIBLE)
                 logger.info(f'Mean std: SAR file not found for label {label}')
@@ -224,10 +225,11 @@ def trainMean(train_events, sample_dir, filter="raw"):
             sar_vh_file = sar_vv_files[0][:-6] + 'vh.tif'
 
             # skip missing data w tci and sar combined
-            dem_file = sample_dir + f'{eid}/dem_{eid}.tif'
-            waterbody_file = sample_dir + f'{eid}/waterbody_{eid}.tif'
-            roads_file = sample_dir + f'{eid}/roads_{eid}.tif'
-            cloud_file = sample_dir + f'{eid}/clouds_{img_dt}_{eid}.tif'
+            sample_path = SAMPLES_DIR / sample_dir
+            dem_file = sample_path / eid / f'dem_{eid}.tif'
+            waterbody_file = sample_path / eid / f'waterbody_{eid}.tif'
+            roads_file = sample_path / eid / f'roads_{eid}.tif'
+            cloud_file = sample_path / eid / f'clouds_{img_dt}_{eid}.tif'
 
             with rasterio.open(sar_vv_file) as src:
                 vv_raster = src.read()
@@ -285,7 +287,7 @@ def trainStd(train_events, train_means, sample_dir, filter="raw"):
 
     Parameters
     ----------
-    train_events : list[str]
+    train_events : list[Path]
         List of training flood event folders where raw data tiles are stored.
     train_means : ndarray
         Channel means.
@@ -308,7 +310,7 @@ def trainStd(train_events, train_means, sample_dir, filter="raw"):
     p1 = re.compile('\d{8}_\d+_\d+')
     p2 = re.compile('pred_(\d{8})_.+.tif')
     for event in train_events:
-        m = p1.search(event)
+        m = p1.search(event.name)
 
         if m:
             eid = m.group(0)
@@ -316,13 +318,13 @@ def trainStd(train_events, train_means, sample_dir, filter="raw"):
             logger.info(f'No matching eid during mean std calculation. Skipping {event}...')
             continue
 
-        # search for label file + sar file
+        # search for label file + sar file using Path.glob()
         # look for labels w tci + sar pairings
-        for label in glob(event + f'/pred_*.tif'):
-            m = p2.search(label)
+        for label in event.glob('pred_*.tif'):
+            m = p2.search(label.name)
             img_dt = m.group(1)
 
-            sar_vv_files = glob(event + f'/sar_{img_dt}_*_vv.tif')
+            sar_vv_files = list(event.glob(f'sar_{img_dt}_*_vv.tif'))
             if len(sar_vv_files) == 0:
                 # SKIP IF SAR NOT FOUND FOR A LABEL (THIS IS SOMETIMES POSSIBLE)
                 logger.info(f'Mean std: SAR file not found for label {label}')
@@ -332,10 +334,11 @@ def trainStd(train_events, train_means, sample_dir, filter="raw"):
             sar_vh_file = sar_vv_files[0][:-6] + 'vh.tif'
 
             # skip missing data w tci and sar combined
-            dem_file = sample_dir + f'{eid}/dem_{eid}.tif'
-            waterbody_file = sample_dir + f'{eid}/waterbody_{eid}.tif'
-            roads_file = sample_dir + f'{eid}/roads_{eid}.tif'
-            cloud_file = sample_dir + f'{eid}/clouds_{img_dt}_{eid}.tif'
+            sample_path = SAMPLES_DIR / sample_dir
+            dem_file = sample_path / eid / f'dem_{eid}.tif'
+            waterbody_file = sample_path / eid / f'waterbody_{eid}.tif'
+            roads_file = sample_path / eid / f'roads_{eid}.tif'
+            cloud_file = sample_path / eid / f'clouds_{img_dt}_{eid}.tif'
 
             with rasterio.open(sar_vv_file) as src:
                 vv_raster = src.read()
@@ -393,7 +396,7 @@ def trainStd(train_events, train_means, sample_dir, filter="raw"):
     return overall_channel_std
 
 
-def main(size, samples, seed, method='minibatch', cloud_threshold=0.1, filter=None, sample_dir='samples_200_6_4_10_sar/'):
+def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None, sample_dir='samples_200_6_4_10_sar/'):
     """Preprocesses raw S1 tiles and corresponding labels into smaller patches.
 
     Parameters
@@ -404,7 +407,7 @@ def main(size, samples, seed, method='minibatch', cloud_threshold=0.1, filter=No
         Number of patches to sample per raw S2 tile.
     seed : int
     method : str
-        Sampling method: 'minibatch' or 'individual'.
+        Sampling method.
     filter : str
         Filter to apply to patches: 'raw' (no filter) or 'lee'.
     sample_dir : str
@@ -419,8 +422,13 @@ def main(size, samples, seed, method='minibatch', cloud_threshold=0.1, filter=No
     logger.addHandler(handler)
     logger.propagate = False
 
+    # make our preprocess directory
+    pre_sample_dir = DATA_DIR / 'sar' / f'samples_{size}_{samples}_{filter}'
+    pre_sample_dir.mkdir(parents=True, exist_ok=True)
+
     # randomly select samples to be in train and test set
-    all_events = glob(sample_dir + '[0-9]*')
+    sample_path = SAMPLES_DIR / sample_dir
+    all_events = list(sample_path.glob('[0-9]*'))
     train_events, val_test_events = train_test_split(all_events, test_size=0.2, random_state=seed - 20)
     val_events, test_events = train_test_split(val_test_events, test_size=0.5, random_state=seed + 1222)
 
@@ -429,15 +437,16 @@ def main(size, samples, seed, method='minibatch', cloud_threshold=0.1, filter=No
     std = trainStd(train_events, mean, sample_dir, filter=filter)
 
     # also store training mean std statistics in file
-    with open(f'data/sar/stats/{method}_{filter}_{size}_{samples}.pkl', 'wb') as f:
+    stats_file = pre_sample_dir / f'mean_std_{size}_{samples}_{filter}.pkl'
+    with open(stats_file, 'wb') as f:
         pickle.dump((mean, std), f)
+    logger.info('Training mean and std statistics saved.')
 
     rng = Random(seed)
-    if method == 'minibatch':
-        # presave minibatches of size 1024
-        minibatch(train_events, size, samples, rng, sample_dir, cloud_threshold, filter=filter, typ="train")
-        minibatch(val_events, size, samples, rng, sample_dir, cloud_threshold, filter=filter, typ="val")
-        minibatch(test_events, size, samples, rng, sample_dir, cloud_threshold, filter=filter, typ="test")
+    if method == 'random':
+        random_crop(train_events, size, samples, rng, pre_sample_dir, sample_dir, cloud_threshold, filter=filter, typ="train")
+        random_crop(val_events, size, samples, rng, pre_sample_dir, sample_dir, cloud_threshold, filter=filter, typ="val")
+        random_crop(test_events, size, samples, rng, pre_sample_dir, sample_dir, cloud_threshold, filter=filter, typ="test")
 
     logger.debug('Preprocessing complete.')
 
@@ -446,11 +455,11 @@ if __name__ == '__main__':
     parser.add_argument('-x', '--size', dest='size', type=int, default=68, help='pixel width of patch (default: 68)')
     parser.add_argument('-n', '--samples', dest='samples', type=int, default=1000, help='number of samples per image (default: 500)')
     parser.add_argument('-s', '--seed', dest='seed', type=int, default=433002, help='random number generator seed (default: 433002)')
-    parser.add_argument('-m', '--method', dest='method', default='minibatch', choices=['minibatch'], help='sampling method (default: minibatch)')
+    parser.add_argument('-m', '--method', dest='method', default='random', choices=['random'], help='sampling method (default: random)')
     parser.add_argument('-c', '--cloud_threshold', type=float, default=0.1, help='cloud percentage threshold for patch sampling (default: 0.1)')
     parser.add_argument('--filter', default='raw', choices=['lee', 'raw'],
                         help=f"filters: enhanced lee, raw (default: raw)")
-    parser.add_argument('--sdir', dest='sample_dir', default='samples_200_6_4_10_sar/', help='(default: samples_200_6_4_10_sar/)')
+    parser.add_argument('--sdir', dest='sample_dir', default='samples_200_6_4_10_sar/', help='data directory in the sampling folder (default: samples_200_6_4_10_sar/)')
 
     args = parser.parse_args()
     sys.exit(main(args.size, args.samples, args.seed, method=args.method, cloud_threshold=args.cloud_threshold, filter=args.filter, sample_dir=args.sample_dir))

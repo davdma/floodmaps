@@ -11,11 +11,22 @@ import logging
 import pickle
 from sklearn.model_selection import train_test_split
 
-from utils.utils import SRC_DIR, SAMPLES_DIR
+from utils.utils import SRC_DIR, DATA_DIR, SAMPLES_DIR
 ### ADD DEMS IN THE FUTURE - CURRENTLY NOT THE SAME SHAPE
 
 def find_vv_vh_tifs(directory):
-    """Returns the vv and vh tif filepaths for a given event directory."""
+    """Returns the vv and vh tif filepaths for a given event directory.
+    
+    Parameters
+    ----------
+    directory : Path
+        Directory containing the multitemporal SAR files.
+        
+    Returns
+    -------
+    tuple[Path, Path]
+        Paths to the vv and vh tif files.
+    """
     directory = Path(directory)
 
     vv_files = list(directory.glob('vv_*.tif'))
@@ -28,7 +39,7 @@ def find_vv_vh_tifs(directory):
 
     return vv_files[0], vh_files[0]
 
-def generate_patches(events, size, num_samples, rng, sample_dir, typ="train"):
+def generate_patches(events, size, num_samples, rng, pre_sample_dir, sample_dir, typ="train"):
     """Uniformly samples sar patches of dimension size x size across each dataset tile. The
     patches are saved together into one file with enhanced lee filter.
 
@@ -44,7 +55,7 @@ def generate_patches(events, size, num_samples, rng, sample_dir, typ="train"):
 
     Parameters
     ----------
-    events : list[str]
+    events : list[Path]
         List of folders where multitemporal SAR tiles are stored.
     size : int
         Size of the sampled patches.
@@ -53,15 +64,14 @@ def generate_patches(events, size, num_samples, rng, sample_dir, typ="train"):
         number of temporal slices for total patches in dataset from the tile).
     rng : obj
         Random number generator.
+    pre_sample_dir : Path
+        Directory to save the preprocessed patches.
     sample_dir : str
         Directory containing raw S1 tiles for patch sampling.
     typ : str
         Subset assigned to the saved patches: train, val, test.
     """
     logger = logging.getLogger('preprocessing')
-
-    pre_sample_dir = SRC_DIR / f'data/ad/multi_{size}_{num_samples}/'
-    pre_sample_dir.mkdir(parents=True, exist_ok=True)
 
     # first load all samples into memory
     # SAR Preprocessing: labels will be stored in event sample folder
@@ -71,10 +81,11 @@ def generate_patches(events, size, num_samples, rng, sample_dir, typ="train"):
     # dem_dir = SAMPLES_DIR / 'samples_200_6_4_10_sar'
     total_iterations = len(events)
     for i, event in enumerate(events):
-        m = p1.search(str(event))
+        # Use Path.name to get just the directory name for regex matching
+        m = p1.search(event.name)
 
         if not m:
-            logger.info(f'No matching eid. Skipping {event}...')
+            logger.info(f'No matching eid. Skipping {event.name}...')
             continue
 
         eid = m.group(0)
@@ -140,11 +151,24 @@ def generate_patches(events, size, num_samples, rng, sample_dir, typ="train"):
             dataset[i * num_samples + patches_sampled] = patch
             patches_sampled += 1
 
-    np.save(pre_sample_dir / f'{typ}_patches.npy', dataset)
+    output_file = pre_sample_dir / f'{typ}_patches.npy'
+    np.save(output_file, dataset)
 
     logger.info('Sampling complete.')
 
 def get_min_max(all_values):
+    """Calculate min and max values from a list of arrays, filtering outliers.
+    
+    Parameters
+    ----------
+    all_values : list[ndarray]
+        List of arrays containing values to calculate min/max from.
+        
+    Returns
+    -------
+    tuple[float, float]
+        Min and max values within the 1st to 99th percentile range.
+    """
     # concatenate all values
     all_values = np.concatenate(all_values)
 
@@ -163,6 +187,16 @@ def get_min_max(all_values):
 def trainMinMax(train_events):
     """Calculate min and max of composite vv and vh (useful for PSNR, SSIM),
     filtering out missing values.
+    
+    Parameters
+    ----------
+    train_events : list[Path]
+        List of training flood event folders where raw data tiles are stored.
+        
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Min and max values for vv and vh channels.
     """
     logger = logging.getLogger('preprocessing')
 
@@ -179,7 +213,8 @@ def trainMinMax(train_events):
     total_iterations = len(train_events)
     p1 = re.compile('\d{8}_\d+_\d+')
     for i, event in enumerate(train_events):
-        m = p1.search(str(event))
+        # Use Path.name to get just the directory name for regex matching
+        m = p1.search(event.name)
 
         if not m:
             logger.info(f'No matching eid during mean std calculation. Skipping {event}...')
@@ -226,7 +261,7 @@ def trainMean(train_events):
 
     Parameters
     ----------
-    train_events : list[str]
+    train_events : list[Path]
         List of training flood event folders where raw data tiles are stored.
 
     Returns
@@ -245,7 +280,8 @@ def trainMean(train_events):
     p1 = re.compile('\d{8}_\d+_\d+')
     total_iterations = len(train_events)
     for i, event in enumerate(train_events):
-        m = p1.search(str(event))
+        # Use Path.name to get just the directory name for regex matching
+        m = p1.search(event.name)
 
         if not m:
             logger.info(f'No matching eid during mean std calculation. Skipping {event}...')
@@ -287,7 +323,7 @@ def trainStd(train_events, train_means):
 
     Parameters
     ----------
-    train_events : list[str]
+    train_events : list[Path]
         List of training flood event folders where raw data tiles are stored.
     train_means : ndarray
         Channel means.
@@ -306,7 +342,8 @@ def trainStd(train_events, train_means):
     p1 = re.compile('\d{8}_\d+_\d+')
     total_iterations = len(train_events)
     for i, event in enumerate(train_events):
-        m = p1.search(str(event))
+        # Use Path.name to get just the directory name for regex matching
+        m = p1.search(event.name)
 
         if not m:
             logger.info(f'No matching eid during mean std calculation. Skipping {event}...')
@@ -348,7 +385,7 @@ def trainStd(train_events, train_means):
     return overall_channel_std
 
 
-def main(size, samples, seed, sample_dir='samples_multi_sar_70_10_7/'):
+def main(size, samples, seed, method='random', sample_dir='samples_multi_sar_70_10_7/'):
     """Preprocesses multitemporal SAR tiles into paired single vs composite patches for conditional generation.
 
     Parameters
@@ -371,31 +408,38 @@ def main(size, samples, seed, sample_dir='samples_multi_sar_70_10_7/'):
     logger.addHandler(handler)
     logger.propagate = False
 
-    sample_dir = SAMPLES_DIR / sample_dir
+    # make our preprocess directory
+    pre_sample_dir = DATA_DIR / 'multi' / f'samples_{size}_{samples}/'
+    pre_sample_dir.mkdir(parents=True, exist_ok=True)
 
     # randomly select samples to be in train and test set
-    all_events = list(sample_dir.glob('[0-9]*'))
+    sample_path = SAMPLES_DIR / sample_dir
+    all_events = list(sample_path.glob('[0-9]*'))
     train_events, val_test_events = train_test_split(all_events, test_size=0.2, random_state=seed - 20)
     val_events, test_events = train_test_split(val_test_events, test_size=0.5, random_state=seed + 1222)
 
-    # calculate min and max of train tiles for later metrics (PSNR, SSIM)
-    min_val_vv, max_val_vv, min_val_vh, max_val_vh = trainMinMax(train_events)
-    with open(SRC_DIR / f'data/ad/stats/multi_{size}_{samples}_range_percentile.pkl', 'wb') as f:
-        pickle.dump((min_val_vv, max_val_vv, min_val_vh, max_val_vh), f)
+    # TBD: calculate min and max of train tiles for later metrics (PSNR, SSIM)
+    # min_val_vv, max_val_vv, min_val_vh, max_val_vh = trainMinMax(train_events)
+    # stats_dir = DATA_DIR / 'ad/stats'
+    # stats_dir.mkdir(parents=True, exist_ok=True)
+    # with open(stats_dir / f'multi_{size}_{samples}_range_percentile.pkl', 'wb') as f:
+    #     pickle.dump((min_val_vv, max_val_vv, min_val_vh, max_val_vh), f)
 
     # calculate mean and std of train tiles
     mean = trainMean(train_events)
     std = trainStd(train_events, mean)
 
     # also store training vv, vh mean std statistics in file
-    with open(SRC_DIR / f'data/ad/stats/multi_{size}_{samples}.pkl', 'wb') as f:
+    stats_file = pre_sample_dir / f'mean_std_{size}_{samples}.pkl'
+    with open(stats_file, 'wb') as f:
         pickle.dump((mean, std), f)
-
-    rng = Random(seed)
-
-    generate_patches(train_events, size, samples, rng, sample_dir, typ="train")
-    generate_patches(val_events, size, samples, rng, sample_dir, typ="val")
-    generate_patches(test_events, size, samples, rng, sample_dir, typ="test")
+    logger.info('Training mean and std statistics saved.')
+ 
+    if method == 'random':
+        rng = Random(seed)
+        generate_patches(train_events, size, samples, rng, sample_dir, typ="train")
+        generate_patches(val_events, size, samples, rng, sample_dir, typ="val")
+        generate_patches(test_events, size, samples, rng, sample_dir, typ="test")
 
     logger.debug('Preprocessing complete.')
 
@@ -405,7 +449,8 @@ if __name__ == '__main__':
     parser.add_argument('-x', '--size', dest='size', type=int, default=64, help='pixel width of patch (default: 64)')
     parser.add_argument('-n', '--samples', dest='samples', type=int, default=500, help='number of samples per image (default: 500)')
     parser.add_argument('-s', '--seed', dest='seed', type=int, default=433002, help='random number generator seed (default: 433002)')
-    parser.add_argument('--sdir', dest='sample_dir', default='samples_multi_sar_70_10_7/', help='(default: samples_multi_sar_70_10_7/)')
+    parser.add_argument('-m', '--method', dest='method', default='random', choices=['random'], help='sampling method (default: random)')
+    parser.add_argument('--sdir', dest='sample_dir', default='samples_multi_sar_70_10_7/', help='data directory in the sampling folder (default: samples_multi_sar_70_10_7/)')
 
     args = parser.parse_args()
-    sys.exit(main(args.size, args.samples, args.seed, sample_dir=args.sample_dir))
+    sys.exit(main(args.size, args.samples, args.seed, method=args.method, sample_dir=args.sample_dir))

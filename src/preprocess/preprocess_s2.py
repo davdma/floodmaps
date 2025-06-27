@@ -308,8 +308,8 @@ def main(size, samples, seed, method='random', sample_dir='samples_200_5_4_35/',
         pickle.dump((mean, std), f)
     logger.info('Training mean and std statistics saved.')
     
-    rng = Random(seed)
     if method == 'random':
+        rng = Random(seed)
         random_crop(TRAIN_LABELS, size, samples, rng, pre_sample_dir, sample_dir, label_dir, typ="train")
         random_crop(VAL_LABELS, size, samples, rng, pre_sample_dir, sample_dir, label_dir, typ="val")
         random_crop(TEST_LABELS, size, samples, rng, pre_sample_dir, sample_dir, label_dir, typ="test")

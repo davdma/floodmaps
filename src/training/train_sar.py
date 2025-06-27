@@ -23,7 +23,7 @@ from pathlib import Path
 
 from models.model import SARWaterDetector
 from utils.config import Config
-from utils.utils import (SRC_DIR, RESULTS_DIR, Metrics, EarlyStopper,
+from utils.utils import (SRC_DIR, DATA_DIR, RESULTS_DIR, Metrics, EarlyStopper,
                          SARChannelIndexer, get_model_params)
 from training.loss import LossConfig
 from training.dataset import FloodSampleSARDataset
@@ -621,12 +621,12 @@ def run_experiment_s1(cfg, ad_cfg=None):
     filter = 'lee' if cfg.data.use_lee else 'raw'
     size = cfg.data.size
     samples = cfg.data.samples
-    sample_dir = SRC_DIR / f'data/sar/minibatch/{filter}/samples_{size}_{samples}/'
+    sample_dir = DATA_DIR / 'sar' / f'samples_{size}_{samples}_{filter}/'
 
     # load in mean and std
     channels = [bool(int(x)) for x in cfg.data.channels]
     b_channels = sum(channels[-2:])
-    with open(SRC_DIR / f'data/sar/stats/minibatch_{filter}_{size}_{samples}.pkl', 'rb') as f:
+    with open(sample_dir / f'mean_std_{size}_{samples}_{filter}.pkl', 'rb') as f:
         train_mean, train_std = pickle.load(f)
 
         train_mean = torch.from_numpy(train_mean[channels])

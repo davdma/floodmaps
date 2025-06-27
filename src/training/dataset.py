@@ -248,8 +248,91 @@ class FloodSampleSARDataset(Dataset):
 
         return x, y
 
+class FloodSampleS2Dataset(Dataset):
+    """An abstract class representing the S2 flood labelling dataset. The entire dataset is
+    lazily loaded into CPU memory at initialization and then retrieved by indexing. Subsetting
+    channels is done during retrieval.
+
+    The class does not have knowledge of the dimensions of the patches of the dataset which are
+    set during preprocessing. The class assumes the data has 10 channels:
+
+    1. TCI R (0-255)
+    2. TCI G (0-255)
+    3. TCI B (0-255)
+    4. B08 Near Infrared
+    5. NDWI
+    6. DEM
+    7. Slope Y
+    8. Slope X
+    9. Waterbody
+    10. Roads
+
+    The last N+1 channel is the label.
+
+    Parameters
+    ----------
+    sample_dir : str
+        Path to directory containing dataset (in npy file).
+    channels : list[bool]
+        List of N booleans corresponding to the N input channels.
+    typ : str
+        The subset of the dataset to load: train, val, test.
+    transform : obj
+        PyTorch transform.
+    random_flip : bool
+        Randomly flip patches (vertically or horizontally) for augmentation.
+    seed : int
+        Random seed.
+    """
+    def __init__(self, sample_dir, channels=[True] * 10, typ="train", random_flip=False, transform=None, seed=3200):
+        self.sample_dir = Path(sample_dir)
+        self.channels = channels + [True] # always keep label
+        self.typ = typ
+        self.random_flip = random_flip
+        self.transform = transform
+        self.seed = seed
+
+        # first load data in
+        self.dataset = np.load(self.sample_dir / f"{typ}_patches.npy")
+
+        if random_flip:
+            self.random = Random(seed)
+
+    def __len__(self):
+        return self.dataset.shape[0]
+
+    def __getitem__(self, idx):
+        patch = self.dataset[idx, self.channels, :, :]
+        image = torch.from_numpy(patch[:-1, :, :])
+        label = torch.from_numpy(patch[-1, :, :]).unsqueeze(0)
+
+        if self.transform:
+            # for standardization only standardize the non-binary channels!
+            image = self.transform(image)
+
+        # add random flips and rotations? Could help prevent learning constant shift...
+        if self.random_flip and self.typ == "train":
+            image, label = self.hv_random_flip(image, label)
+
+        return image, label
+
+    def hv_random_flip(self, x, y):
+        # Random horizontal flipping
+        if self.random.random() > 0.5:
+            x = torch.flip(x, [2])
+            y = torch.flip(y, [2])
+
+        # Random vertical flipping
+        if self.random.random() > 0.5:
+            x = torch.flip(x, [1])
+            y = torch.flip(y, [1])
+
+        return x, y
+
 class FloodSampleDataset(Dataset):
-    """An abstract class representing the Sentinel-2 flood labelling dataset. The entire dataset is
+    """DEPRECATED: DO NOT USE.
+    
+    An abstract class representing the Sentinel-2 flood labelling dataset. The entire dataset is
     stored as individual files with the 10 input channels of each patch stored in sample_dir and the
     corresponding label for the patch stored in label_dir. The files are loaded into memory and cached
     in a multiprocessing array to be shared between pytorch dataloader workers.

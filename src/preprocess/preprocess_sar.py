@@ -138,7 +138,7 @@ def random_crop(events, size, num_samples, rng, pre_sample_dir, sample_dir, clou
     logger.info('Tiles loaded.')
 
     # loop over all events to generate samples for each epoch
-    logger.info('Generating minibatches...')
+    logger.info('Sampling random patches...')
     # want to store 7 channels + label + tci
     total_patches = num_samples * len(tiles)
     dataset = np.empty((total_patches, 11, size, size), dtype=np.float32)
@@ -442,8 +442,8 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
         pickle.dump((mean, std), f)
     logger.info('Training mean and std statistics saved.')
 
-    rng = Random(seed)
     if method == 'random':
+        rng = Random(seed)
         random_crop(train_events, size, samples, rng, pre_sample_dir, sample_dir, cloud_threshold, filter=filter, typ="train")
         random_crop(val_events, size, samples, rng, pre_sample_dir, sample_dir, cloud_threshold, filter=filter, typ="val")
         random_crop(test_events, size, samples, rng, pre_sample_dir, sample_dir, cloud_threshold, filter=filter, typ="test")

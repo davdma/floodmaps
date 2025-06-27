@@ -26,7 +26,7 @@ from training.optim import get_optimizer
 from training.scheduler import get_scheduler
 from training.loss import get_ad_loss
 from utils.config import Config
-from utils.utils import (ADEarlyStopper, Metrics, BetaScheduler, get_gradient_norm,
+from utils.utils import (DATA_DIR,ADEarlyStopper, Metrics, BetaScheduler, get_gradient_norm,
                    get_model_params, print_model_params_and_grads)
 from utils.metrics import (denormalize, TV_loss, var_laplacian, ssi, get_random_batch,
                     enl, RIS, quality_m)
@@ -607,10 +607,10 @@ def run_experiment_ad(cfg):
     kernel_size = cfg.data.kernel_size
     size = cfg.data.size
     samples = cfg.data.samples
-    sample_dir = f'data/ad/samples_{kernel_size}_{size}_{samples}_dem/'
+    sample_dir = DATA_DIR / 'ad' / f'samples_{kernel_size}_{size}_{samples}_dem/'
 
     # load in mean and std
-    with open(f'data/ad/stats/{kernel_size}_{size}_{samples}_dem.pkl', 'rb') as f:
+    with open(sample_dir / f'mean_std_{kernel_size}_{size}_{samples}_dem.pkl', 'rb') as f:
         train_mean, train_std = pickle.load(f)
         train_mean = torch.from_numpy(train_mean)
         train_std = torch.from_numpy(train_std)

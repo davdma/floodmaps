@@ -190,17 +190,17 @@ class S2WaterDetector(nn.Module):
         B = x.shape[0]
         device = x.device
         if self.discriminator is not None:
-            wet_probs = self.discriminator(x).view(-1)  # [B]
+            discriminator_logits = self.discriminator(x).view(-1)  # [B]
+            wet_probs = torch.sigmoid(discriminator_logits)  # [B]
             wet_mask = wet_probs > 0.5  # [B] boolean
-            pred = torch.zeros((B, 1, self.size, self.size), dtype=torch.uint8, device=device)
+            # Use large negative logits for dry patches to ensure sigmoid ≈ 0
+            logits = torch.full((B, 1, self.size, self.size), -10.0, dtype=torch.float32, device=device)
             if wet_mask.any():
-                logits = self.classifier(x[wet_mask])  # [N_wet, 1, SIZE, SIZE]
-                pred_wet = torch.where(nn.functional.sigmoid(logits) > 0.5, 1.0, 0.0).byte()
-                pred[wet_mask] = pred_wet
+                classifier_logits = self.classifier(x[wet_mask])  # [N_wet, 1, SIZE, SIZE]
+                logits[wet_mask] = classifier_logits
         else:
             logits = self.classifier(x)
-            pred = torch.where(nn.functional.sigmoid(logits) > 0.5, 1.0, 0.0).byte() # [B, 1, SIZE, SIZE]
-        return pred
+        return logits
 
 class SARWaterDetector(nn.Module):
     """General S1 water pixel detection model with classifier and optional autodespeckler.

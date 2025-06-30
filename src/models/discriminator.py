@@ -24,8 +24,7 @@ class Classifier1(nn.Module):
         self.dblock5 = DiscriminatorBlock1(128, 256, first_block=False)
         self.dblock6 = DiscriminatorBlock1(256, 256, first_block=False)
         self.dblock7 = DiscriminatorBlock1(256, 512, first_block=False)
-        self.out = nn.Sequential(nn.Conv2d(512, 1, kernel_size=3, stride=1, padding=1),
-                                 nn.Sigmoid())
+        self.out = nn.Conv2d(512, 1, kernel_size=3, stride=1, padding=1)
 
     def forward(self, x):
         x = self.dblock1(x)
@@ -76,8 +75,7 @@ class Classifier2(nn.Module):
             nn.AdaptiveAvgPool2d(1),
             nn.Conv2d(512, 1024, kernel_size=1, stride=1, padding=0),
             nn.LeakyReLU(0.2),
-            nn.Conv2d(1024, 1, kernel_size=1, stride=1, padding=0),
-            nn.Sigmoid()
+            nn.Conv2d(1024, 1, kernel_size=1, stride=1, padding=0)
         )
 
     def forward(self, x):
@@ -105,43 +103,3 @@ class Classifier3(nn.Module):
         x = self.dblock3(x)
         x = self.dblock4(x)
         return self.out(x).flatten()
-
-class SARDiscriminator(nn.Module):
-    """For discriminator loss (clean multitemporal vs single SAR image) 
-    in SAR despeckling task. Uses leaky relu for non-linearity."""
-    def __init__(self, in_channels=2, n_layers=4, base_channels=64):
-        """Construct a CNN discriminator for sar despeckling task
-
-        Parameters:
-        -----------
-        in_channels: int
-            number of channels in input images
-        n_layers: int
-            number of conv layers in the discriminator
-        base_channels: int
-            number of filters in the first conv layer
-        """
-        super().__init__()
-        assert n_layers <= 6, "layers cannot be greater than 6"
-        self.in_channels = in_channels
-        self.n_layers = n_layers
-        self.base_channels = base_channels
-
-        # Input: (B, in_channels, 64, 64)
-        layers = [nn.Conv2d(in_channels, base_channels, kernel_size=4, stride=2, padding=1),
-                  nn.LeakyReLU(0.2, inplace=True)] # -> (B, 64, 32, 32)
-        size = 32
-
-        for i in range(n_layers - 1):
-            layers.append(nn.Conv2d(base_channels * (2 ** i), base_channels * (2 ** (i + 1)), kernel_size=4, stride=2, padding=1))
-            layers.append(nn.BatchNorm2d(base_channels * (2 ** (i + 1))))
-            layers.append(nn.LeakyReLU(0.2, inplace=True))
-            size //= 2
-
-        layers.append(nn.Flatten())
-        layers.append(nn.Linear(base_channels * (2 ** (n_layers - 1)) * size * size, 1))
-        self.model = nn.Sequential(*layers)
-
-    def forward(self, x):
-        return self.model(x)
-        

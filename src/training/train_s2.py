@@ -2,38 +2,60 @@ import wandb
 import torch
 import logging
 import argparse
-import copy
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
 from datetime import datetime
-from dataset import FloodSampleDataset
-from utils import trainMeanStd, EarlyStopper, ChannelIndexer
+from dataset import FloodSampleS2Dataset
 from torchvision import transforms
-from torcheval.metrics import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score
-from architectures.unet import UNet
-from architectures.unet_plus import NestedUNet
+from torchmetrics import MetricCollection
+from torchmetrics.classification import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
 import random
 from random import Random
 from PIL import Image
-from glob import glob
 from loss import BCEDiceLoss, TverskyLoss
 import numpy as np
 import sys
+from models.model import S2WaterDetector
+from utils.utils import DATA_DIR, RESULTS_DIR, get_model_params, Metrics, EarlyStopper, ChannelIndexer
+from utils.config import Config
+import pickle
+from training.optim import get_optimizer
+from training.scheduler import get_scheduler
+from pathlib import Path
+import json
+
+# TO IMPLEMENT: WITH DISCRIMINATOR, ADDITIONAL TRACKING OF DISCRIMINATOR OUTPUTS
+# COULD ALSO CONSIDER REMOVING DISCRIMINATOR, ONLY ATTACHING FOR TEST SET EVALUATION
 
 MODEL_NAMES = ['unet', 'unet++']
 LOSS_NAMES = ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
 
+def get_loss_fn(cfg):
+    if cfg.train.loss == 'BCELoss':
+        loss_fn = nn.BCEWithLogitsLoss()
+    elif cfg.train.loss == 'BCEDiceLoss':
+        loss_fn = BCEDiceLoss()
+    elif cfg.train.loss == 'TverskyLoss':
+        loss_fn = TverskyLoss(alpha=cfg.train.tversky.alpha, beta=cfg.train.tversky.beta)
+    else:
+        raise Exception(f'Loss function not found. Must be one of {LOSS_NAMES}')
+
+    return loss_fn
+
 # get our optimizer and metrics
-def train_loop(dataloader, model, device, loss_fn, optimizer, epoch):
-    running_loss = 0.0
-    num_batches = len(dataloader)
-    metric_acc = BinaryAccuracy(threshold=0.5, device=device)
-    metric_pre = BinaryPrecision(threshold=0.5, device=device)
-    metric_rec = BinaryRecall(threshold=0.5, device=device)
-    metric_f1 = BinaryF1Score(threshold=0.5, device=device)
+def train_loop(model, dataloader, device, optimizer, loss_fn, run, epoch):
+    running_loss = torch.tensor(0.0, device=device)
+    metric_collection = MetricCollection([
+        BinaryAccuracy(threshold=0.5),
+        BinaryPrecision(threshold=0.5),
+        BinaryRecall(threshold=0.5),
+        BinaryF1Score(threshold=0.5)
+    ]).to(device)
+    all_preds = []
+    all_targets = []
 
     model.train()
     for X, y in dataloader:
@@ -47,32 +69,65 @@ def train_loop(dataloader, model, device, loss_fn, optimizer, epoch):
         loss.backward()
         optimizer.step()
 
-        pred_y = nn.functional.sigmoid(logits).flatten()
-        target = y.int().flatten()
-        metric_acc.update(pred_y, target)
-        metric_pre.update(pred_y, target)
-        metric_rec.update(pred_y, target)
-        metric_f1.update(pred_y, target)
-        running_loss += loss.item()
+        y_pred = nn.functional.sigmoid(logits).flatten() > 0.5
+        target = y.flatten() > 0.5
+        all_preds.append(y_pred)
+        all_targets.append(target)
+        running_loss += loss.detach()
 
-    # wandb tracking loss and accuracy per epoch
-    epoch_acc = metric_acc.compute().item()
-    epoch_pre = metric_pre.compute().item()
-    epoch_rec = metric_rec.compute().item()
-    epoch_f1 = metric_f1.compute().item()
-    epoch_loss = running_loss / num_batches
-    wandb.log({"train accuracy": epoch_acc, "train precision": epoch_pre, 
-               "train recall": epoch_rec, "train f1": epoch_f1, "train loss": epoch_loss}, step=epoch)
-    
+    # calculate metrics
+    all_preds = torch.cat(all_preds)
+    all_targets = torch.cat(all_targets)
+
+    metric_collection.update(all_preds, all_targets)
+    metric_results = metric_collection.compute()
+    epoch_loss = running_loss.item() / len(dataloader)
+
+    # wandb tracking loss and metrics per epoch - track recons loss as well
+    log_dict = {"train accuracy": metric_results['BinaryAccuracy'].item(),
+                "train precision": metric_results['BinaryPrecision'].item(),
+                "train recall": metric_results['BinaryRecall'].item(),
+                "train f1": metric_results['BinaryF1Score'].item(),
+                "train loss": epoch_loss}
+    run.log(log_dict, step=epoch)
+    metric_collection.reset()
+
     return epoch_loss
 
-def test_loop(dataloader, model, device, loss_fn, epoch, logging=True):
-    running_vloss = 0.0
-    num_batches = len(dataloader)
-    metric_acc = BinaryAccuracy(threshold=0.5, device=device)
-    metric_pre = BinaryPrecision(threshold=0.5, device=device)
-    metric_rec = BinaryRecall(threshold=0.5, device=device)
-    metric_f1 = BinaryF1Score(threshold=0.5, device=device)
+def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
+    """Evaluate model on validation or test set with optional wandb logging.
+    
+    Parameters
+    ----------
+    model : torch.nn.Module
+        The model to evaluate
+    dataloader : torch.utils.data.DataLoader
+        DataLoader for the evaluation set
+    device : torch.device
+        Device to run evaluation on
+    loss_fn : callable
+        Loss function
+    run : wandb.run
+        Wandb run object for logging (can be None for test evaluation)
+    epoch : int
+        Current epoch number (used for wandb logging)
+    typ : str, optional
+        Type of evaluation: 'val' for validation (logs to wandb), 'test' for test (no logging)
+    
+    Returns
+    -------
+    tuple
+        (epoch_loss, metrics_dict)
+    """
+    running_vloss = torch.tensor(0.0, device=device)
+    metric_collection = MetricCollection([
+        BinaryAccuracy(threshold=0.5),
+        BinaryPrecision(threshold=0.5),
+        BinaryRecall(threshold=0.5),
+        BinaryF1Score(threshold=0.5)
+    ]).to(device)
+    all_preds = []
+    all_targets = []
     
     model.eval()
     with torch.no_grad():
@@ -83,178 +138,151 @@ def test_loop(dataloader, model, device, loss_fn, epoch, logging=True):
             logits = model(X)
             loss = loss_fn(logits, y.float())
             
-            running_vloss += loss.item()
-            
-            pred_y = nn.functional.sigmoid(logits).flatten()
-            target = y.int().flatten()
-            metric_acc.update(pred_y, target)
-            metric_pre.update(pred_y, target)
-            metric_rec.update(pred_y, target)
-            metric_f1.update(pred_y, target)
+            y_pred = nn.functional.sigmoid(logits).flatten() > 0.5
+            target = y.flatten() > 0.5
+            all_preds.append(y_pred)
+            all_targets.append(target)
+            running_vloss += loss.detach()
 
-    epoch_vacc = metric_acc.compute().item()
-    epoch_vpre = metric_pre.compute().item()
-    epoch_vrec = metric_rec.compute().item()
-    epoch_vf1 = metric_f1.compute().item()
-    epoch_vloss = running_vloss / num_batches
-    if logging:
-        wandb.log({"val accuracy": epoch_vacc, "val precision": epoch_vpre,
-                   "val recall": epoch_vrec, "val f1": epoch_vf1, "val loss": epoch_vloss}, step=epoch)
+    # calculate metrics
+    all_preds = torch.cat(all_preds)
+    all_targets = torch.cat(all_targets)
 
-    epoch_vmetrics = (epoch_vacc, epoch_vpre, epoch_vrec, epoch_vf1)
-    return epoch_vloss, epoch_vmetrics
+    metric_collection.update(all_preds, all_targets)
+    metric_results = metric_collection.compute()
+    epoch_vloss = running_vloss.item() / len(dataloader)
 
-def train(train_set, val_set, test_set, model, device, config, save='model'):
+    metrics_dict = {
+        f"{typ} accuracy": metric_results['BinaryAccuracy'].item(),
+        f"{typ} precision": metric_results['BinaryPrecision'].item(),
+        f"{typ} recall": metric_results['BinaryRecall'].item(),
+        f"{typ} f1": metric_results['BinaryF1Score'].item()
+    }
+    
+    # Only log to wandb for validation (not for test evaluation)
+    if typ == 'val' and run is not None:
+        log_dict = metrics_dict.copy()
+        log_dict.update({f'{typ} loss': epoch_vloss})
+        run.log(log_dict, step=epoch)
+
+    metric_collection.reset()
+
+    return epoch_vloss, metrics_dict
+
+def train(model, train_loader, val_loader, test_loader, device, cfg, run):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     logging.info(f'''Starting training:
         Date:            {timestamp}
-        Epochs:          {config['epochs']}
-        Batch size:      {config['batch_size']}
-        Learning rate:   {config['learning_rate']}
-        Training size:   {len(train_set)}
-        Validation size: {len(val_set)}
+        Epochs:          {cfg.train.epochs}
+        Batch size:      {cfg.train.batch_size}
+        Learning rate:   {cfg.train.lr}
+        Training size:   {len(train_loader.dataset)}
+        Validation size: {len(val_loader.dataset)}
+        Test size:       {len(test_loader.dataset) if test_loader is not None else 'NA'}
         Device:          {device}
     ''')
+    # log weights and gradients each epoch
+    run.watch(model, log="all", log_freq=10)
 
-    # log via wandb
-    run = wandb.init(
-        project=config['project'],
-        group=config['group'],
-        config={
-        "dataset": "Sentinel2",
-        "mode": config['mode'],
-        "method": config['method'],
-        "channels": ''.join('1' if b else '0' for b in config['channels']),
-        "patch_size": config['size'],
-        "samples": config['samples'],
-        "architecture": config['name'],
-        "dropout": config['dropout'],
-        "deep_supervision": config['deep_supervision'] if config['name'] == 'unet++' else None,
-        "learning_rate": config['learning_rate'],
-        "epochs": config['epochs'],
-        "early_stopping": config['early_stopping'],
-        "patience": config['patience'],
-        "batch_size": config['batch_size'],
-        "num_workers": config['num_workers'],
-        "optimizer": config['optimizer'],
-        "loss_fn": config['loss'],
-        "alpha": config['alpha'],
-        "beta": config['beta'],
-        "training_size": len(train_set),
-        "validation_size": len(val_set),
-        "test_size": len(test_set) if config['mode'] == 'test' else None,
-        "val_percent": len(val_set) / (len(train_set) + len(val_set)),
-        "save_file": save
-        }
-    )
-    
-    # initialize loss function
-    if config['loss'] == 'BCELoss':
-        loss_fn = nn.BCEWithLogitsLoss()
-    elif config['loss'] == 'BCEDiceLoss':
-        loss_fn = BCEDiceLoss()
-    elif config['loss'] == 'TverskyLoss':
-        loss_fn = TverskyLoss(alpha=config['alpha'], beta=config['beta'])
-    else:
-        raise Exception('Loss function not found.')
+    # loss function
+    loss_fn = get_loss_fn(cfg)
 
     # optimizer and scheduler for reducing learning rate
-    if config['optimizer'] == 'Adam':
-        optimizer = torch.optim.Adam(model.parameters(), lr=config['learning_rate'])
-    elif config['optimizer'] == 'SGD':
-        optimizer = torch.optim.SGD(model.parameters(), lr=config['learning_rate'])
-    else:
-        raise Exception('Optimizer not found.')
+    optimizer = get_optimizer(model, cfg)
+    scheduler = get_scheduler(optimizer, cfg)
+
+    if cfg.train.early_stopping:
+        early_stopper = EarlyStopper(patience=cfg.train.patience)
     
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5)
+    for epoch in range(cfg.train.epochs):
+        try:
+            # train loop
+            avg_loss = train_loop(model, train_loader, device, optimizer, loss_fn, run, epoch)
 
-    # make DataLoader
-    train_loader = DataLoader(train_set,
-                             batch_size=config['batch_size'],
-                             num_workers=config['num_workers'],
-                             persistent_workers=config['num_workers']>0,
-                             pin_memory=True,
-                             shuffle=True,
-                             drop_last=False)
-    
-    val_loader = DataLoader(val_set,
-                            batch_size=config['batch_size'],
-                            num_workers=config['num_workers'],
-                            persistent_workers=config['num_workers']>0,
-                            pin_memory=True,
-                            shuffle=True,
-                            drop_last=False)
+            # at the end of each training epoch compute validation
+            avg_vloss, val_set_metrics = test_loop(model, val_loader, device, loss_fn, run, epoch, typ='val')
+        except Exception as err:
+            raise RuntimeError(f'Error while training occurred at epoch {epoch}.') from err
 
-    test_loader = DataLoader(test_set,
-                            batch_size=config['batch_size'],
-                            num_workers=config['num_workers'],
-                            persistent_workers=config['num_workers']>0,
-                            pin_memory=True,
-                            shuffle=True,
-                            drop_last=False) if config['mode'] == 'test' else None
-
-    # TRAIN AND TEST LOOP IS PER EPOCH!!!
-    if config['early_stopping']:
-        early_stopper = EarlyStopper(patience=config['patience'])
-
-        # best model checkpoint
-        min_model_weights = model.state_dict()
-    
-    # best summary params
-    wandb.define_metric("val accuracy", summary="max")
-    wandb.define_metric("val precision", summary="max")
-    wandb.define_metric("val recall", summary="max")
-    wandb.define_metric("val f1", summary="max")
-    wandb.define_metric("val loss", summary="min")
-    for epoch in range(config['epochs']):
-        # train loop
-        avg_loss = train_loop(train_loader, model, device, loss_fn, optimizer, epoch)
-
-        # at the end of each training epoch compute validation
-        avg_vloss, avg_vmetrics = test_loop(val_loader, model, device, loss_fn, epoch)
-
-        if config['early_stopping']:
-            early_stopper.step(avg_vloss)
+        if cfg.train.early_stopping:
+            early_stopper.step(avg_vloss, model)
+            early_stopper.store_best_metrics(val_set_metrics)
             if early_stopper.is_stopped():
                 break
-                
-            if early_stopper.is_best_epoch():
-                early_stopper.store_metric(avg_vmetrics)
-                # Model weights are saved at the end of every epoch, if it's the best seen so far:
-                min_model_weights = copy.deepcopy(model.state_dict())
-            
-        scheduler.step(avg_vloss)
 
-        if epoch == 0:
-            # allows loader to use cache after first epoch
-            train_loader.dataset.set_use_cache(True)
-            val_loader.dataset.set_use_cache(True)
+        if scheduler is not None:
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(avg_vloss)
+            else:
+                scheduler.step()
+            
+        run.log({"learning_rate": scheduler.get_last_lr()[0] if scheduler is not None else cfg.train.lr}, step=epoch)
 
     # Save our model
-    PATH = 'models/' + save + '.pth'
-    if config['early_stopping']:
-        torch.save(min_model_weights, PATH)
-
+    fmetrics = Metrics(use_partitions=False)
+    cls_weights = None
+    if cfg.train.early_stopping:
+        model_weights = early_stopper.get_best_weights()
+        best_val_metrics = early_stopper.get_best_metrics()
         # reset model to checkpoint for later sample prediction
-        model.load_state_dict(min_model_weights)
-        final_vmetrics = early_stopper.get_metric()
+        model.load_state_dict(model_weights)
+        cls_weights = model.classifier.state_dict()
+        disc_weights = (model.discriminator.state_dict()
+                      if model.uses_discriminator() else None)
+        fmetrics.save_metrics('val', loss=early_stopper.get_min_validation_loss(), **best_val_metrics)
+        run.summary.update({f'final model {key}': value for key, value in best_val_metrics.items()})
     else:
-        torch.save(model.state_dict(), PATH)
-        final_vmetrics = avg_vmetrics
+        cls_weights = model.classifier.state_dict()
+        disc_weights = (model.discriminator.state_dict()
+                      if model.uses_discriminator() else None)
+        fmetrics.save_metrics('val', loss=avg_vloss, **val_set_metrics)
+        run.summary.update({f'final model {key}': value for key, value in val_set_metrics.items()})
 
-    if config['mode'] == 'test':
-        # test mode
-        _, final_vmetrics = test_loop(test_loader, model, device, loss_fn, logging=False)
+    # for benchmarking purposes
+    if cfg.eval.mode == 'test':
+        test_loss, test_set_metrics = test_loop(model, test_loader, device, loss_fn, None, None, typ='test')
+        fmetrics.save_metrics('test', loss=test_loss, **test_set_metrics)
+        run.summary.update({f'final model {key}': value for key, value in test_set_metrics.items()})
 
-    return run, final_vmetrics
+    return cls_weights, disc_weights, fmetrics
 
-def sample_predictions(model, val_set, mean, std, config, seed=24330):
+def save_experiment(cls_weights, disc_weights, metrics, cfg, run):
+    """Save experiment files to directory specified by config save_path."""
+    path = Path(cfg.save_path)
+    path.mkdir(parents=True, exist_ok=True)
+
+    if cls_weights is not None:
+        torch.save(cls_weights, path / f"{cfg.model.classifier}_cls.pth")
+    if disc_weights is not None:
+        torch.save(disc_weights, path / f"{cfg.model.discriminator}_disc.pth")
+
+    # save config
+    cfg.save2yaml(path / "config.yaml")
+
+    # save metrics
+    metrics.to_json(path / "metrics.json")
+
+    # save wandb id info to json
+    wandb_info = {
+        "entity": run.entity,
+        "project": run.project,
+        "group": run.group,
+        "run_id": run.id,
+        "name": run.name,
+        "url": run.url,
+        "dir": run.dir
+    }
+    with open(path / f"wandb_info.json", "w") as f:
+        json.dump(wandb_info, f, indent=4)
+
+def sample_predictions(model, sample_set, mean, std, cfg, seed=24330):
     """Generate predictions on a subset of images in the validation set for wandb logging."""
-    if config['num_sample_predictions'] <= 0:
+    if cfg.wandb.num_sample_predictions <= 0:
         return None
         
     columns = ["id"]
-    my_channels = ChannelIndexer(config['channels'])
+    channels = [bool(int(x)) for x in cfg.data.channels]
+    my_channels = ChannelIndexer(channels)
     # initialize wandb table given the channel settings
     columns += my_channels.get_channel_names()
     columns += ["truth", "prediction", "false positive", "false negative"] # added residual binary map
@@ -274,7 +302,7 @@ def sample_predictions(model, val_set, mean, std, config, seed=24330):
     # get map of each channel to index of resulting tensor
     n = 0
     channel_indices = [-1] * 10
-    for i, channel in enumerate(config['channels']):
+    for i, channel in enumerate(channels):
         if channel:
             channel_indices[i] = n
             n += 1
@@ -282,21 +310,22 @@ def sample_predictions(model, val_set, mean, std, config, seed=24330):
     model.to('cpu')
     model.eval()
     rng = Random(seed)
-    samples = rng.sample(range(0, len(val_set)), config['num_sample_predictions'])
+    samples = rng.sample(range(0, len(sample_set)), cfg.wandb.num_sample_predictions)
 
     for id, k in enumerate(samples):
         # get all images to shape (H, W, C) with C = 1 or 3 (1 for grayscale, 3 for RGB)
-        X, y = val_set[k]
+        X, y = sample_set[k]
         
-        logits = model(X.unsqueeze(0))
+        with torch.no_grad():
+            logits = model(X.unsqueeze(0))
             
-        pred_y = torch.where(nn.functional.sigmoid(logits) > 0.5, 1.0, 0.0).squeeze(0) # (1, x, y)
+        y_pred = torch.where(nn.functional.sigmoid(logits) > 0.5, 1.0, 0.0).squeeze(0) # (1, x, y)
 
         # Compute false positives
-        fp = torch.logical_and(y == 0, pred_y == 1).squeeze(0).byte().mul(255).numpy()
+        fp = torch.logical_and(y == 0, y_pred == 1).squeeze(0).byte().mul(255).numpy()
         
         # Compute false negatives
-        fn = torch.logical_and(y == 1, pred_y == 0).squeeze(0).byte().mul(255).numpy()
+        fn = torch.logical_and(y == 1, y_pred == 0).squeeze(0).byte().mul(255).numpy()
 
         # Channels are descaled using linear variance scaling
         X = X.permute(1, 2, 0)
@@ -344,10 +373,10 @@ def sample_predictions(model, val_set, mean, std, config, seed=24330):
             row.append(wandb.Image(roads_img))
 
         y = y.squeeze(0).mul(255).clamp(0, 255).byte().numpy()
-        pred_y = pred_y.squeeze(0).mul(255).clamp(0, 255).byte().numpy()
+        y_pred = y_pred.squeeze(0).mul(255).clamp(0, 255).byte().numpy()
         
         truth_img = Image.fromarray(y, mode="L")
-        pred_img = Image.fromarray(pred_y, mode="L")
+        pred_img = Image.fromarray(y_pred, mode="L")
         fp_img = Image.fromarray(fp, mode="L")
         fn_img = Image.fromarray(fn, mode="L")
         row += [wandb.Image(truth_img), wandb.Image(pred_img), wandb.Image(fp_img), wandb.Image(fn_img)]
@@ -356,73 +385,147 @@ def sample_predictions(model, val_set, mean, std, config, seed=24330):
 
     return table
 
-def run_experiment_s2(config):
+def run_experiment_s2(cfg):
     """Run a single S2 model experiment given the configuration parameters."""
-    if wandb.login():
-        # seeding
-        np.random.seed(config['seed'])
-        random.seed(config['seed'])
-        torch.manual_seed(config['seed'])
-        
-        device = (
-            "cuda"
-            if torch.cuda.is_available()
-            else "mps"
-            if torch.backends.mps.is_available()
-            else "cpu"
-        )
-        n_channels = sum(config['channels'])
-        if config['name'] == "unet":
-            model = UNet(n_channels, dropout=config['dropout']).to(device)
-        else:
-            # unet++
-            model = NestedUNet(n_channels, dropout=config['dropout'], deep_supervision=config['deep_supervision']).to(device)
-        
-        print(f"Using {device} device")
-        method = config['method']
-        size = config['size']
-        samples = config['samples']
-        dataset_dir = f'data/s2/{method}/'
-        
-        train_mean, train_std = trainMeanStd(channels=config['channels'], 
-                                             sample_dir=config['sample_dir'], 
-                                             label_dir=config['label_dir'])
-        standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
-        
-        train_set = FloodSampleDataset(dataset_dir, channels=config['channels'], 
-                                       size=size, samples=samples, typ="train", transform=standardize)
-        val_set = FloodSampleDataset(dataset_dir, channels=config['channels'], 
-                                     size=size, samples=samples, typ="val", transform=standardize)
-        test_set = FloodSampleDataset(dataset_dir, channels=config['channels'], 
-                                      size=size, samples=samples, typ="test", transform=standardize) \
-                                      if config['mode'] == 'test' else None
-
-        model_name = config['name']
-        run, (final_vacc, final_vpre, final_vrec, final_vf1) = train(train_set, val_set, test_set, model, device, config, save=f"{model_name}_model{len(glob(f'models/{model_name}_model*.pth'))}")
-
-        # summary metrics
-        run.summary["final_acc"] = final_vacc
-        run.summary["final_pre"] = final_vpre
-        run.summary["final_rec"] = final_vrec
-        run.summary["final_f1"] = final_vf1
-            
-        # log predictions on validation set using wandb
-        try:
-            pred_table = sample_predictions(model, test_set if config['mode'] == 'test' else val_set, 
-                                            train_mean, train_std, config)
-            run.log({"model_val_predictions": pred_table})
-        finally:
-            run.finish()
-
-        return final_vacc, final_vpre, final_vrec, final_vf1
-    else:
+    if not wandb.login():
         raise Exception("Failed to login to wandb.")
 
-def main(config):
-    run_experiment_s2(config)
+    # seeding
+    np.random.seed(cfg['seed'])
+    random.seed(cfg['seed'])
+    torch.manual_seed(cfg['seed'])
+    
+    device = (
+        "cuda"
+        if torch.cuda.is_available()
+        else "mps"
+        if torch.backends.mps.is_available()
+        else "cpu"
+    )
+
+    # setup model
+    model = S2WaterDetector(cfg).to(device)
+
+    # dataset and transforms
+    print(f"Using {device} device")
+    model_name = cfg.model.classifier
+    size = cfg.data.size
+    samples = cfg.data.samples
+    sample_dir = DATA_DIR / 's2' / f'samples_{size}_{samples}/'
+
+    # n_channels = sum(cfg['channels'])
+    # load in mean and std
+    channels = [bool(int(x)) for x in cfg.data.channels]
+    b_channels = sum(channels[-2:])
+    with open(sample_dir / f'mean_std_{size}_{samples}.pkl', 'rb') as f:
+        train_mean, train_std = pickle.load(f)
+
+        train_mean = torch.from_numpy(train_mean[channels])
+        train_std = torch.from_numpy(train_std[channels])
+        # make sure binary channels are 0 mean and 1 std
+        if b_channels > 0:
+            train_mean[-b_channels:] = 0
+            train_std[-b_channels:] = 1
+
+    standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
+
+    # datasets
+    train_set = FloodSampleS2Dataset(sample_dir, channels=channels,
+                                        typ="train", transform=standardize, random_flip=cfg.data.random_flip,
+                                        seed=cfg.seed+1)
+    val_set = FloodSampleS2Dataset(sample_dir, channels=channels,
+                                    typ="val", transform=standardize)
+    test_set = FloodSampleS2Dataset(sample_dir, channels=channels,
+                                        typ="test", transform=standardize) if cfg.eval.mode == 'test' else None
+
+    # dataloaders
+    train_loader = DataLoader(train_set,
+                             batch_size=cfg.train.batch_size,
+                             num_workers=cfg.train.num_workers,
+                             persistent_workers=cfg.train.num_workers>0,
+                             pin_memory=True,
+                             shuffle=True,
+                             drop_last=False)
+
+    val_loader = DataLoader(val_set,
+                            batch_size=cfg.train.batch_size,
+                            num_workers=cfg.train.num_workers,
+                            persistent_workers=cfg.train.num_workers>0,
+                            pin_memory=True,
+                            shuffle=True,
+                            drop_last=False)
+
+    test_loader = DataLoader(test_set,
+                            batch_size=cfg.train.batch_size,
+                            num_workers=cfg.train.num_workers,
+                            persistent_workers=cfg.train.num_workers>0,
+                            pin_memory=True,
+                            shuffle=True,
+                            drop_last=False) if cfg.eval.mode == 'test' else None
+
+    # initialize wandb run
+    total_params, trainable_params, param_size_in_mb = get_model_params(model)
+    run = wandb.init(
+        project=cfg.wandb.project,
+        group=cfg.wandb.group,
+        config={
+            "dataset": "Sentinel2",
+            **cfg.to_dict(),
+            "training_size": len(train_set),
+            "validation_size": len(val_set),
+            "test_size": len(test_set) if cfg.eval.mode == 'test' else None,
+            "val_percent": len(val_set) / (len(train_set) + len(val_set)),
+            "total_parameters": total_params,
+            "trainable_parameters": trainable_params,
+            "parameter_size_mb": param_size_in_mb
+        }
+    )
+
+    try:
+        if cfg.save:
+            if cfg.save_path is None:
+                default_path = RESULTS_DIR / "experiments" / f"{datetime.today().strftime('%Y-%m-%d')}_{cfg.model.classifier}_{run.id}/"
+                cfg.save_path = str(default_path)
+                run.config.update({"save_path": cfg.save_path}, allow_val_change=True)
+            print(f'Save path set to: {cfg.save_path}')
+        
+        # train and save results metrics
+        cls_weights, disc_weights, fmetrics = train(model, train_loader, val_loader,
+                                              test_loader, device, cfg, run)
+        if cfg.save:
+            save_experiment(cls_weights, disc_weights, fmetrics, cfg, run)
+
+        # log predictions on validation set using wandb
+        pred_table = sample_predictions(model, test_set if cfg.eval.mode == 'test' else val_set,
+                                        train_mean, train_std, cfg)
+        run.log({"model_val_predictions": pred_table})
+    except Exception as e:
+        print("An exception occurred during training!")
+
+        # Send an alert in the W&B UI
+        run.alert(
+            title="Training crashed 🚨",
+            text=f"Run failed due to: {e}"
+        )
+
+        # Log to wandb summary
+        run.summary["error"] = str(e)
+
+        # remove save directory if needed
+        raise e
+    finally:
+        run.finish()
+
+    return fmetrics
+
+def main(cfg):
+    run_experiment_s2(cfg)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='train_classifier', description='Trains classifier model from patches. The classifier inputs a patch with n channels and outputs a binary patch with water pixels labeled 1.')
+
+    # YAML config file
+    parser.add_argument("--config_file", default="configs/s2_template.yaml", help="Path to YAML config file (default: configs/s2_template.yaml)")
 
     def bool_indices(s):
         if len(s) == 10 and all(c in '01' for c in s):
@@ -432,54 +535,40 @@ if __name__ == '__main__':
                 raise argparse.ArgumentTypeError("Invalid boolean string: '{}'".format(s))
         else:
             raise argparse.ArgumentTypeError("Boolean string must be of length 10 and have binary digits")
-    
-    parser.add_argument('-x', '--size', type=int, default=64, help='pixel width of patch (default: 64)')
-    parser.add_argument('-n', '--samples', type=int, default=1000, help='number of samples per image (default: 1000)')
-    parser.add_argument('-m', '--method', default='random', choices=['random'], help='sampling method (default: random)')
-    parser.add_argument('-c', '--channels', type=bool_indices, default="1111111111", help='string of 10 binary digits for selecting among the 10 available channels (R, G, B, B08, NDWI, DEM, SlopeY, SlopeX, Water, Roads) (default: 1111111111)')
-    parser.add_argument('--sdir', dest='sample_dir', default='../sampling/samples_200_5_4_35/', help='(default: ../sampling/samples_200_5_4_35/)')
-    parser.add_argument('--ldir', dest='label_dir', default='../sampling/labels/', help='(default: ../sampling/labels/)')
 
     # wandb
-    parser.add_argument('--project', default="FloodSamplesClassifier", help='Wandb project where run will be logged')
-    parser.add_argument('--group', default=None, help='Optional group name for model experiments (default: None)')
-    parser.add_argument('--num_sample_predictions', type=int, default=40, help='number of predictions to visualize (default: 40)')
+    parser.add_argument('--project', help='Wandb project where run will be logged')
+    parser.add_argument('--group', help='Optional group name for model experiments (default: None)')
+    parser.add_argument('--num_sample_predictions', type=int, help='number of predictions to visualize (default: 40)')
 
     # evaluation
-    parser.add_argument('--mode', default='val', choices=['val', 'test'], help=f"dataset used for evaluation metrics (default: val)")
+    parser.add_argument('--mode', choices=['val', 'test'], help=f"dataset used for evaluation metrics (default: val)")
 
     # ml
-    parser.add_argument('-e', '--epochs', type=int, default=30, help='(default: 30)')
-    parser.add_argument('-b', '--batch_size', type=int, default=32, help='(default: 32)')
-    parser.add_argument('-l', '--learning_rate', type=float, default=0.0001, help='(default: 0.0001)')
-    parser.add_argument('--early_stopping', action='store_true', help='early stopping (default: False)')
-    parser.add_argument('-p', '--patience', type=int, default=5, help='(default: 5)')
+    parser.add_argument('-e', '--epochs', type=int)
+    parser.add_argument('-b', '--batch_size', type=int)
+    parser.add_argument('-l', '--lr', type=float)
+    parser.add_argument('-p', '--patience', type=int)
 
     # model
-    parser.add_argument('--name', default='unet', choices=MODEL_NAMES,
-                        help=f"models: {', '.join(MODEL_NAMES)} (default: unet)")
+    parser.add_argument('--classifier', choices=MODEL_NAMES, help=f"models: {', '.join(MODEL_NAMES)}")
     # unet
-    parser.add_argument('--dropout', type=float, default=0.2, help=f"(default: 0.2)")
-    # unet++
-    parser.add_argument('--deep_supervision', action='store_true', help='(default: False)')
+    parser.add_argument('--dropout', type=float)
 
     # data loading
-    parser.add_argument('--num_workers', type=int, default=10, help='(default: 10)')
+    parser.add_argument('--num_workers', type=int)
     
     # loss
-    parser.add_argument('--loss', default='BCELoss', choices=LOSS_NAMES,
-                        help=f"loss: {', '.join(LOSS_NAMES)} (default: BCELoss)")
-    parser.add_argument('--alpha', type=float, default=0.3, help='Tversky Loss alpha value (default: 0.3)')
-    parser.add_argument('--beta', type=float, default=0.7, help='Tversky Loss beta value (default: 0.7)')
+    parser.add_argument('--loss', choices=LOSS_NAMES,
+                        help=f"loss: {', '.join(LOSS_NAMES)}")
 
     # optimizer
-    parser.add_argument('--optimizer', default='Adam', choices=['Adam', 'SGD'],
-                        help=f"optimizer: {', '.join(['Adam', 'SGD'])} (default: Adam)")
+    parser.add_argument('--optimizer', choices=['Adam', 'SGD'],
+                        help=f"optimizer: {', '.join(['Adam', 'SGD'])}")
 
     # reproducibility
-    parser.add_argument('--seed', type=int, default=831002, help='seed (default: 831002)')
+    parser.add_argument('--seed', type=int)
 
-    # config will be dict
-    config = vars(parser.parse_args())
-
-    sys.exit(main(config))
+    _args = parser.parse_args()
+    cfg = Config(**_args.__dict__)
+    sys.exit(main(cfg))

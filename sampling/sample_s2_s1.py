@@ -186,14 +186,96 @@ def ceser_mask(precip_data):
     masked_precip = np.where(mask_3d, precip_data, np.nan)
     return masked_precip
 
-def get_extreme_events(prism, history, threshold=300, n=None, region=None):
+def get_manual_events(history, manual_file):
+    """Compile info for manually specified events via list of PRISM indices.
+    
+    Parameters
+    ----------
+    history : set()
+        Set that holds all tuples of indices (from PRISM ndarray) of previously processed events.
+    manual_file : str
+        Path to text file containing manually specified events in lines with format: time, y, x.
+
+    Returns
+    -------
+    int
+        Number of manual events found.
+    Iterator
+        Iterator aggregates event data with each tuple containing the date, cumulative day precipitation in mm, latitude longitude bounding box values and a unique event id.
+    """
+    # validate that the indices are within the PRISM grid
+    logger = logging.getLogger('main')
+    logger.info("Loading PRISM data...")
+    geotransform, time_info, precip_data = read_PRISM()
+    logger.info("PRISM successfully loaded.")
+
+    # read in and validate manual indices
+    manual_indices = []
+    with open(manual_file, 'r') as f:
+        for lineno, line in enumerate(f, 1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith('#'):  # skip empty lines and comments
+                continue
+            parts = [p.strip() for p in stripped.split(',')]
+            if len(parts) != 3:
+                raise ValueError(f"Line {lineno}: Expected 3 comma-separated values, got {parts}")
+            try:
+                values = tuple(map(int, parts))
+            except ValueError:
+                raise ValueError(f"Line {lineno}: Invalid integers: {parts}")
+            if any(v < 0 for v in values):
+                raise ValueError(f"Line {lineno}: All values must be non-negative: {values}")
+
+            time, y, x = values
+            if time >= precip_data.shape[0] or y >= precip_data.shape[1] or x >= precip_data.shape[2]:
+                raise ValueError(f"Index ({time}, {y}, {x}) is out of bounds for PRISM data.")
+            manual_indices.append(values)
+    
+    # float64 geotransform coefficients for PRISM grid
+    upper_left_x, x_size, x_rotation, upper_left_y, y_rotation, y_size = geotransform
+    event_dates = []
+    event_precip = []
+    minx = []
+    miny = []
+    maxx = []
+    maxy = []
+    eid = []
+    indices = []
+
+    min_date = datetime(2016, 8, 1)
+    count = 0
+    for time, y, x in manual_indices:
+        event_date = num2date(time, units=time_info[0], calendar=time_info[1])
+        event_date_str = event_date.strftime("%Y%m%d")
+
+        # must not be earlier than s2 launch, or previously queried in pipeline
+        if event_date < min_date:
+            continue
+        elif (time, y, x) in history:
+            continue
+
+        event_dates.append(event_date_str)
+        event_precip.append(precip_data[time, y, x])
+        
+        # convert latitude and longitude to
+        # (minx, miny, maxx, maxy) using the equation
+        minx.append(x * x_size + upper_left_x)
+        miny.append((y + 1) * y_size + upper_left_y)
+        maxx.append((x + 1) * x_size + upper_left_x)
+        maxy.append(y * y_size + upper_left_y)
+        eid.append(f'{event_date_str}_{y}_{x}')
+        indices.append((time, y, x)) # indices for efficient tracking of completion
+        count += 1
+
+    return count, zip(event_dates, event_precip, minx, miny, maxx, maxy, eid, indices)
+
+def get_extreme_events(history, threshold=300, n=None, region=None):
     """
     Queries contents of PRISM netCDF file given the return value of read_PRISM(). Filters for 
     precipitation events that meet minimum threshold of precipitation and returns an iterator.
 
     Parameters
     ----------
-    prism : tuple returned by read_PRISM()
     history : set()
         Set that holds all tuples of indices (from PRISM ndarray) of previously processed events.
     threshold : int, optional
@@ -208,7 +290,10 @@ def get_extreme_events(prism, history, threshold=300, n=None, region=None):
     Iterator
         Iterator aggregates extreme event data with each tuple containing the date, cumulative day precipitation in mm, latitude longitude bounding box values and a unique event id.
     """
-    geotransform, time_info, precip_data = prism
+    logger = logging.getLogger('main')
+    logger.info("Loading PRISM data...")
+    geotransform, time_info, precip_data = read_PRISM()
+    logger.info("PRISM successfully loaded.")
 
     # for specific regions, mask the AOI
     if region is not None:
@@ -1331,7 +1416,7 @@ def event_sample_sar(threshold, days_before, days_after, maxcoverpercentage, wit
     logger.info('Metadata and raster generation completed. Event finished.')
     return True
     
-def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_path=None, within_hours=12, region=None, config_file=None):
+def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_path=None, within_hours=12, region=None, config_file=None, manual=None):
     """
     Samples imagery of events queried from PRISM using a given minimum precipitation threshold.
     Downloaded samples will contain multispectral data and sar data from within specified interval of event date, 
@@ -1354,7 +1439,8 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
         Specify a limit to the number of extreme precipitation events to process.
     config_file : str, optional
         Path to custom configuration file.
-        
+    manual : str, optional
+        Path to text file containing manual event indices in lines with format: time, y, x.
     Returns
     -------
     int
@@ -1414,12 +1500,9 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
         f"  Max cloud/nodata cover percentage: {maxcoverpercentage}\n"
         f"  Max events to sample: {maxevents}\n"
         f"  S1 and S2 coincidence must be within # hours: {within_hours}\n"
-        f"  Region: {region}"
+        f"  Region: {region}\n"
+        f"  Manual indices: {manual}"
     )
-
-    rootLogger.info("Loading PRISM data...")
-    prism = read_PRISM()
-    rootLogger.info("PRISM successfully loaded.")
 
     if os.path.isfile(dir_path + 'history.pickle'):
         with open(dir_path + 'history.pickle', "rb") as f:
@@ -1427,9 +1510,15 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
     else:
         history = set()
 
-    rootLogger.info("Finding candidate extreme precipitation events...")
-    num_candidates, events = get_extreme_events(prism, history, threshold=threshold, region=region)
-    rootLogger.info(f"Found {num_candidates} candidate extreme precipitation events.")
+    # get PRISM event indices and event data
+    if not manual:
+        rootLogger.info("Finding candidate extreme precipitation events...")
+        num_candidates, events = get_extreme_events(history, threshold=threshold, region=region)
+        rootLogger.info(f"Found {num_candidates} candidate extreme precipitation events.")
+    else:
+        rootLogger.info("Using manual indices...")
+        num_candidates, events = get_manual_events(history, manual)
+        rootLogger.info(f"Found {num_candidates} events from {manual}.")
 
     rootLogger.info("Initializing event sampling...")
     count = 0
@@ -1469,6 +1558,7 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
 
             # once sampled maxevents, stop pipeline
             if count >= maxevents:
+                rootLogger.info(f"Maximum number of events = {maxevents} reached. Stopping event sampling...")
                 break
     except Exception as err:
         rootLogger.error(f"Unexpected error during event sampling: {err}, {type(err)}")
@@ -1479,7 +1569,7 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
 
     rootLogger.debug(f"Number of events already completed: {alr_completed}")
     rootLogger.debug(f"Number of successful events sampled from this run: {count}")
-    rootLogger.debug(f"Searched through {count} PRISM indices.")
+    rootLogger.debug(f"Searched through {num_candidates} PRISM indices.")
     return 0
 
 if __name__ == '__main__':
@@ -1492,7 +1582,8 @@ if __name__ == '__main__':
     parser.add_argument('-d', '--dir', dest='dir_path', help='specify a directory name for downloaded samples, format should end with backslash (default: None)')
     parser.add_argument('-w', '--within_hours', dest='within_hours', default=12, type=int, help='Floods event must have S1 and S2 data within this many hours. (default: 12)')
     parser.add_argument('-r', '--region', default=None, choices=['ceser'], help='sample from supported regions: ["ceser"]. (default: None)')
+    parser.add_argument('-m', '--manual', default=None, help='text file for parsing manual event indices with format: time, y, x (default: None)')
     parser.add_argument('-f', '--config', dest='config_file', help='specify a custom configuration file path')
     args = parser.parse_args()
     
-    sys.exit(main(args.threshold, args.days_before, args.days_after, args.maxcoverpercentage, args.maxevents, dir_path=args.dir_path, within_hours=args.within_hours, region=args.region, config_file=args.config_file))
+    sys.exit(main(args.threshold, args.days_before, args.days_after, args.maxcoverpercentage, args.maxevents, dir_path=args.dir_path, within_hours=args.within_hours, region=args.region, config_file=args.config_file, manual=args.manual))

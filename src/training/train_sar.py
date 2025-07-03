@@ -497,13 +497,13 @@ def sample_predictions(model, sample_set, mean, std, loss_config, cfg, seed=2433
             despeckler_output = out_dict['despeckler_output'].squeeze(0) if model.uses_autodespeckler() else None
             y_shifted = loss_config.get_label_alignment(logits, y.unsqueeze(0).float()).squeeze(0)
 
-        pred_y = torch.where(nn.functional.sigmoid(logits) > 0.5, 1.0, 0.0).squeeze(0) # (1, x, y)
+        y_pred = torch.where(nn.functional.sigmoid(logits) > 0.5, 1.0, 0.0).squeeze(0) # (1, x, y)
 
         # Compute false positives
-        fp = torch.logical_and(y_shifted == 0, pred_y == 1).squeeze(0).byte().mul(255).numpy()
+        fp = torch.logical_and(y_shifted == 0, y_pred == 1).squeeze(0).byte().mul(255).numpy()
 
         # Compute false negatives
-        fn = torch.logical_and(y_shifted == 1, pred_y == 0).squeeze(0).byte().mul(255).numpy()
+        fn = torch.logical_and(y_shifted == 1, y_pred == 0).squeeze(0).byte().mul(255).numpy()
 
         # Channels are descaled using linear variance scaling
         X_c = X_c.permute(1, 2, 0)
@@ -570,10 +570,10 @@ def sample_predictions(model, sample_set, mean, std, loss_config, cfg, seed=2433
             row.append(wandb.Image(recons_vh_img))
 
         y_shifted = y_shifted.squeeze(0).mul(255).clamp(0, 255).byte().numpy()
-        pred_y = pred_y.squeeze(0).mul(255).clamp(0, 255).byte().numpy()
+        y_pred = y_pred.squeeze(0).mul(255).clamp(0, 255).byte().numpy()
 
         truth_img = Image.fromarray(y_shifted, mode="L")
-        pred_img = Image.fromarray(pred_y, mode="L")
+        pred_img = Image.fromarray(y_pred, mode="L")
         fp_img = Image.fromarray(fp, mode="L")
         fn_img = Image.fromarray(fn, mode="L")
         row += [wandb.Image(truth_img), wandb.Image(pred_img), wandb.Image(fp_img), wandb.Image(fn_img)]
@@ -739,6 +739,7 @@ if __name__ == '__main__':
     # YAML config file
     parser.add_argument("--config_file", default="configs/classifier_default.yaml", help="Path to YAML config file (default: configs/classifier_default.yaml)")
 
+    # TO DO: REFACTOR CHANNEL MANAGEMENT (BOOL_INDICES IS DEPRECATED)
     def bool_indices(s):
         if len(s) == 7 and all(c in '01' for c in s):
             try:
@@ -754,7 +755,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_sample_predictions', type=int, help='number of predictions to visualize (default: 40)')
 
     # evaluation
-    parser.add_argument('--mode', default='val', choices=['val', 'test'], help=f"dataset used for evaluation metrics (default: val)")
+    parser.add_argument('--mode', choices=['val', 'test'], help=f"dataset used for evaluation metrics (default: val)")
 
     # ml
     parser.add_argument('-e', '--epochs', type=int)
@@ -764,7 +765,7 @@ if __name__ == '__main__':
     parser.add_argument('-p', '--patience', type=int, help='early stopping patience')
 
     # model
-    parser.add_argument('--name', choices=MODEL_NAMES,
+    parser.add_argument('--classifier', choices=MODEL_NAMES,
                         help=f"models: {', '.join(MODEL_NAMES)}")
     # unet
     parser.add_argument('--dropout', type=float)

@@ -9,7 +9,7 @@ import re
 import rasterio
 import sys
 import pickle
-from utils.utils import SAMPLES_DIR, DATA_DIR, ChannelIndexer, SARChannelIndexer
+from utils.utils import SAMPLES_DIR, DATA_DIR, ChannelIndexerDeprecated, SARChannelIndexer
 from utils.config import Config
 
 def single_prediction_s2(cfg, dt, eid, format="tif", data_dir=""):
@@ -320,7 +320,7 @@ def get_sample_prediction_s2(model, cfg, standardize, train_mean, event_path, dt
         Predicted label of the specified tile in shape (H, W).
     """
     layers = []
-    my_channels = ChannelIndexer([bool(int(x)) for x in cfg.data.channels])
+    my_channels = ChannelIndexerDeprecated([bool(int(x)) for x in cfg.data.channels])
     if my_channels.has_image():
         tci_file = event_path / f'tci_{dt}_{eid}.tif'
         with rasterio.open(tci_file) as src:
@@ -464,7 +464,7 @@ def main(cfg, format="tif", replace=True, data_dir="", post=False):
     # dataset and transforms
     size = cfg.data.size
     samples = cfg.data.samples
-    sample_dir = DATA_DIR / 's2' / f'samples_{size}_{samples}/'
+    sample_dir = DATA_DIR / 's2' / f'samples_{size}_{samples}_deprecated/' # currently using old model w deprecated data channels
 
     channels = [bool(int(x)) for x in cfg.data.channels]
     b_channels = sum(channels[-2:])

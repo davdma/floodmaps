@@ -38,9 +38,9 @@ def random_crop(label_names, size, num_samples, rng, pre_sample_dir, sample_dir,
     """
     logger = logging.getLogger('preprocessing')
     
-    # 11 channels for 10 data + 1 label channel
+    # 16 channels for 11 data + 1 label channel + 3 TCI + 1 NLCD
     total_patches = num_samples * len(label_names)
-    dataset = np.empty((total_patches, 11, size, size), dtype=np.float32)
+    dataset = np.empty((total_patches, 16, size, size), dtype=np.float32)
 
     tiles = []
     for label_file in label_names:
@@ -66,15 +66,21 @@ def random_crop(label_names, size, num_samples, rng, pre_sample_dir, sample_dir,
             WIDTH = src.width
 
         tci_file = SAMPLES_DIR / sample_dir / eid / f'tci_{tile_date}_{eid}.tif'
+        rgb_file = SAMPLES_DIR / sample_dir / eid / f'rgb_{tile_date}_{eid}.tif'
         b08_file = SAMPLES_DIR / sample_dir / eid / f'b08_{tile_date}_{eid}.tif'
         ndwi_file = SAMPLES_DIR / sample_dir / eid / f'ndwi_{tile_date}_{eid}.tif'
         dem_file = SAMPLES_DIR / sample_dir / eid / f'dem_{eid}.tif'
         waterbody_file = SAMPLES_DIR / sample_dir / eid / f'waterbody_{eid}.tif'
         roads_file = SAMPLES_DIR / sample_dir / eid / f'roads_{eid}.tif'
+        flowlines_file = SAMPLES_DIR / sample_dir / eid / f'flowlines_{eid}.tif'
+        nlcd_file = SAMPLES_DIR / sample_dir / eid / f'nlcd_{eid}.tif'
 
         with rasterio.open(tci_file) as src:
             tci_raster = src.read()
             tci_floats = (tci_raster / 255).astype(np.float32)
+
+        with rasterio.open(rgb_file) as src:
+            rgb_raster = src.read()
 
         with rasterio.open(b08_file) as src:
             b08_raster = src.read()
@@ -95,10 +101,33 @@ def random_crop(label_names, size, num_samples, rng, pre_sample_dir, sample_dir,
         with rasterio.open(roads_file) as src:
             roads_raster = src.read()
 
+        with rasterio.open(flowlines_file) as src:
+            flowlines_raster = src.read()
+
+        with rasterio.open(nlcd_file) as src:
+            nlcd_raster = src.read()
+
         # stack all tiles
-        stacked_tile = np.vstack((tci_floats, b08_raster, ndwi_raster, dem_raster, 
-                                    slope_y_raster, slope_x_raster, waterbody_raster, 
-                                    roads_raster, label_binary), dtype=np.float32)
+        try:
+            stacked_tile = np.vstack((rgb_raster, b08_raster, ndwi_raster, dem_raster, 
+                                        slope_y_raster, slope_x_raster, waterbody_raster, 
+                                        roads_raster, flowlines_raster, label_binary, tci_floats, nlcd_raster), dtype=np.float32)
+        except ValueError as e:
+            # print all the shapes for debugging
+            print(f'Shapes do not match!')
+            print(f'label file: {label_file}')
+            print(f'rgb_raster shape: {rgb_raster.shape}')
+            print(f'b08_raster shape: {b08_raster.shape}')
+            print(f'ndwi_raster shape: {ndwi_raster.shape}')
+            print(f'dem_raster shape: {dem_raster.shape}')
+            print(f'slope_y_raster shape: {slope_y_raster.shape}')
+            print(f'slope_x_raster shape: {slope_x_raster.shape}')
+            print(f'waterbody_raster shape: {waterbody_raster.shape}')
+            print(f'label_binary shape: {label_binary.shape}')
+            print(f'tci_floats shape: {tci_floats.shape}')
+            print(f'nlcd_raster shape: {nlcd_raster.shape}')
+            raise e
+
         tiles.append(stacked_tile)
     logger.info('Tiles loaded.')
 
@@ -118,7 +147,7 @@ def random_crop(label_names, size, num_samples, rng, pre_sample_dir, sample_dir,
             if np.any(patch[0] == 0) or np.any(patch[4] == -999999):
                 continue
 
-            dataset[i * num_samples + patches_sampled] = patch[:11]
+            dataset[i * num_samples + patches_sampled] = patch[:16]
             patches_sampled += 1
 
     output_file = pre_sample_dir / f'{typ}_patches.npy'
@@ -142,17 +171,21 @@ def loadMaskedStack(img_dt, eid, sample_dir):
         Stack of channels with missing values masked out.
     """
     sample_path = SAMPLES_DIR / sample_dir
-    tci_file = sample_path / eid / f'tci_{img_dt}_{eid}.tif'
+    # tci_file = sample_path / eid / f'tci_{img_dt}_{eid}.tif'
+    rgb_file = sample_path / eid / f'rgb_{img_dt}_{eid}.tif'
     b08_file = sample_path / eid / f'b08_{img_dt}_{eid}.tif'
     ndwi_file = sample_path / eid / f'ndwi_{img_dt}_{eid}.tif'
     dem_file = sample_path / eid / f'dem_{eid}.tif'
     waterbody_file = sample_path / eid / f'waterbody_{eid}.tif'
     roads_file = sample_path / eid / f'roads_{eid}.tif'
-    # flowlines_file = sample_path / eid / f'flowlines_{eid}.tif' - currently not used in the dataset
+    flowlines_file = sample_path / eid / f'flowlines_{eid}.tif'
 
-    with rasterio.open(tci_file) as src:
-        tci_raster = src.read().reshape((3, -1))
-        tci_floats = (tci_raster / 255).astype(np.float32) # first scale rgb to 0-1 then normalize
+    # with rasterio.open(tci_file) as src:
+    #     tci_raster = src.read().reshape((3, -1))
+    #     tci_floats = (tci_raster / 255).astype(np.float32) # first scale rgb to 0-1 then normalize
+    
+    with rasterio.open(rgb_file) as src:
+        rgb_raster = src.read().reshape((3, -1))
     
     with rasterio.open(b08_file) as src:
         b08_raster = src.read().reshape((1, -1))
@@ -176,13 +209,16 @@ def loadMaskedStack(img_dt, eid, sample_dir):
     with rasterio.open(roads_file) as src:
         roads_raster = src.read().reshape((1, -1))
 
+    with rasterio.open(flowlines_file) as src:
+        flowlines_raster = src.read().reshape((1, -1))
+
     # with rasterio.open(cloud_file) as src:
     #     cloud_raster = src.read().reshape((1, -1))
 
-    mask = (tci_raster[0] != 0) & (ndwi_raster[0] != -999999)
+    mask = (rgb_raster[0] != 0) & (ndwi_raster[0] != -999999)
 
-    stack = np.vstack((tci_floats, b08_raster, ndwi_raster, dem_raster, slope_y_raster,
-                        slope_x_raster, waterbody_raster, roads_raster), dtype=np.float32)
+    stack = np.vstack((rgb_raster, b08_raster, ndwi_raster, dem_raster, slope_y_raster,
+                        slope_x_raster, waterbody_raster, roads_raster, flowlines_raster), dtype=np.float32)
 
     masked_stack = stack[:, mask]
 
@@ -206,7 +242,7 @@ def trainMean(train_events, sample_dir):
     """
     logger = logging.getLogger('preprocessing')
     count = 0
-    total_sum = np.zeros(10, dtype=np.float64) # 10 channels for original s2 data
+    total_sum = np.zeros(11, dtype=np.float64) # 11 channels for original s2 data
 
     for img_dt, eid in train_events:
         masked_stack = loadMaskedStack(img_dt, eid, sample_dir)
@@ -242,7 +278,7 @@ def trainStd(train_events, train_means, sample_dir):
     """
     logger = logging.getLogger('preprocessing')
     count = 0
-    variances = np.zeros(10, dtype=np.float64) # 10 channels for original s2 data
+    variances = np.zeros(11, dtype=np.float64) # 11 channels for original s2 data
 
     for img_dt, eid in train_events:
         masked_stack = loadMaskedStack(img_dt, eid, sample_dir)
@@ -302,6 +338,11 @@ def main(size, samples, seed, method='random', sample_dir='samples_200_5_4_35/',
     mean = trainMean(train_events, sample_dir)
     std = trainStd(train_events, mean, sample_dir)
     logger.info('Mean and std of training tiles calculated.')
+
+    # set mean and std of binary channels at the end to 0 and 1
+    bchannels = 3
+    mean[-bchannels:] = 0
+    std[-bchannels:] = 1
 
     # also store training mean std statistics in file
     stats_file = pre_sample_dir / f'mean_std_{size}_{samples}.pkl'

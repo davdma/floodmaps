@@ -20,6 +20,8 @@ OUTPUT_DIR = SRC_DIR / 'outputs'
 CONFIG_DIR = SRC_DIR / 'configs'
 RESULTS_DIR = SRC_DIR / 'results'
 
+# QUARANTINE DUE TO SHAPE MISMATCH (NEED TO FIX): label_20190908_20190906_375_1133.tif
+
 TRAIN_LABELS = ["label_20150919_20150917_496_811.tif", "label_20150919_20150917_497_812.tif",
                 "label_20151112_20151109_472_940.tif", "label_20151112_20151109_473_939.tif",
                 "label_20151112_20151109_473_940.tif", "label_20151112_20151109_473_941.tif",
@@ -39,8 +41,8 @@ VAL_LABELS = ["label_20150919_20150917_496_812.tif", "label_20150919_20150917_49
 TEST_LABELS = ["label_20170830_20170826_487_695.tif",
                "label_20170830_20170829_497_709.tif",
                "label_20180818_20180815_304_703.tif",
-               "label_20190908_20190906_375_1133.tif",
                "label_20170830_20170828_482_695.tif"]
+               # "label_20190908_20190906_375_1133.tif" originally in test
 
 DAMP_DEFAULT = 1.0
 CU_DEFAULT = 0.523 # 0.447 is sqrt(1/number of looks)
@@ -122,6 +124,85 @@ class Metrics:
 
 class ChannelIndexer:
     """Abstract class for wrapping list of S2 dataset channels used for input.
+    Most up to date with RGB spectral bands instead of TCI.
+
+    The 11 available channels in order:
+
+    1. B04 Red Reflectance
+    2. B03 Green Reflectance
+    3. B02 Blue Reflectance
+    4. B08 Near Infrared
+    5. NDWI
+    6. DEM
+    7. Slope Y
+    8. Slope X
+    9. Waterbody
+    10. Roads
+    11. Flowlines
+
+    Parameters
+    ----------
+    channels : list[bool]
+        List of 11 booleans corresponding to the 11 input channels.
+    """
+    def __init__(self, channels):
+        self.channels = channels
+        self.names = names = ["rgb", "nir", "ndwi", "dem", "slope_y", "slope_x", "waterbody", "roads", "flowlines"]
+
+    def has_rgb(self):
+        return all(self.channels[:3])
+
+    def has_b08(self):
+        return self.channels[3]
+
+    def has_ndwi(self):
+        return self.channels[4]
+
+    def has_dem(self):
+        return self.channels[5]
+
+    def has_slope_y(self):
+        return self.channels[6]
+
+    def has_slope_x(self):
+        return self.channels[7]
+
+    def has_waterbody(self):
+        return self.channels[8]
+
+    def has_roads(self):
+        return self.channels[9]
+    
+    def has_flowlines(self):
+        return self.channels[10]
+
+    def get_channel_names(self):
+        return self.names
+
+    def get_display_channels(self):
+        """Channels specifically for sampling predictions."""
+        # need to fix this hardcoding later
+        display_names = []
+        if self.has_ndwi():
+            display_names.append("ndwi")
+        if self.has_dem():
+            display_names.append("dem")
+        if self.has_slope_y():
+            display_names.append("slope_y")
+        if self.has_slope_x():
+            display_names.append("slope_x")
+        if self.has_waterbody():
+            display_names.append("waterbody")
+        if self.has_roads():
+            display_names.append("roads")
+        if self.has_flowlines():
+            display_names.append("flowlines")
+        return display_names
+
+
+class ChannelIndexerDeprecated:
+    """Deprecated channel indexer for old TCI input S2 models that used only 10 channels.
+    Abstract class for wrapping list of S2 dataset channels used for input.
 
     The 10 available channels in order:
 
@@ -172,6 +253,7 @@ class ChannelIndexer:
 
     def get_channel_names(self):
         return [name for name, is_included in zip(self.names, self.included) if is_included]
+
 
 class SARChannelIndexer:
     """Abstract class for wrapping list of S1 dataset channels used for input.

@@ -58,7 +58,7 @@ def train_loop(model, dataloader, device, optimizer, loss_fn, run, epoch):
     all_targets = []
 
     model.train()
-    for X, y in dataloader:
+    for X, y, _ in dataloader:
         X = X.to(device)
         y = y.to(device)
 
@@ -131,7 +131,7 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
     
     model.eval()
     with torch.no_grad():
-        for X, y in dataloader:
+        for X, y, _ in dataloader:
             X = X.to(device)
             y = y.to(device)
 
@@ -276,15 +276,17 @@ def save_experiment(cls_weights, disc_weights, metrics, cfg, run):
         json.dump(wandb_info, f, indent=4)
 
 def sample_predictions(model, sample_set, mean, std, cfg, seed=24330):
-    """Generate predictions on a subset of images in the validation set for wandb logging."""
+    """Generate predictions on a subset of images in the validation set for wandb logging.
+    
+    TO DO: FIX CHANNEL INDEXING HARDCODING. Need more flexible way to handle channels."""
     if cfg.wandb.num_sample_predictions <= 0:
         return None
-        
-    columns = ["id"]
+
+    columns = ["id", "tci"] # TCI always included
     channels = [bool(int(x)) for x in cfg.data.channels]
-    my_channels = ChannelIndexer(channels)
+    my_channels = ChannelIndexer(channels) # ndwi, dem, slope_y, slope_x, waterbody, roads, flowlines
     # initialize wandb table given the channel settings
-    columns += my_channels.get_channel_names()
+    columns += my_channels.get_display_channels()
     columns += ["truth", "prediction", "false positive", "false negative"] # added residual binary map
     table = wandb.Table(columns=columns)
     
@@ -301,7 +303,7 @@ def sample_predictions(model, sample_set, mean, std, cfg, seed=24330):
 
     # get map of each channel to index of resulting tensor
     n = 0
-    channel_indices = [-1] * 10
+    channel_indices = [-1] * 11
     for i, channel in enumerate(channels):
         if channel:
             channel_indices[i] = n
@@ -314,7 +316,7 @@ def sample_predictions(model, sample_set, mean, std, cfg, seed=24330):
 
     for id, k in enumerate(samples):
         # get all images to shape (H, W, C) with C = 1 or 3 (1 for grayscale, 3 for RGB)
-        X, y = sample_set[k]
+        X, y, supplementary = sample_set[k]
         
         with torch.no_grad():
             logits = model(X.unsqueeze(0))
@@ -332,10 +334,11 @@ def sample_predictions(model, sample_set, mean, std, cfg, seed=24330):
         X = std * X + mean
 
         row = [k]
-        if my_channels.has_image():
-            tci = X[:, :, :3].mul(255).clamp(0, 255).byte().numpy()
-            tci_img = Image.fromarray(tci, mode="RGB")
-            row.append(wandb.Image(tci_img))
+
+        # tci reference
+        tci = supplementary[:3, :, :].permute(1, 2, 0).mul(255).clamp(0, 255).byte().numpy()
+        tci_img = Image.fromarray(tci, mode="RGB")
+        row.append(wandb.Image(tci_img))
         if my_channels.has_ndwi():
             ndwi = X[:, :, channel_indices[4]]
             ndwi = ndwi_map.to_rgba(ndwi.numpy(), bytes=True)
@@ -371,6 +374,10 @@ def sample_predictions(model, sample_set, mean, std, cfg, seed=24330):
             roads = X[:, :, channel_indices[9]].mul(255).clamp(0, 255).byte().numpy()
             roads_img = Image.fromarray(roads, mode="L")
             row.append(wandb.Image(roads_img))
+        if my_channels.has_flowlines():
+            flowlines = X[:, :, channel_indices[10]].mul(255).clamp(0, 255).byte().numpy()
+            flowlines_img = Image.fromarray(flowlines, mode="L")
+            row.append(wandb.Image(flowlines_img))
 
         y = y.squeeze(0).mul(255).clamp(0, 255).byte().numpy()
         y_pred = y_pred.squeeze(0).mul(255).clamp(0, 255).byte().numpy()
@@ -416,16 +423,18 @@ def run_experiment_s2(cfg):
     # n_channels = sum(cfg['channels'])
     # load in mean and std
     channels = [bool(int(x)) for x in cfg.data.channels]
-    b_channels = sum(channels[-2:])
+    # b_channels = sum(channels[-3:])
     with open(sample_dir / f'mean_std_{size}_{samples}.pkl', 'rb') as f:
         train_mean, train_std = pickle.load(f)
 
         train_mean = torch.from_numpy(train_mean[channels])
         train_std = torch.from_numpy(train_std[channels])
+
+        # binary channels should be preprocessed to mean std 0, 1
         # make sure binary channels are 0 mean and 1 std
-        if b_channels > 0:
-            train_mean[-b_channels:] = 0
-            train_std[-b_channels:] = 1
+        # if b_channels > 0:
+        #     train_mean[-b_channels:] = 0
+        #     train_std[-b_channels:] = 1
 
     standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
 
@@ -528,13 +537,13 @@ if __name__ == '__main__':
     parser.add_argument("--config_file", default="configs/s2_template.yaml", help="Path to YAML config file (default: configs/s2_template.yaml)")
 
     def bool_indices(s):
-        if len(s) == 10 and all(c in '01' for c in s):
+        if len(s) == 11 and all(c in '01' for c in s):
             try:
                 return [bool(int(x)) for x in s]
             except ValueError:
                 raise argparse.ArgumentTypeError("Invalid boolean string: '{}'".format(s))
         else:
-            raise argparse.ArgumentTypeError("Boolean string must be of length 10 and have binary digits")
+            raise argparse.ArgumentTypeError("Boolean string must be of length 11 and have binary digits")
 
     # wandb
     parser.add_argument('--project', help='Wandb project where run will be logged')

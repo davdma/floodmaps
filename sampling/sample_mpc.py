@@ -624,16 +624,15 @@ def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, 
                        crs=dst_crs, dtype=rgb_roads.dtype, transform=dst_transform, nodata=0) as dst:
         dst.write(rgb_roads)
 
-def pipeline_dem_slope(dir_path, save_as, dst_shape, dst_crs, dst_transform, bounds):
+def pipeline_dem(dir_path, save_as, dst_shape, dst_crs, dst_transform, bounds):
     """Generates Digital Elevation Map raster given destination raster properties and bounding box.
 
     Parameters
     ----------
     dir_path : str
         Path for saving generated raster. 
-    save_as : (str, str)
-        Tuple of names of dem and slope files to be saved. Must have .tif extension. First string will be for dem raster, second
-        string will be for slope raster.
+    save_as : str
+        Name of file to be saved (no file extension!).
     dst_shape : (int, int)
         Shape of output raster.
     dst_crs : str
@@ -697,27 +696,12 @@ def pipeline_dem_slope(dir_path, save_as, dst_shape, dst_crs, dst_transform, bou
     dem_cmap = colormap_to_rgb(destination, cmap='gray', no_data=no_data)
 
     # save dem raw
-    with rasterio.open(dir_path + save_as[0] + '.tif', 'w', driver='Gtiff', count=1, height=destination.shape[-2], width=destination.shape[-1], crs=dst_crs, dtype=destination.dtype, transform=dst_transform, nodata=no_data) as dst:
+    with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=1, height=destination.shape[-2], width=destination.shape[-1], crs=dst_crs, dtype=destination.dtype, transform=dst_transform, nodata=no_data) as dst:
         dst.write(destination, 1)
 
     # save dem cmap
-    with rasterio.open(dir_path + save_as[0] + '_cmap.tif', 'w', driver='Gtiff', count=3, height=dem_cmap.shape[-2], width=dem_cmap.shape[-1], crs=dst_crs, dtype=dem_cmap.dtype, transform=dst_transform, nodata=0) as dst:
+    with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=dem_cmap.shape[-2], width=dem_cmap.shape[-1], crs=dst_crs, dtype=dem_cmap.dtype, transform=dst_transform, nodata=0) as dst:
         dst.write(dem_cmap)
-
-    rda = rd.rdarray(destination, no_data=no_data)
-    slope = rd.TerrainAttribute(rda, attrib='slope_riserun')
-    nprda = np.array(slope)
-    nprda_cmap = colormap_to_rgb(nprda, cmap='jet', no_data=slope.no_data)
-
-    # raw slope
-    with rasterio.open(dir_path + save_as[1] + '.tif', 'w', driver='Gtiff', count=1, height=nprda.shape[-2], width=nprda.shape[-1], 
-                           crs=dst_crs, dtype=nprda.dtype, transform=dst_transform, nodata=slope.no_data) as dst:
-        dst.write(nprda, 1)
-
-    # cmap slope
-    with rasterio.open(dir_path + save_as[1] + '_cmap.tif', 'w', driver='Gtiff', count=3, height=nprda_cmap.shape[-2], width=nprda_cmap.shape[-1], 
-                           crs=dst_crs, dtype=nprda_cmap.dtype, transform=dst_transform, nodata=0) as dst:
-        dst.write(nprda_cmap)
 
 def pipeline_flowlines(dir_path, save_as, dst_shape, dst_crs, dst_transform, bbox, buffer=3, filter=['460\d{2}', '558\d{2}', '336\d{2}', '334\d{2}', '42801', '42802', '42805', '42806', '42809']):
     """Generates raster with burned in geometries of flowlines given destination raster properties.
@@ -1014,8 +998,8 @@ def event_sample(threshold, days_before, days_after, maxcoverpercentage, event_d
         # save all supplementary rasters in raw and rgb colormap
         pipeline_roads(dir_path, f'roads_{eid}', dst_shape, dst_crs, dst_transform, state, buffer=1)
         logger.debug(f'Roads raster completed successfully.')
-        pipeline_dem_slope(dir_path, (f'dem_{eid}', f'slope_{eid}'), dst_shape, dst_crs, dst_transform, (minx, miny, maxx, maxy))
-        logger.debug(f'DEM, slope rasters completed successfully.')
+        pipeline_dem(dir_path, f'dem_{eid}', dst_shape, dst_crs, dst_transform, (minx, miny, maxx, maxy))
+        logger.debug(f'DEM raster completed successfully.')
         pipeline_flowlines(dir_path, f'flowlines_{eid}', dst_shape, dst_crs, dst_transform, (minx, miny, maxx, maxy), buffer=1)
         logger.debug(f'Flowlines raster completed successfully.')
         pipeline_waterbody(dir_path, f'waterbody_{eid}', dst_shape, dst_crs, dst_transform, (minx, miny, maxx, maxy))
@@ -1373,8 +1357,8 @@ def event_sample_sar(threshold, days_before, days_after, maxcoverpercentage, wit
         # save all supplementary rasters in raw and rgb colormap
         pipeline_roads(dir_path, f'roads_{eid}', dst_shape, dst_crs, dst_transform, state, buffer=1)
         logger.debug(f'Roads raster completed successfully.')
-        pipeline_dem_slope(dir_path, (f'dem_{eid}', f'slope_{eid}'), dst_shape, dst_crs, dst_transform, (minx, miny, maxx, maxy))
-        logger.debug(f'DEM, slope rasters completed successfully.')
+        pipeline_dem(dir_path, f'dem_{eid}', dst_shape, dst_crs, dst_transform, (minx, miny, maxx, maxy))
+        logger.debug(f'DEM raster completed successfully.')
         pipeline_flowlines(dir_path, f'flowlines_{eid}', dst_shape, dst_crs, dst_transform, (minx, miny, maxx, maxy), buffer=1)
         logger.debug(f'Flowlines raster completed successfully.')
         pipeline_waterbody(dir_path, f'waterbody_{eid}', dst_shape, dst_crs, dst_transform, (minx, miny, maxx, maxy))

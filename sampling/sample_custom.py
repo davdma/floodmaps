@@ -8,7 +8,6 @@ from cftime import num2date
 import logging
 import numpy as np
 import numpy.ma as ma
-import richdem as rd
 import os
 import re
 from glob import glob

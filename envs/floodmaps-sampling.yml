@@ -1,4 +1,4 @@
-name: floodmaps-sampling-2
+name: floodmaps-sampling
 channels:
   - conda-forge
   - defaults

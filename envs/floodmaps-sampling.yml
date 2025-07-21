@@ -10,12 +10,13 @@ dependencies:
   - cftime
   - geopandas
   - matplotlib
+  - fiona
+  - rasterio
   - pip
   - pip:
-    - rasterio
+    - pyyaml
     - pystac
     - pystac-client
-    - fiona
     - planetary-computer
     - tqdm
     - requests

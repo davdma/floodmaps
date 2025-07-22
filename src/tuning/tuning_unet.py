@@ -63,7 +63,9 @@ def tuning_s2(file_index, max_evals, experiment_name, early_stopping, random_sta
         method_kwargs = dict()
 
     # define the evaluator to distribute the computation
-    with Evaluator.create(run_s2, method="serial", method_kwargs=method_kwargs) as evaluator:
+    with Evaluator.create(run_s2, method="process", method_kwargs=method_kwargs) as evaluator:
+        print(f"Created new evaluator with {evaluator.num_workers} \
+            worker{'s' if evaluator.num_workers > 1 else ''} and config: {method_kwargs}")
         search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=random_state)
 
         if int(file_index) >= 1:
@@ -151,7 +153,9 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping, random_sta
         method_kwargs = dict()
 
     # define the evaluator to distribute the computation
-    with Evaluator.create(run_s1, method="serial", method_kwargs=method_kwargs) as evaluator:
+    with Evaluator.create(run_s1, method="process", method_kwargs=method_kwargs) as evaluator:
+        print(f"Created new evaluator with {evaluator.num_workers} \
+            worker{'s' if evaluator.num_workers > 1 else ''} and config: {method_kwargs}")
         search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=599023)
 
         if int(file_index) >= 1:

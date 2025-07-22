@@ -5,7 +5,7 @@ from deephyper.evaluator.callback import SearchEarlyStopping
 from training.train_multi import run_experiment_ad
 from utils.config import Config
 from datetime import datetime
-from tuning.tuning_utils import load_stopper_info, save_stopper_info, print_save_best_params
+from tuning.tuning_utils import load_stopper_info, save_stopper_info, print_save_best_params, save_problem
 import pandas as pd
 import argparse
 import os
@@ -114,6 +114,9 @@ def tuning_conditional(file_index, max_evals, model, experiment_name, early_stop
     if model == 'cnn2':
         problem.add_hyperparameter((0.00001, 0.01), "learning_rate")
         obj_func = run_cnn2
+
+    # save problem to json
+    save_problem(problem, search_dir + '/problem.json')
 
     # load in early stopping metrics if available
     if early_stopping:

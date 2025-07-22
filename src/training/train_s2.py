@@ -6,7 +6,6 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 from datetime import datetime
-from dataset import FloodSampleS2Dataset
 from torchvision import transforms
 from torchmetrics import MetricCollection
 from torchmetrics.classification import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score
@@ -15,17 +14,20 @@ from matplotlib.colors import Normalize
 import random
 from random import Random
 from PIL import Image
-from loss import BCEDiceLoss, TverskyLoss
 import numpy as np
 import sys
-from models.model import S2WaterDetector
-from utils.utils import DATA_DIR, RESULTS_DIR, get_model_params, Metrics, EarlyStopper, ChannelIndexer
-from utils.config import Config
 import pickle
-from training.optim import get_optimizer
-from training.scheduler import get_scheduler
 from pathlib import Path
 import json
+
+from models.model import S2WaterDetector
+from utils.config import Config
+from utils.utils import DATA_DIR, RESULTS_DIR, get_model_params, Metrics, EarlyStopper, ChannelIndexer
+
+from training.loss import BCEDiceLoss, TverskyLoss
+from training.dataset import FloodSampleS2Dataset
+from training.optim import get_optimizer
+from training.scheduler import get_scheduler
 
 # TO IMPLEMENT: WITH DISCRIMINATOR, ADDITIONAL TRACKING OF DISCRIMINATOR OUTPUTS
 # COULD ALSO CONSIDER REMOVING DISCRIMINATOR, ONLY ATTACHING FOR TEST SET EVALUATION

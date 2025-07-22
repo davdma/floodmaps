@@ -6,41 +6,12 @@ from training.train_sar import run_experiment_s1
 from training.train_ad_head import run_experiment_ad
 from utils.config import Config
 from datetime import datetime
+from tuning.tuning_utils import load_stopper_info, save_stopper_info, print_save_best_params, save_problem
 import pandas as pd
 import argparse
 import os
 import sys
 import socket
-import json
-
-def load_stopper_info(filepath):
-    """Loads historical early stopper objective and count."""
-    if os.path.exists(filepath):
-        with open(filepath, 'r') as f:
-            state = json.load(f)
-        return state['_best_objective'], state['_n_lower']
-    print('Stopper filepath not found.')
-    return None, 0
-
-def save_stopper_info(stopper, filepath):
-    """Save optimization early stopper objective and count."""
-    state = {'_best_objective': stopper._best_objective, '_n_lower': stopper._n_lower}
-    with open(filepath, 'w') as f:
-        json.dump(state, f)
-
-def print_save_best_params(save_file, file_path):
-    """Prints the parameters of the best tuning run so far."""
-    df = pd.read_csv(save_file)
-    best_idx = df["objective"].idxmax()
-    best_row = df.loc[best_idx]
-
-    # Filter for columns starting with "p:"
-    p_vars = best_row.filter(like="p:").to_dict()
-    print(p_vars)
-
-    # save best params to file
-    with open(file_path, 'w') as f:
-        json.dump(p_vars, f)
 
 # tuning autodespeckler + unet architecture
 # need to fill in need fields for loading, freezing, watching weights
@@ -58,7 +29,7 @@ def run_s1(parameters):
     ad_cfg = Config(config_file="configs/VAE_tuning.yaml", **override)
     fmetrics = run_experiment_s1(cfg, ad_cfg=ad_cfg)
     results = fmetrics.get_metrics(split='val', partition='shift_invariant')
-    return results['final model val f1']
+    return results['val f1']
 
 def tuning_s1(file_index, max_evals, experiment_name, early_stopping, random_state=930):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -67,7 +38,7 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping, random_sta
     print("Running tuning script on:", hostname)
     print("Current timestamp:", timestamp)
     print(f'Beginning tuning for s1 experiment {experiment_name} for {max_evals} max evals using random seed {random_state}.')
-    search_dir = './tuning/s1/' + experiment_name
+    search_dir = './results/tuning/s1/' + experiment_name
 
     if not os.path.exists(search_dir):
         os.makedirs(search_dir)
@@ -89,6 +60,9 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping, random_sta
     # VAE
     problem.add_hyperparameter([128, 256, 512], "latent_dim")
     problem.add_hyperparameter([0, 0.001, 0.01, 0.05, 0.1, 1, 4, 10, 20], "VAE_beta")
+
+    # save problem to json
+    save_problem(problem, search_dir + '/problem.json')
 
     # load in early stopping metrics if available
     if early_stopping:
@@ -129,7 +103,7 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping, random_sta
 
         # if search stopped print params of best run
         if early_stopping and early_stopper.search_stopped:
-            print_best_params(save_file)
+            print_save_best_params(save_file, search_dir + '/best.json')
 
 # tuning autodespeckler alone
 def run_vae(parameters):
@@ -230,6 +204,9 @@ def tuning_ad(file_index, max_evals, model, experiment_name, early_stopping, ran
         problem.add_hyperparameter((0.00001, 0.01), "learning_rate")
         obj_func = run_cnn2
 
+    # save problem to json
+    save_problem(problem, search_dir + '/problem.json')
+
     # load in early stopping metrics if available
     if early_stopping:
         early_stopper = SearchEarlyStopping(patience=10)
@@ -277,7 +254,7 @@ def tuning_ad(file_index, max_evals, model, experiment_name, early_stopping, ran
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-i", "--run_index", type=int, default=0,
-                        help='0 if random trials, 1 if bayesian opt (requires 10+ previous runs)')
+                        help='0 for random trials, 1 for bayesian opt (requires 10+ previous runs)')
     parser.add_argument("-e", "--max_evals", type=int, default=1)
     parser.add_argument("-m", "--model", default='vae', choices=['vae', 'cnn1', 'cnn2', 'dae'])
     parser.add_argument("-n", "--experiment_name", type=str, default="ad_vae")

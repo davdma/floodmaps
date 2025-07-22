@@ -1,101 +1,70 @@
-from deephyper.problem import HpProblem
-from deephyper.search.hps import CBO
+from deephyper.hpo import HpProblem
+from deephyper.hpo import CBO
 from deephyper.evaluator import Evaluator
 from deephyper.evaluator.callback import SearchEarlyStopping
-from training.train_classifier import run_experiment_s2
+from training.train_s2 import run_experiment_s2
 from training.train_sar import run_experiment_s1
+from utils.config import Config
+from datetime import datetime
+from tuning.tuning_utils import load_stopper_info, save_stopper_info, print_save_best_params, save_problem
 import pandas as pd
 import argparse
 import os
 import sys
+import socket
 
-def run_s2(job):
-    # channels = [bool(int(x)) for x in str(int(job.parameters['channels']))]
-    config = {
-        'mode': 'val',
-        'method': "random",
-        'size': 64,
-        'samples': 1000,
-        'channels': [bool(int(x)) for x in '1111101111'], # exclude DEM tuning for now
-        'sample_dir': '../sampling/samples_200_5_4_35/',
-        'label_dir': '../sampling/labels/',
-        'project': 'FloodSamplesUNetNoDEM', # 'FloodSamplesUNetTuning2',
-        'group': None,
-        'num_sample_predictions': 60,
-        'epochs': 100,
-        'batch_size': job.parameters['batch_size'],
-        'num_workers': 0,
-        'learning_rate': job.parameters['learning_rate'],
-        'early_stopping': True,
-        'patience': 10,
-        'name': 'unet',
-        'dropout': job.parameters['dropout'],
-        'deep_supervision': False,
-        'loss': "TverskyLoss",
-        'alpha': job.parameters['alpha'],
-        'beta': 1 - job.parameters['alpha'],
-        'optimizer': "Adam",
-        'seed': 12240
+def run_s2(parameters):
+    override = {
+        'project': 'Texas_S2_NoDEM_Tuning',
+        'group': 'UNet',
+        'loss': parameters['loss'],
+        'lr': parameters['learning_rate'],
+        'LR_scheduler': parameters['LR_scheduler'],
+        'dropout': parameters['dropout']
     }
-    final_vacc, final_vpre, final_vrec, final_vf1 = run_experiment_s2(config)
-    return final_vf1
+    cfg = Config(config_file="configs/s2_unet_tuning.yaml", **override)
+    fmetrics = run_experiment_s2(cfg)
+    results = fmetrics.get_metrics(split='val')
+    return results['val f1']
 
-def run_s1(job):
-    config = {
-        'size': 68,
-        'window': 64,
-        'samples': 1000,
-        'method': 'minibatch',
-        'filter': 'raw',
-        'channels': [bool(int(x)) for x in '1111111'],
-        'project': 'SARUNetDespecklerTuning',
-        'group': 'CNN2_autodespeckler',
-        'num_sample_predictions': 60,
-        'mode': 'val',
-        'epochs': 250,
-        'batch_size': 1200,
-        'subset': 0.5,
-        'learning_rate': job.parameters['learning_rate'],
-        'early_stopping': True,
-        'patience': 10,
-        'name': 'unet',
-        'dropout': job.parameters['dropout'],
-        'autodespeckler': 'CNN2', # if not None need to specify additional autodespeckler args
-        'AD_num_layers': job.parameters['AD_num_layers'],
-        'AD_kernel_size': job.parameters['AD_kernel_size'], # optional
-        'AD_dropout': job.parameters['AD_dropout'], # optional
-        'AD_activation_func': job.parameters['AD_activation_func'],
-        'num_workers': 10,
-        'loss': job.parameters['loss'],
-        'alpha': job.parameters['alpha'],
-        'beta': 1 - job.parameters['alpha'],
-        'optimizer': "Adam",
-        'seed': 1330935
-    }
-    final_vacc, final_vpre, final_vrec, final_vf1 = run_experiment_s1(config)
-    return final_vf1
-
-def tuning_s2(file_index, max_evals, experiment_name, early_stopping):
-    search_dir = './tuning/s2/' + experiment_name
+def tuning_s2(file_index, max_evals, experiment_name, early_stopping, random_state=230):
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    hostname = socket.gethostname()
+    print("----------------------------------")
+    print("Running tuning script on:", hostname)
+    print("Current timestamp:", timestamp)
+    print(f'Beginning tuning for s2 experiment {experiment_name} for {max_evals} max evals using random seed {random_state}.')
+    search_dir = './results/tuning/s2/' + experiment_name
 
     if not os.path.exists(search_dir):
         os.makedirs(search_dir)
 
     # define the variable you want to optimize
-    # assume channels is 111111111
     problem = HpProblem()
-    # problem.add_hyperparameter([111111111, 111111100, 111110000], "channels") - all_old.csv
-    problem.add_hyperparameter((0.20, 0.40), "alpha")
-    problem.add_hyperparameter([16, 32, 64, 128, 256, 512, 1024], "batch_size")
     problem.add_hyperparameter((0.00001, 0.01), "learning_rate") # real parameter
-    problem.add_hyperparameter((0.10, 0.30), "dropout")
-    # problem.add_hyperparameter(["BCELoss", "BCEDiceLoss", "TverskyLoss"], "loss")
+    problem.add_hyperparameter((0.05, 0.40), "dropout")
+    problem.add_hyperparameter(["BCELoss", "BCEDiceLoss", "TverskyLoss"], "loss")
+    problem.add_hyperparameter(['Constant', 'ReduceLROnPlateau'], 'LR_scheduler')
+    # problem.add_hyperparameter((0.20, 0.40), "alpha") # For tversky keep constant alpha (tune later)
+    # problem.add_hyperparameter([True, False], "deep_supervision")
+
+    # save problem to json
+    save_problem(problem, search_dir + '/problem.json')
+
+    # load in early stopping metrics if available
+    if early_stopping:
+        early_stopper = SearchEarlyStopping(patience=10)
+        if os.path.exists(search_dir + '/stopper.json'):
+            _best_objective, _n_lower = load_stopper_info(search_dir + '/stopper.json')
+            early_stopper._best_objective = _best_objective
+            early_stopper._n_lower = _n_lower
+        method_kwargs = {"callbacks": [early_stopper]}
+    else:
+        method_kwargs = dict()
 
     # define the evaluator to distribute the computation
-    method_kwargs = {"callbacks": [SearchEarlyStopping(patience=10)]} if early_stopping else dict()
-
     with Evaluator.create(run_s2, method="serial", method_kwargs=method_kwargs) as evaluator:
-        search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=192995)
+        search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=random_state)
 
         if int(file_index) >= 1:
             # fit model from previous checkpointed search
@@ -106,15 +75,49 @@ def tuning_s2(file_index, max_evals, experiment_name, early_stopping):
         else:
             results = search.search(max_evals=max_evals, timeout=23*3600)
 
+        print('Saving stopper and eval results to file...')
+        save_stopper_info(early_stopper, search_dir + '/stopper.json')
+
         # save results to collective file
         save_file = search_dir + '/all.csv'
         if os.path.exists(save_file):
+            # note: need to reorder column headers if a bunch of new hyperparameters are added to match csv file
+            existing_df = pd.read_csv(save_file, nrows=0)
+            existing_columns = existing_df.columns.tolist()
+            results = results[existing_columns]
+
             results.to_csv(save_file, mode='a', index=False, header=False)
         else:
             results.to_csv(save_file, index=False)
+        
+        # if search stopped print params of best run
+        if early_stopping and early_stopper.search_stopped:
+            print_save_best_params(save_file, search_dir + '/best.json')
 
-def tuning_s1(file_index, max_evals, experiment_name, early_stopping):
-    search_dir = './tuning/s1/' + experiment_name
+def run_s1(parameters):
+    override = {
+        'project': 'SARUNetDespecklerTuning',
+        'group': 'CNN2_autodespeckler',
+        'lr': parameters['learning_rate'],
+        'dropout': parameters['dropout'],
+        'alpha': parameters['alpha'],
+        'beta': 1 - parameters['alpha'],
+        'loss': parameters['loss']
+    }
+    cfg = Config(config_file="configs/test.yaml", **override)
+    ad_cfg = Config(config_file="configs/test.yaml", **override)
+    fmetrics = run_experiment_s1(cfg, ad_cfg=ad_cfg)
+    results = fmetrics.get_metrics(split='val', partition='shift_invariant')
+    return results['val f1']
+
+def tuning_s1(file_index, max_evals, experiment_name, early_stopping, random_state=230):
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    hostname = socket.gethostname()
+    print("----------------------------------")
+    print("Running tuning script on:", hostname)
+    print("Current timestamp:", timestamp)
+    print(f'Beginning tuning for s1 experiment {experiment_name} for {max_evals} max evals using random seed {random_state}.')
+    search_dir = './results/tuning/s1/' + experiment_name
 
     if not os.path.exists(search_dir):
         os.makedirs(search_dir)
@@ -133,9 +136,21 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping):
     problem.add_hyperparameter((0.05, 0.30), "AD_dropout")
     problem.add_hyperparameter(["leaky_relu", "relu"], "AD_activation_func")
 
-    # define the evaluator to distribute the computation
-    method_kwargs = {"callbacks": [SearchEarlyStopping(patience=10)]} if early_stopping else dict()
+    # save problem to json
+    save_problem(problem, search_dir + '/problem.json')
 
+    # load in early stopping metrics if available
+    if early_stopping:
+        early_stopper = SearchEarlyStopping(patience=10)
+        if os.path.exists(search_dir + '/stopper.json'):
+            _best_objective, _n_lower = load_stopper_info(search_dir + '/stopper.json')
+            early_stopper._best_objective = _best_objective
+            early_stopper._n_lower = _n_lower
+        method_kwargs = {"callbacks": [early_stopper]}
+    else:
+        method_kwargs = dict()
+
+    # define the evaluator to distribute the computation
     with Evaluator.create(run_s1, method="serial", method_kwargs=method_kwargs) as evaluator:
         search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=599023)
 
@@ -148,6 +163,9 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping):
         else:
             results = search.search(max_evals=max_evals, timeout=23*3600)
 
+        print('Saving stopper and eval results to file...')
+        save_stopper_info(early_stopper, search_dir + '/stopper.json')
+
         # save results to collective file
         save_file = search_dir + '/all.csv'
         if os.path.exists(save_file):
@@ -159,18 +177,23 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping):
             results.to_csv(save_file, mode='a', index=False, header=False)
         else:
             results.to_csv(save_file, index=False)
+        
+        # if search stopped print params of best run
+        if early_stopping and early_stopper.search_stopped:
+            print_save_best_params(save_file, search_dir + '/best.json')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('-d', '--dataset', default='s2', choices=['s1', 's2'], help=f"dataset options: s1, s2 (default: s2)")
-    parser.add_argument("-i", "--run_index", type=int, default=0)
+    parser.add_argument("-i", "--run_index", type=int, default=0, help='0 for random trials, 1 for bayesian opt (requires 10+ previous runs)')
     parser.add_argument("-e", "--max_evals", type=int, default=1)
-    parser.add_argument("-n", "--experiment_name", type=str, default="unetclassifier")
+    parser.add_argument("-n", "--experiment_name", type=str, default="unet_s2")
     parser.add_argument('--early_stopping', action='store_true', help='early stopping (default: False)')
+    parser.add_argument("-r", "--random_state", type=int, default=123213)
 
     args = parser.parse_args()
 
     if args.dataset == 's2':
-        sys.exit(tuning_s2(args.run_index, args.max_evals, args.experiment_name, args.early_stopping))
+        sys.exit(tuning_s2(args.run_index, args.max_evals, args.experiment_name, args.early_stopping, random_state=args.random_state))
     elif args.dataset == 's1':
-        sys.exit(tuning_s1(args.run_index, args.max_evals, args.experiment_name, args.early_stopping))
+        sys.exit(tuning_s1(args.run_index, args.max_evals, args.experiment_name, args.early_stopping, random_state=args.random_state))

@@ -5,41 +5,12 @@ from deephyper.evaluator.callback import SearchEarlyStopping
 from training.train_multi import run_experiment_ad
 from utils.config import Config
 from datetime import datetime
+from tuning.tuning_utils import load_stopper_info, save_stopper_info, print_save_best_params
 import pandas as pd
 import argparse
 import os
 import sys
 import socket
-import json
-
-def load_stopper_info(filepath):
-    """Loads historical early stopper objective and count."""
-    if os.path.exists(filepath):
-        with open(filepath, 'r') as f:
-            state = json.load(f)
-        return state['_best_objective'], state['_n_lower']
-    print('Stopper filepath not found.')
-    return None, 0
-
-def save_stopper_info(stopper, filepath):
-    """Save optimization early stopper objective and count."""
-    state = {'_best_objective': stopper._best_objective, '_n_lower': stopper._n_lower}
-    with open(filepath, 'w') as f:
-        json.dump(state, f)
-
-def print_save_best_params(save_file, file_path):
-    """Prints the parameters of the best tuning run so far."""
-    df = pd.read_csv(save_file)
-    best_idx = df["objective"].idxmax()
-    best_row = df.loc[best_idx]
-
-    # Filter for columns starting with "p:"
-    p_vars = best_row.filter(like="p:").to_dict()
-    print(p_vars)
-
-    # save best params to file
-    with open(file_path, 'w') as f:
-        json.dump(p_vars, f)
 
 # tuning autodespeckler alone
 def run_vae(parameters):

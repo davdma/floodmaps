@@ -31,10 +31,9 @@ from utils.utils import (DATA_DIR, ADEarlyStopper, Metrics, BetaScheduler, get_g
 from utils.metrics import (denormalize, TV_loss, var_laplacian, ssi, get_random_batch,
                     enl, RIS, quality_m, psnr, compute_ssim)
 
-AUTODESPECKLER_NAMES = ['CNN1', 'CNN2', 'DAE', 'VAE']
-NOISE_NAMES = ['normal', 'masking', 'log_gamma']
+AUTODESPECKLER_NAMES = ['CVAE']
 AD_LOSS_NAMES = ['L1Loss', 'MSELoss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss', 'JSDLoss']
-SCHEDULER_NAMES = ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR'] # 'CosWarmRestarts'
+SCHEDULER_NAMES = ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR']
 
 ### Script for training CVAE with conditioning input:
 ### Separate from train_multi.py as it allows for two different validation losses
@@ -722,7 +721,23 @@ def run_experiment_ad(cfg):
 
     return fmetrics
 
+def validate_config(cfg):
+    # Add checks
+    assert cfg.train.lr > 0, "Learning rate must be positive"
+    assert cfg.model.autodespeckler in AUTODESPECKLER_NAMES, f"Model must be one of {AUTODESPECKLER_NAMES}"
+    assert cfg.train.loss in AD_LOSS_NAMES, f"Loss must be one of {AD_LOSS_NAMES}"
+    assert cfg.train.optimizer in ['Adam', 'SGD'], f"Optimizer must be one of {['Adam', 'SGD']}"
+    assert cfg.train.LR_scheduler in SCHEDULER_NAMES, f"LR scheduler must be one of {SCHEDULER_NAMES}"
+    assert cfg.train.early_stopping in [True, False], "Early stopping must be a boolean"
+    assert not cfg.train.early_stopping or cfg.train.patience is not None, "Patience must be set if early stopping is enabled"
+    assert cfg.train.random_flip in [True, False], "Random flip must be a boolean"
+    assert cfg.train.save in [True, False], "Save must be a boolean"
+    assert cfg.train.batch_size is not None and cfg.train.batch_size > 0, "Batch size must be defined and positive"
+    assert cfg.eval.mode in ['val', 'test'], f"Evaluation mode must be one of {['val', 'test']}"
+    assert cfg.wandb.project is not None, "Wandb project must be specified"
+
 def main(cfg):
+    validate_config(cfg)
     run_experiment_ad(cfg)
 
 if __name__ == '__main__':
@@ -752,9 +767,6 @@ if __name__ == '__main__':
     # autodespeckler
     parser.add_argument('--autodespeckler', choices=AUTODESPECKLER_NAMES,
                         help=f"models: {', '.join(AUTODESPECKLER_NAMES)}")
-    parser.add_argument('--noise_type', choices=NOISE_NAMES,
-                        help=f"models: {', '.join(NOISE_NAMES)}")
-    parser.add_argument('--noise_coeff', type=float, help="noise coefficient")
     parser.add_argument('--latent_dim', type=int, help='latent dimensions')
     parser.add_argument('--AD_num_layers', type=int, help='Autoencoder layers')
     parser.add_argument('--AD_kernel_size', type=int, help='Autoencoder kernel size')

@@ -730,7 +730,27 @@ def run_experiment_s1(cfg, ad_cfg=None):
 
     return fmetrics
 
+def validate_config(cfg):
+    def validate_channels(s):
+        return type(s) == str and len(s) == 7 and all(c in '01' for c in s)
+
+    # Add checks
+    assert cfg.train.lr > 0, "Learning rate must be positive"
+    assert cfg.model.classifier in MODEL_NAMES, f"Model must be one of {MODEL_NAMES}"
+    assert cfg.train.loss in LOSS_NAMES, f"Loss must be one of {LOSS_NAMES}"
+    assert cfg.train.optimizer in ['Adam', 'SGD'], f"Optimizer must be one of {['Adam', 'SGD']}"
+    assert cfg.train.LR_scheduler in ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR'], f"LR scheduler must be one of {['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR']}"
+    assert cfg.train.early_stopping in [True, False], "Early stopping must be a boolean"
+    assert not cfg.train.early_stopping or cfg.train.patience is not None, "Patience must be set if early stopping is enabled"
+    assert cfg.train.random_flip in [True, False], "Random flip must be a boolean"
+    assert cfg.train.save in [True, False], "Save must be a boolean"
+    assert cfg.train.batch_size is not None and cfg.train.batch_size > 0, "Batch size must be defined and positive"
+    assert cfg.eval.mode in ['val', 'test'], f"Evaluation mode must be one of {['val', 'test']}"
+    assert cfg.wandb.project is not None, "Wandb project must be specified"
+    assert validate_channels(cfg.data.channels), "Channels must be a binary string of length 7"
+
 def main(cfg, ad_cfg):
+    validate_config(cfg) # validate ad_cfg?
     run_experiment_s1(cfg, ad_cfg=ad_cfg)
 
 if __name__ == '__main__':
@@ -738,16 +758,6 @@ if __name__ == '__main__':
 
     # YAML config file
     parser.add_argument("--config_file", default="configs/classifier_default.yaml", help="Path to YAML config file (default: configs/classifier_default.yaml)")
-
-    # TO DO: REFACTOR CHANNEL MANAGEMENT (BOOL_INDICES IS DEPRECATED)
-    def bool_indices(s):
-        if len(s) == 7 and all(c in '01' for c in s):
-            try:
-                return s
-            except ValueError:
-                raise argparse.ArgumentTypeError(f"Invalid boolean string: '{s}'")
-        else:
-            raise argparse.ArgumentTypeError("Boolean string must be of length 7 and have binary digits")
         
     # wandb
     parser.add_argument('--project', help='Wandb project where run will be logged')

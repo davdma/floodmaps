@@ -371,8 +371,12 @@ def run_experiment(config):
     else:
         raise Exception("Failed to login to wandb.")
 
-def main(config):
-    run_experiment(config)
+def validate_config(cfg):
+    raise NotImplementedError("Not implemented.")
+
+def main(cfg):
+    validate_config(cfg)
+    run_experiment(cfg)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='train_discriminator', description='Trains discriminator from patches. The discriminator inputs a patch with n channels and outputs a single value corresponding to whether the patch is likely to contain water or not.')

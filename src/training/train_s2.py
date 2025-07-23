@@ -41,7 +41,7 @@ def get_loss_fn(cfg):
     elif cfg.train.loss == 'BCEDiceLoss':
         loss_fn = BCEDiceLoss()
     elif cfg.train.loss == 'TverskyLoss':
-        loss_fn = TverskyLoss(alpha=cfg.train.tversky.alpha, beta=cfg.train.tversky.beta)
+        loss_fn = TverskyLoss(alpha=cfg.train.tversky.alpha, beta=1-cfg.train.tversky.alpha)
     else:
         raise Exception(f'Loss function not found. Must be one of {LOSS_NAMES}')
 
@@ -432,12 +432,6 @@ def run_experiment_s2(cfg):
         train_mean = torch.from_numpy(train_mean[channels])
         train_std = torch.from_numpy(train_std[channels])
 
-        # binary channels should be preprocessed to mean std 0, 1
-        # make sure binary channels are 0 mean and 1 std
-        # if b_channels > 0:
-        #     train_mean[-b_channels:] = 0
-        #     train_std[-b_channels:] = 1
-
     standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
 
     # datasets
@@ -529,7 +523,28 @@ def run_experiment_s2(cfg):
 
     return fmetrics
 
+def validate_config(cfg):
+    def validate_channels(s):
+        return type(s) == str and len(s) == 11 and all(c in '01' for c in s)
+
+    # Add checks
+    assert 0.0 <= cfg.train.tversky.alpha <= 1.0, "Tversky alpha must be in [0, 1]"
+    assert cfg.train.lr > 0, "Learning rate must be positive"
+    assert cfg.model.classifier in MODEL_NAMES, f"Model must be one of {MODEL_NAMES}"
+    assert cfg.train.loss in LOSS_NAMES, f"Loss must be one of {LOSS_NAMES}"
+    assert cfg.train.optimizer in ['Adam', 'SGD'], f"Optimizer must be one of {['Adam', 'SGD']}"
+    assert cfg.train.LR_scheduler in ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR'], f"LR scheduler must be one of {['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR']}"
+    assert cfg.train.early_stopping in [True, False], "Early stopping must be a boolean"
+    assert not cfg.train.early_stopping or cfg.train.patience is not None, "Patience must be set if early stopping is enabled"
+    assert cfg.train.random_flip in [True, False], "Random flip must be a boolean"
+    assert cfg.train.save in [True, False], "Save must be a boolean"
+    assert cfg.train.batch_size is not None and cfg.train.batch_size > 0, "Batch size must be defined and positive"
+    assert cfg.eval.mode in ['val', 'test'], f"Evaluation mode must be one of {['val', 'test']}"
+    assert cfg.wandb.project is not None, "Wandb project must be specified"
+    assert validate_channels(cfg.data.channels), "Channels must be a binary string of length 11"
+
 def main(cfg):
+    validate_config(cfg)
     run_experiment_s2(cfg)
 
 if __name__ == '__main__':
@@ -537,15 +552,6 @@ if __name__ == '__main__':
 
     # YAML config file
     parser.add_argument("--config_file", default="configs/s2_template.yaml", help="Path to YAML config file (default: configs/s2_template.yaml)")
-
-    def bool_indices(s):
-        if len(s) == 11 and all(c in '01' for c in s):
-            try:
-                return [bool(int(x)) for x in s]
-            except ValueError:
-                raise argparse.ArgumentTypeError("Invalid boolean string: '{}'".format(s))
-        else:
-            raise argparse.ArgumentTypeError("Boolean string must be of length 11 and have binary digits")
 
     # wandb
     parser.add_argument('--project', help='Wandb project where run will be logged')

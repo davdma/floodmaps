@@ -38,6 +38,7 @@ def print_save_best_params(save_file, file_path):
 
     # Filter for columns starting with "p:"
     p_vars = best_row.filter(like="p:").to_dict()
+    p_vars['objective'] = best_row['objective']
     print(p_vars)
 
     # save best params to file

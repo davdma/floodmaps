@@ -31,7 +31,7 @@ def run_s1(parameters):
     results = fmetrics.get_metrics(split='val', partition='shift_invariant')
     return results['val f1']
 
-def tuning_s1(file_index, max_evals, experiment_name, early_stopping, random_state=930):
+def tuning_s1(file_index, max_evals, experiment_name, early_stopping, patience=10, random_state=930):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     hostname = socket.gethostname()
     print("----------------------------------")
@@ -66,7 +66,7 @@ def tuning_s1(file_index, max_evals, experiment_name, early_stopping, random_sta
 
     # load in early stopping metrics if available
     if early_stopping:
-        early_stopper = SearchEarlyStopping(patience=10)
+        early_stopper = SearchEarlyStopping(patience=patience)
         if os.path.exists(search_dir + '/stopper.json'):
             _best_objective, _n_lower = load_stopper_info(search_dir + '/stopper.json')
             early_stopper._best_objective = _best_objective
@@ -160,7 +160,7 @@ def run_dae(parameters):
     floss = fmetrics.get_metrics(split='val')['loss']
     return 0 - floss
 
-def tuning_ad(file_index, max_evals, model, experiment_name, early_stopping, random_state=17630):
+def tuning_ad(file_index, max_evals, model, experiment_name, early_stopping, patience=10, random_state=17630):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     hostname = socket.gethostname()
     print("----------------------------------")
@@ -209,7 +209,7 @@ def tuning_ad(file_index, max_evals, model, experiment_name, early_stopping, ran
 
     # load in early stopping metrics if available
     if early_stopping:
-        early_stopper = SearchEarlyStopping(patience=10)
+        early_stopper = SearchEarlyStopping(patience=patience)
         if os.path.exists(search_dir + '/stopper.json'):
             _best_objective, _n_lower = load_stopper_info(search_dir + '/stopper.json')
             early_stopper._best_objective = _best_objective
@@ -260,12 +260,13 @@ if __name__ == "__main__":
     parser.add_argument("-n", "--experiment_name", type=str, default="ad_vae")
     parser.add_argument('--early_stopping', action='store_true', help='early stopping (default: False)')
     parser.add_argument("-r", "--random_state", type=int, default=123213)
+    parser.add_argument("-p", "--patience", type=int, default=10)
     ### To implement:
     # parser.add_argument('--full_model', action='store_true', help='whether to tune full model or just ad head (default: False)')
 
     args = parser.parse_args()
     sys.exit(tuning_ad(args.run_index, args.max_evals, args.model, args.experiment_name, args.early_stopping,
-                        random_state=args.random_state))
+                        patience=args.patience, random_state=args.random_state))
     ### To implement:
     # if args.full_model:
     #     sys.exit(tuning_s1(args.run_index, args.max_evals, args.experiment_name, args.early_stopping,

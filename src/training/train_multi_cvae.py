@@ -723,16 +723,16 @@ def run_experiment_ad(cfg):
 
 def validate_config(cfg):
     # Add checks
+    assert cfg.save in [True, False], "Save must be a boolean"
+    assert cfg.train.batch_size is not None and cfg.train.batch_size > 0, "Batch size must be defined and positive"
     assert cfg.train.lr > 0, "Learning rate must be positive"
-    assert cfg.model.autodespeckler in AUTODESPECKLER_NAMES, f"Model must be one of {AUTODESPECKLER_NAMES}"
     assert cfg.train.loss in AD_LOSS_NAMES, f"Loss must be one of {AD_LOSS_NAMES}"
     assert cfg.train.optimizer in ['Adam', 'SGD'], f"Optimizer must be one of {['Adam', 'SGD']}"
     assert cfg.train.LR_scheduler in SCHEDULER_NAMES, f"LR scheduler must be one of {SCHEDULER_NAMES}"
     assert cfg.train.early_stopping in [True, False], "Early stopping must be a boolean"
     assert not cfg.train.early_stopping or cfg.train.patience is not None, "Patience must be set if early stopping is enabled"
-    assert cfg.train.random_flip in [True, False], "Random flip must be a boolean"
-    assert cfg.train.save in [True, False], "Save must be a boolean"
-    assert cfg.train.batch_size is not None and cfg.train.batch_size > 0, "Batch size must be defined and positive"
+    assert cfg.model.autodespeckler in AUTODESPECKLER_NAMES, f"Model must be one of {AUTODESPECKLER_NAMES}"
+    assert cfg.data.random_flip in [True, False], "Random flip must be a boolean"
     assert cfg.eval.mode in ['val', 'test'], f"Evaluation mode must be one of {['val', 'test']}"
     assert cfg.wandb.project is not None, "Wandb project must be specified"
 

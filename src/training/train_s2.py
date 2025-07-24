@@ -528,17 +528,18 @@ def validate_config(cfg):
         return type(s) == str and len(s) == 11 and all(c in '01' for c in s)
 
     # Add checks
-    assert 0.0 <= cfg.train.tversky.alpha <= 1.0, "Tversky alpha must be in [0, 1]"
+    assert cfg.save in [True, False], "Save must be a boolean"
+    if cfg.train.loss == 'TverskyLoss':
+        assert 0.0 <= cfg.train.tversky.alpha <= 1.0, "Tversky alpha must be in [0, 1]"
+    assert cfg.train.batch_size is not None and cfg.train.batch_size > 0, "Batch size must be defined and positive"
     assert cfg.train.lr > 0, "Learning rate must be positive"
-    assert cfg.model.classifier in MODEL_NAMES, f"Model must be one of {MODEL_NAMES}"
     assert cfg.train.loss in LOSS_NAMES, f"Loss must be one of {LOSS_NAMES}"
     assert cfg.train.optimizer in ['Adam', 'SGD'], f"Optimizer must be one of {['Adam', 'SGD']}"
     assert cfg.train.LR_scheduler in ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR'], f"LR scheduler must be one of {['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR']}"
     assert cfg.train.early_stopping in [True, False], "Early stopping must be a boolean"
     assert not cfg.train.early_stopping or cfg.train.patience is not None, "Patience must be set if early stopping is enabled"
-    assert cfg.train.random_flip in [True, False], "Random flip must be a boolean"
-    assert cfg.train.save in [True, False], "Save must be a boolean"
-    assert cfg.train.batch_size is not None and cfg.train.batch_size > 0, "Batch size must be defined and positive"
+    assert cfg.model.classifier in MODEL_NAMES, f"Model must be one of {MODEL_NAMES}"
+    assert cfg.data.random_flip in [True, False], "Random flip must be a boolean"
     assert cfg.eval.mode in ['val', 'test'], f"Evaluation mode must be one of {['val', 'test']}"
     assert cfg.wandb.project is not None, "Wandb project must be specified"
     assert validate_channels(cfg.data.channels), "Channels must be a binary string of length 11"

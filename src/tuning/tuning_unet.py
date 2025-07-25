@@ -98,13 +98,12 @@ def tuning_s2(file_index, max_evals, experiment_name, early_stopping, patience=1
 
 def run_s1(parameters):
     override = {
-        'project': 'SARUNetDespecklerTuning',
-        'group': 'CNN2_autodespeckler',
+        'project': 'Texas_S1_NoDEM_Tuning',
+        'group': 'UNet',
+        'loss': parameters['loss'],
         'lr': parameters['learning_rate'],
-        'dropout': parameters['dropout'],
-        'alpha': parameters['alpha'],
-        'beta': 1 - parameters['alpha'],
-        'loss': parameters['loss']
+        'LR_scheduler': parameters['LR_scheduler'],
+        'dropout': parameters['dropout']
     }
     cfg = Config(config_file="configs/test.yaml", **override)
     ad_cfg = Config(config_file="configs/test.yaml", **override)

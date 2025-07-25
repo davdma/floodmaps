@@ -91,6 +91,7 @@ regex_patterns = [
     r'ndwi_\d{8}.*\.tif',
     r'b08_\d{8}.*\.tif',
     r'sar_\d{8}.*\.tif',
+    r'clouds_\d{8}.*\.tif',
     'metadata.json'
 ]
 pattern_dict = {
@@ -104,6 +105,7 @@ pattern_dict = {
     r'ndwi_\d{8}.*\.tif': 'NDWI',
     r'b08_\d{8}.*\.tif': 'B8 NIR',
     r'sar_\d{8}.*\.tif': 'SAR',
+    r'clouds_\d{8}.*\.tif': 'CLOUDS',
     'metadata.json': 'METADATA'
 }
 
@@ -600,6 +602,49 @@ def pipeline_TCI(dir_path, save_as, dst_crs, item, bbox):
         dst.write(out_image)
 
     return (out_image.shape[-2], out_image.shape[-1]), out_transform
+
+def pipeline_SCL(dir_path, save_as, dst_shape, dst_crs, dst_transform, item, bbox):
+    """Generates Scene Classification Layer raster of S2 multispectral file and resamples to 10m resolution.
+
+    Parameters
+    ----------
+    dir_path : str
+        Path for saving generated raster. 
+    save_as : str
+        Name of file to be saved (do not include extension!).
+    dst_shape : (int, int)
+        Shape of output raster.
+    dst_crs : obj
+        Coordinate reference system of output raster.
+    dst_transform : rasterio.affine.Affine()
+        Transform of TCI raster.
+    items : list[Item]
+        List of PyStac Item objects.
+    bbox : (float, float, float, float)
+        Tuple in the order minx, miny, maxx, maxy, representing bounding box, 
+        should be in CRS specified by dst_crs.
+    """
+    item_href = planetary_computer.sign(item.assets["SCL"].href)
+
+    out_image, out_transform = rasterio.merge.merge([item_href], bounds=bbox, nodata=0)
+    clouds = np.isin(out_image[0], [8, 9, 10]).astype(int)
+
+    # need to resample to grid of tci
+    h, w = dst_shape[-2:]
+    dest = np.zeros((h, w), dtype=clouds.dtype)
+    reproject(
+        clouds,
+        dest,
+        src_transform=out_transform,
+        src_crs=dst_crs,
+        dst_transform=dst_transform,
+        dst_crs=dst_crs,
+        resampling=Resampling.nearest)
+
+    # only make cloud values (8, 9, 10) 1 everything else 0
+    with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=1, height=h, width=w, crs=dst_crs, 
+                        dtype=clouds.dtype, transform=dst_transform) as dst:
+        dst.write(dest, 1)
 
 def pipeline_RGB(dir_path, save_as, dst_crs, item, bbox):
     """Generates B02 (B), B03 (G), B04 (R) rasters of S2 multispectral file.
@@ -1344,8 +1389,10 @@ def event_sample_sar(threshold, days_before, days_after, maxcoverpercentage, wit
             logger.debug(f'B08 raster completed for {dt}.')
             pipeline_NDWI(dir_path, f'ndwi_{dt}_{eid}', valid_crs, item, cbbox)
             logger.debug(f'NDWI raster completed for {dt}.')
+            pipeline_SCL(dir_path, f'clouds_{dt}_{eid}', dst_shape, valid_crs, dst_transform, item, cbbox)
+            logger.debug(f'SCL raster completed for {dt}.')
             
-        logger.debug(f'All S2, B08, NDWI rasters completed successfully.')
+        logger.debug(f'All S2, B08, NDWI, SCL rasters completed successfully.')
 
         s1_completed_dt = set()
         for item in s1_products_by_crs[valid_crs]:

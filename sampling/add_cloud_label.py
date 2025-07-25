@@ -76,6 +76,7 @@ def main(dir_path):
     max_attempts = 3
     logger.debug('Sampling...')
     for sample in lst:
+        logger.debug(f'Processing sample: {sample}')
         # first get the bbox, file crs from the metadata file
         with open(sample + '/metadata.json', 'r') as json_file:
             metadata = json.load(json_file)
@@ -91,6 +92,11 @@ def main(dir_path):
 
         # download SCL for each TCI
         for tci in tcis:
+            # first check if cloud raster already exists
+            if Path(sample + f'/clouds_{dt}_{eid}.tif').is_file():
+                logger.debug(f'---> Cloud raster already exists for tci on {dt}. Skipping...')
+                continue
+            
             m = p.search(tci)
             dt = m.group(1)
             img_dt = datetime.strptime(m.group(1), '%Y%m%d')

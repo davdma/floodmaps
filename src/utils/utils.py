@@ -533,6 +533,27 @@ class EarlyStopper:
         self.metrics = None
         self.best_model_weights = None
 
+    def state_dict(self):
+        """For saving the state of the early stopper."""
+        return {
+            "patience": self.patience,
+            "min_delta": self.min_delta,
+            "counter": self.counter,
+            "best": self.best,
+            "min_validation_loss": self.min_validation_loss,
+            "metrics": self.metrics,
+            "best_model_weights": self.best_model_weights # note this is may be diff from chkpt weights
+        }
+
+    def load_state_dict(self, state):
+        self.patience = state["patience"]
+        self.min_delta = state["min_delta"]
+        self.counter = state["counter"]
+        self.best = state["best"]
+        self.min_validation_loss = state["min_validation_loss"]
+        self.metrics = state["metrics"]
+        self.best_model_weights = state["best_model_weights"]
+
     def step(self, validation_loss, model):
         if validation_loss < self.min_validation_loss:
             self.min_validation_loss = validation_loss
@@ -594,6 +615,35 @@ class ADEarlyStopper:
         self.period = period
         self.n_cycle = n_cycle
         self.count_cycles = count_cycles
+    
+    def state_dict(self):
+        """For saving the state of the early stopper."""
+        return {
+            "patience": self.patience,
+            "min_delta": self.min_delta,
+            "counter": self.counter,
+            "best": self.best,
+            "min_validation_loss": self.min_validation_loss,
+            "best_model_weights": self.best_model_weights,
+            "best_epoch": self.best_epoch,
+            "beta_annealing": self.beta_annealing,
+            "period": self.period,
+            "n_cycle": self.n_cycle,
+            "count_cycles": self.count_cycles
+        }
+
+    def load_state_dict(self, state):
+        self.patience = state["patience"]
+        self.min_delta = state["min_delta"]
+        self.counter = state["counter"]
+        self.best = state["best"]
+        self.min_validation_loss = state["min_validation_loss"]
+        self.best_model_weights = state["best_model_weights"]
+        self.best_epoch = state["best_epoch"]
+        self.beta_annealing = state["beta_annealing"]
+        self.period = state["period"]
+        self.n_cycle = state["n_cycle"]
+        self.count_cycles = state["count_cycles"]
 
     def step(self, validation_loss, model, epoch):
         """

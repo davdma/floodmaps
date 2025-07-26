@@ -23,6 +23,7 @@ import json
 from models.model import S2WaterDetector
 from utils.config import Config
 from utils.utils import DATA_DIR, RESULTS_DIR, get_model_params, Metrics, EarlyStopper, ChannelIndexer
+from utils.checkpoint import save_checkpoint, load_checkpoint
 
 from training.loss import BCEDiceLoss, TverskyLoss
 from training.dataset import FloodSampleS2Dataset
@@ -192,11 +193,18 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
     # optimizer and scheduler for reducing learning rate
     optimizer = get_optimizer(model, cfg)
     scheduler = get_scheduler(optimizer, cfg)
+    early_stopper = EarlyStopper(patience=cfg.train.patience) if cfg.train.early_stopping else None
 
-    if cfg.train.early_stopping:
-        early_stopper = EarlyStopper(patience=cfg.train.patience)
-    
-    for epoch in range(cfg.train.epochs):
+    # load checkpoint if it exists
+    if cfg.train.checkpoint.load_chkpt:
+        chkpt = load_checkpoint(cfg.train.checkpoint.chkpt_path, model, optimizer=optimizer, scheduler=scheduler, early_stopper=early_stopper)
+        start_epoch = chkpt['epoch'] + 1
+        if cfg.train.epochs < start_epoch:
+            raise ValueError(f"Epochs specified in config ({cfg.train.epochs}) is less than the epoch at which the checkpoint was saved ({start_epoch}).")
+    else:
+        start_epoch = 0
+
+    for epoch in range(start_epoch, cfg.train.epochs):
         try:
             # train loop
             avg_loss = train_loop(model, train_loader, device, optimizer, loss_fn, run, epoch)
@@ -217,6 +225,9 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
                 scheduler.step(avg_vloss)
             else:
                 scheduler.step()
+
+        if cfg.train.checkpoint.save_chkpt and epoch % cfg.train.checkpoint.save_chkpt_interval == 0:
+            save_checkpoint(cfg.train.checkpoint.save_chkpt_path, model, optimizer, epoch, scheduler=scheduler, early_stopper=early_stopper)
             
         run.log({"learning_rate": scheduler.get_last_lr()[0] if scheduler is not None else cfg.train.lr}, step=epoch)
 

@@ -25,6 +25,8 @@ from models.model import SARWaterDetector
 from utils.config import Config
 from utils.utils import (SRC_DIR, DATA_DIR, RESULTS_DIR, Metrics, EarlyStopper,
                          SARChannelIndexer, get_model_params)
+from utils.checkpoint import save_checkpoint, load_checkpoint
+
 from training.loss import LossConfig
 from training.dataset import FloodSampleSARDataset
 from training.optim import get_optimizer
@@ -334,18 +336,26 @@ def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, a
     # optimizer and scheduler for reducing learning rate
     optimizer = get_optimizer(model, cfg)
     scheduler = get_scheduler(optimizer, cfg)
+    early_stopper = EarlyStopper(patience=cfg.train.patience) if cfg.train.early_stopping else None
+
+    # load checkpoint if it exists
+    if cfg.train.checkpoint.load_chkpt:
+        chkpt = load_checkpoint(cfg.train.checkpoint.chkpt_path, model, optimizer=optimizer, scheduler=scheduler, early_stopper=early_stopper)
+        start_epoch = chkpt['epoch'] + 1
+        if cfg.train.epochs < start_epoch:
+            raise ValueError(f"Epochs specified in config ({cfg.train.epochs}) is less than the epoch at which the checkpoint was saved ({start_epoch}).")
+    else:
+        start_epoch = 0
 
     ignore_ad_loss = (ad_cfg is not None
                 and cfg.model.autodespeckler.freeze
                 and cfg.model.autodespeckler.freeze_epochs >= cfg.train.epochs)
-    if cfg.train.early_stopping:
-        early_stopper = EarlyStopper(patience=cfg.train.patience)
 
     minibatches = int(len(train_loader) * cfg.train.subset)
     center_1 = (cfg.data.size - cfg.data.window) // 2
     center_2 = center_1 + cfg.data.window
     c = (center_1, center_2)
-    for epoch in range(cfg.train.epochs):
+    for epoch in range(start_epoch, cfg.train.epochs):
         try:
             if (ad_cfg is not None
                 and cfg.model.autodespeckler.freeze
@@ -375,6 +385,9 @@ def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, a
                 scheduler.step(avg_vloss)
             else:
                 scheduler.step()
+        
+        if cfg.train.checkpoint.save_chkpt and epoch % cfg.train.checkpoint.save_chkpt_interval == 0:
+            save_checkpoint(cfg.train.checkpoint.save_chkpt_path, model, optimizer, epoch, scheduler=scheduler, early_stopper=early_stopper)
 
         run.log({"learning_rate": scheduler.get_last_lr()[0] if scheduler is not None else cfg.train.lr}, step=epoch)
 

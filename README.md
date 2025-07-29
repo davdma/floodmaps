@@ -32,7 +32,7 @@ However, by themselves these raw satellite images lack the labels we need for mo
 
 I developed a workflow with step by step instructions that uses GIMP (for pixel labelling), QGIS (for raster projection), and Globus (for file transfer) that uses the context from Google Satellite and supplementary rasters for producing accurate hand labeled water masks from the collected data. This has been successfully used by other Argonne interns and staff for contributing high quality labels to the dataset.
 
-**Instructions can be viewed here:** [pdf](https://1drv.ms/b/s!Aq3V83mBle0dvhMcZAiCh04A59--?e=IdSswS)
+**Instructions can be viewed here:** [pdf](https://1drv.ms/b/c/1ded958179f3d5ad/EXI5Xlbf-j1Ik1BebYOHmMIBvSyrxDlMZ0A57EPvR7XTFg)
 
 ## Initial S2 Model
 For our water pixel detection model, we wanted to test multiple built-in architectures that have been used in the flood modelling literature extensively, most commonly UNet and UNet++. We first explore the UNet model:

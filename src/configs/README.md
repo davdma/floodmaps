@@ -111,6 +111,12 @@ train:
     patience: 10
     subset: 0.15
     num_workers: 5
+    checkpoint:
+        load_chkpt: False # whether to train from a checkpoint specified in load_chkpt_path
+        load_chkpt_path:
+        save_chkpt: True # whether to save checkpoints
+        save_chkpt_path:
+        save_chkpt_interval: 20 # save checkpoint every N epochs
 
 eval:
     mode: val # ['val', 'test'],

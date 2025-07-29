@@ -10,16 +10,17 @@ The AI-assisted flood detection project aims to build a computer vision workflow
 We aim to accomplish this task through the following process:
 1. **Data Collection:** Collect and process remote sensing data (visual, infrared, SAR) following extreme precipitation events for flood modeling.
 2. **Manual Annotation:** Produce accurate ground truth data by manually labeling images.
-3. **Initial Model:** Train an initial Sentinel-2 CNN model to make quality predictions on unlabelled images, and augment the dataset with new machine labels.
-4. **Final Model:** Develop a Sentinel-1 SAR CNN model from our manual + machine labels to detect flood water extent after a flood event.
+3. **Initial Model:** Train an initial Sentinel-2 CNN model to make quality predictions on unlabelled images, and augment the dataset with the new machine labels. This enables an iterative process: as label quantity and quality improves, the model training and prediction improves, which in turn leads to better weak labels.
+4. **Final Model(s):** Develop a separate Sentinel-2 and Sentinel-1 SAR CNN model using the cumulative manual + machine labels to detect flood water extent after a flood event.
 
 ## Data Pipeline
-To collect and process satellite imagery, I have created an automated data pipeline implemented in the Python script `sample_mpc.py` for Sentinel-2 only and `sample_mpc_v2.py` for Sentinel-2 and Sentinel-1. The scripts are run on an Argonne computing cluster and submitted as slurm or pbsnodes jobs.
+To collect and process satellite imagery, I have created an automated data pipeline implemented in the Python script `sample_mpc.py` for Sentinel-2 only and `sample_s2_s1.py` for Sentinel-2 and Sentinel-1. The scripts are run on an Argonne computing cluster and submitted as slurm or pbsnodes jobs.
 
 What it does:
 * Queries extreme precipitation events from 2016-present using the [PRISM dataset](https://prism.oregonstate.edu/).
-* Downloads Copernicus Sentinel-2 RGB, B8 near-infrared and Sentinel-1 VV, VH bands from [Microsoft Planetary Computer](https://planetarycomputer.microsoft.com/dataset/sentinel-2-l2a) as 4km x 4km geographic tiles with 10m resolution.
-* Adds supplementary information to each tile - roads, waterbodies, slope, elevation (DEM), as well as a Normalized Difference Water Index (NDWI) layer which is calculated from the green and B8 bands.
+* Each "event" is demarcated by a date and corresponding cell in the 4km x 4km PRISM cell grid overlaid onto the Continental US.
+* Downloads Copernicus Sentinel-2 RGB spectral bands, B8 near-infrared and Sentinel-1 VV, VH bands from [Microsoft Planetary Computer](https://planetarycomputer.microsoft.com/dataset/sentinel-2-l2a) or [AWS](https://registry.opendata.aws/sentinel-2/) as 4km x 4km geographic tiles with 10m resolution.
+* Adds supplementary information to each tile - roads, waterbodies, slope, elevation (DEM), flowlines, land cover classes (NLCD), as well as a Normalized Difference Water Index (NDWI) layer which is calculated from the green and B8 bands.
 
 ![image](https://github.com/davdma/floodmaps/assets/42689743/05168f81-c560-456e-9df3-87530d4b1def)
 **Figure 1:** Files collected and processed for each geographic tile.

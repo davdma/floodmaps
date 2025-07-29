@@ -74,9 +74,18 @@ Using our best initial S2 model, we made predictions on unlabelled data to build
 
 ## Results
 
+Each model is tuned using Bayesian optimization with the deephyper package, and subsequently benchmarked on the test set with the tuned hyperparameters.
 **Our best standalone classifier was a UNet++ SAR model that achieved a F1 score of 92.79, an accuracy of 97.14, precision of 93.82 and recall of 91.78.** The autodespeckler tuning is still TBD. Benchmarking results will also be posted soon.
 
 ![sarunet++model](https://github.com/davdma/floodmaps/assets/42689743/6e279d68-4597-4755-914c-532ca61d7206)
+
+# The Autodespeckler
+
+The autodespeckler attached was added to tackle the speckle noise present in SAR input data that degrades its quality and interpretability for the SAR flood mapping models. Using a Conditional-VAE architecture, we trained the model on multitemporal composites of SAR images. The result was a decoder that was able to generate synthetic "clean" SAR images from noisy SAR input.
+
+## Using our Model
+
+The dataset and trained model will be shared in the future.
 
 
 

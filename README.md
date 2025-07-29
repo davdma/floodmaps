@@ -83,7 +83,7 @@ Each model is tuned using Bayesian optimization with the deephyper package, and 
 
 The autodespeckler attached was added to tackle the speckle noise present in SAR input data that degrades its quality and interpretability for the SAR flood mapping models. Using a Conditional-VAE architecture, we trained the model on multitemporal composites of SAR images. The result was a decoder that was able to generate synthetic "clean" SAR images from noisy SAR input.
 
-## Using our Model
+# Using the Model(s)
 
 The dataset and trained model will be shared in the future.
 

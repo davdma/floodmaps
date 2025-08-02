@@ -296,7 +296,7 @@ def main(proximity, dir_path=None, replace=True):
         downloaded = downloadS1(sample, proximity, replace=replace)
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(prog='sampleS1', description='Samples imagery from Copernicus SENTINEL-1 (through Microsoft Planetary Computer API)')
+    parser = argparse.ArgumentParser(prog='sampleS1', description='Samples imagery from Copernicus SENTINEL-1 (through Microsoft Planetary Computer API) on top of pre-existing S2 sample folder.')
     parser.add_argument('-p', '--proximity', dest='proximity', default=2, type=int, help='number of days surrounding tile dates allowed for download')
     parser.add_argument('-d', '--dir', dest='dir_path', help='specify a directory name for downloaded samples, format should end with backslash (default: None)')
     parser.add_argument('--replace', action='store_true', help='overwrite existing SAR files (default: False)')

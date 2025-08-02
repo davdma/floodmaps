@@ -17,8 +17,7 @@ from glob import glob
 from pathlib import Path
 from typing import List, Tuple, Dict
 from fiona.transform import transform
-
-logging.basicConfig(level = logging.INFO)
+from utils.utils import setup_logging
 
 # Set Planetary Computer API key
 os.environ['PC_SDK_SUBSCRIPTION_KEY'] = 'a613baefa08445269838bc3bc0dfe2d9'
@@ -57,23 +56,6 @@ def get_date_interval(start_dt, end_dt):
         Interval with start and end date strings formatted as YYYY-MM-DD.
     """
     return start_dt.strftime("%Y-%m-%d") + '/' + end_dt.strftime("%Y-%m-%d")
-
-def setup_logging(output_dir: str) -> logging.Logger:
-    """Setup logging configuration."""
-    start_time = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    logger = logging.getLogger('multitemporal_sar')
-    logger.setLevel(logging.DEBUG)
-    
-    # Create output directory if it doesn't exist
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    
-    fh = logging.FileHandler(os.path.join(output_dir, f'multitemporal_sar_{start_time}.log'))
-    fh.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    fh.setFormatter(formatter)
-    logger.addHandler(fh)
-    
-    return logger
 
 def db_scale(x: np.ndarray) -> np.ndarray:
     """Convert SAR backscatter to dB scale."""
@@ -475,7 +457,12 @@ def main(output_dir: str, time_interval: int, acquisitions: int, num_days: int,
         If True, allow missing data in the multitemporal SAR data.
     """
     # Setup logging
-    logger = setup_logging(output_dir)
+    logger = setup_logging(
+        output_dir,
+        logger_name='multitemporal_sar', 
+        log_level=logging.DEBUG,
+        include_console=False
+    )
     logger.info("Starting multitemporal SAR data collection")
     
     # global search space:

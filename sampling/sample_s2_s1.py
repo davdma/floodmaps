@@ -822,7 +822,7 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
     Note to developers: the script simplifies normalization onto a consistent grid by finding any common CRS shared by S2 and S1 products.
     Once it finds a CRS in common, all products that do not share that CRS are thrown out. The first S2 product is cropped using the bounding box
     and its dimensions (width and height) and affine transform are then used as reference for all subsequent normalization. 
-    A smarter approach (that doesn't throw out products arbitrarily) would be to choose a CRS as reference and normalize everything using
+    A smarter approach (that doesn't throw out products arbitrarily) would be to choose a S2 CRS as reference and normalize everything using
     rasterio WarpedVRT, though this is not currently implemented.
     
     Parameters
@@ -975,6 +975,7 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
 
     # raster generation
     logger.info('Beginning raster generation...')
+    file_to_product = dict()
     try:
         if valid_crs != PRISM_CRS:
             conversion = transform(PRISM_CRS, valid_crs, (minx, maxx), (miny, maxy))
@@ -1001,6 +1002,13 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
             logger.debug(f'NDWI raster completed for {dt}.')
             pipeline_SCL(stac_provider, dir_path, f'clouds_{dt}_{eid}', dst_shape, valid_crs, dst_transform, item, cbbox)
             logger.debug(f'SCL raster completed for {dt}.')
+
+            # record product used to generate rasters
+            file_to_product[f'tci_{dt}_{eid}'] = item.id
+            file_to_product[f'rgb_{dt}_{eid}'] = item.id
+            file_to_product[f'b08_{dt}_{eid}'] = item.id
+            file_to_product[f'ndwi_{dt}_{eid}'] = item.id
+            file_to_product[f'clouds_{dt}_{eid}'] = item.id
             
         logger.debug(f'All S2, B08, NDWI, SCL rasters completed successfully.')
 
@@ -1018,6 +1026,9 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
                 logger.debug(f'No coincident date found for s1 product at {dt}. SAR not downloaded.')
                 continue
             pipeline_S1(stac_provider, dir_path, f'sar_{cdt}_{dt}_{eid}', valid_crs, item, cbbox)
+
+            # record product used to generate rasters
+            file_to_product[f'sar_{cdt}_{dt}_{eid}'] = item.id
 
         logger.debug(f'All coincident S1 rasters completed successfully.')
 
@@ -1054,8 +1065,7 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
                 "maxx": maxx,
                 "maxy": maxy
             },
-            "S2 Item IDs": [item.id for item in s2_products_by_crs[valid_crs]],
-            "S1 Item IDs": [item.id for item in s1_products_by_crs[valid_crs]],
+            "Item IDs": file_to_product,
             "S2, S1 Coincident Within (hours)": within_hours,
             "Max Cloud/Nodata Cover Percentage (%)": maxcoverpercentage
         }
@@ -1122,15 +1132,16 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
         dir_path = get_default_dir_path(threshold, days_before, days_after, maxcoverpercentage, region)
         Path(dir_path).mkdir(parents=True, exist_ok=True)
     else:
-        # edge case sanity checks (empty or invalid path strings)
-        if not dir_path:
+        # Create directory if it doesn't exist
+        try:
+            Path(dir_path).mkdir(parents=True, exist_ok=True)
+        except (OSError, ValueError) as e:
+            print(f"Invalid directory path '{dir_path}'. Using default.", file=sys.stderr)
             dir_path = get_default_dir_path(threshold, days_before, days_after, maxcoverpercentage, region)
-            print(f"Invalid directory path specified. Defaulting to {dir_path} directory path.", file=sys.stderr)
-        else:
-            if not Path(dir_path).is_dir():
-                Path(dir_path).mkdir(parents=True, exist_ok=True)
-            if dir_path[-1] != '/':
-                dir_path += '/'
+            Path(dir_path).mkdir(parents=True, exist_ok=True)
+        
+        # Ensure trailing slash
+        dir_path = os.path.join(dir_path, '')
     
     # root logger
     rootLogger = setup_logging(dir_path, logger_name='main', log_level=logging.DEBUG, mode='w', include_console=False)

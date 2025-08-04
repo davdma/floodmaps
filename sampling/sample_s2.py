@@ -29,7 +29,6 @@ from utils.utils import (
     found_after_images,
     setup_logging,
     get_history,
-    get_elevation_nw,
     get_mask,
     get_manual_events,
     get_extreme_events,
@@ -793,6 +792,7 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, eve
         item_crs = pe.ext(item).crs_string
         try:
             coverpercentage = cloud_null_percentage(stac_provider, item, item_crs, prism_bbox)
+            logger.info(f'Cloud null percentage for item {item.id}: {coverpercentage}')
         except Exception as err:
             logger.error(f'Cloud null percentage calculation error for item {item.id}: {err}, {type(err)}')
             raise err
@@ -806,6 +806,13 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, eve
         else:
             s2_products_by_crs[item_crs] = [item]
 
+    # FOR CRS DEBUG
+    for crs, items in s2_products_by_crs.items():
+        logger.info(f'CRS: {crs}')
+        for item in items:
+            logger.info(f'Item: {item.id}, {item.datetime}')
+    # FOR CRS DEBUG
+
     if not s2_products_by_crs:
         logger.debug(f'No s2 images left after filtering...')
         return False
@@ -815,8 +822,11 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, eve
     logger.info('Checking once more for post event imagery...')
     valid_crs = None
     for crs, s2_products in s2_products_by_crs.items():
+        logger.debug(f'Checking for post event imagery in CRS: {crs}')
         if not found_after_images(s2_products, event_date):
+            logger.debug(f'No post event imagery found in CRS: {crs}')
             continue
+        logger.debug(f'Post event imagery found in CRS: {crs}. Using this CRS.')
         valid_crs = crs
         break
 
@@ -838,6 +848,7 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, eve
 
     # raster generation
     logger.info('Beginning raster generation...')
+    file_to_product = dict()
     try:
         if valid_crs != PRISM_CRS:
             conversion = transform(PRISM_CRS, valid_crs, (minx, maxx), (miny, maxy))
@@ -864,6 +875,13 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, eve
             logger.debug(f'NDWI raster completed for {dt}.')
             pipeline_SCL(stac_provider, dir_path, f'clouds_{dt}_{eid}', dst_shape, valid_crs, dst_transform, item, cbbox)
             logger.debug(f'SCL raster completed for {dt}.')
+
+            # record product used to generate rasters
+            file_to_product[f'tci_{dt}_{eid}'] = item.id
+            file_to_product[f'rgb_{dt}_{eid}'] = item.id
+            file_to_product[f'b08_{dt}_{eid}'] = item.id
+            file_to_product[f'ndwi_{dt}_{eid}'] = item.id
+            file_to_product[f'clouds_{dt}_{eid}'] = item.id
             
         logger.debug(f'All S2, B08, NDWI, SCL rasters completed successfully.')
 
@@ -900,7 +918,7 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, eve
                 "maxx": maxx,
                 "maxy": maxy
             },
-            "S2 Item IDs": [item.id for item in s2_products_by_crs[valid_crs]],
+            "Item IDs": file_to_product,
             "Max Cloud/Nodata Cover Percentage (%)": maxcoverpercentage
         }
     }
@@ -963,13 +981,16 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
         dir_path = get_default_dir_path(threshold, days_before, days_after, maxcoverpercentage, region)
         Path(dir_path).mkdir(parents=True, exist_ok=True)
     else:
-        # edge case sanity checks (empty or invalid path strings)
-        if not Path(dir_path).is_dir() or not dir_path:
-            dir_path = get_default_dir_path(threshold, days_before, days_after, maxcoverpercentage, region)
-            print(f"Invalid directory path specified. Defaulting to {dir_path} directory path.", file=sys.stderr)
+        # Create directory if it doesn't exist
+        try:
             Path(dir_path).mkdir(parents=True, exist_ok=True)
-        elif dir_path[-1] != '/':
-            dir_path += '/'
+        except (OSError, ValueError) as e:
+            print(f"Invalid directory path '{dir_path}'. Using default.", file=sys.stderr)
+            dir_path = get_default_dir_path(threshold, days_before, days_after, maxcoverpercentage, region)
+            Path(dir_path).mkdir(parents=True, exist_ok=True)
+        
+        # Ensure trailing slash
+        dir_path = os.path.join(dir_path, '')
     
     # root logger
     rootLogger = setup_logging(dir_path, logger_name='main', log_level=logging.DEBUG, mode='w', include_console=False)
@@ -1070,7 +1091,7 @@ if __name__ == '__main__':
     parser.add_argument('-d', '--dir', dest='dir_path', help='specify a directory name for downloaded samples, format should end with backslash (default: None)')
     parser.add_argument('-r', '--region', default=None, choices=['ceser'], help='sample from supported regions: ["ceser"]. (default: None)')
     parser.add_argument('-m', '--manual', default=None, help='text file for parsing manual event indices with format: time, y, x (default: None)')
-    parser.add_argument('-f', '--config', dest='config_file', help='specify a custom configuration file path')
+    parser.add_argument('-f', '--config', default='configs/sample_s2_s1.yaml', dest='config_file', help='specify a custom configuration file path (default: configs/sample_s2_s1.yaml)')
     parser.add_argument('--source', choices=['mpc', 'aws'], default='mpc', help='Specify a provider (Microsoft Planetary Computer, AWS) for the ESA data (default: mpc)')
     args = parser.parse_args()
     

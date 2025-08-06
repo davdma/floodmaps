@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import logging
 from datetime import datetime, timedelta, timezone
+from collections import defaultdict
 import os
 import re
 from pathlib import Path
@@ -103,6 +104,115 @@ class PRISMData:
         """Get masked precipitation data. Sets values outside mask to nan."""
         return np.where(mask, self.precip_data, np.nan)
 
+class DateCRSOrganizer:
+    """Organizes products by date first (in chronological order), then CRS (alphabetically).
+    
+    Note: since underlying object is a defaultdict, avoid indexing with non-existent keys.
+    Also the data is indexed with timezone aware datetimes, so indexing the underlying
+    data with naive datetimes will cause bugs (though the method calls are safe)."""
+    def __init__(self):
+        self.data = defaultdict(lambda: defaultdict(list))
+        self.count = 0
+
+    def is_empty(self):
+        """Check if the organizer is empty."""
+        return self.count == 0
+
+    def _normalize_date(self, dt):
+        """Convert datetime to date-only datetime (00:00:00) UTC"""
+        if isinstance(dt, datetime):
+            return datetime(dt.year, dt.month, dt.day, tzinfo=timezone.utc)
+        else:
+            raise ValueError("Date must be a datetime object")
+    
+    def add_item(self, item, date, crs):
+        """Insert item into the organizer.
+        
+        Parameters
+        ----------
+            item: Item
+                The item to insert.
+            date: datetime
+                The date of the item.
+            crs: str
+                The CRS of the item.
+        """
+        normalized_date = self._normalize_date(date)
+        self.data[normalized_date][crs].append(item)
+        self.count += 1
+    
+    def get_dates(self):
+        """Get dates of all inserted items in chronological order."""
+        return sorted(self.data.keys())
+
+    def get_all_crs(self):
+        """Get all unique CRS values across all dates, sorted alphabetically."""
+        all_crs = set()
+        for date_data in self.data.values():
+            all_crs.update(date_data.keys())
+        return sorted(all_crs)
+    
+    def get_crs_for_date(self, date):
+        """Get all CRS values for a specific date, sorted."""
+        date = self._normalize_date(date)
+        if date not in self.data:
+            raise KeyError(f"No items for date: {date}")
+        return sorted(self.data[date].keys())
+    
+    def get_items(self, date, crs):
+        """Get items for specific date and CRS."""
+        date = self._normalize_date(date)
+        if date not in self.data or crs not in self.data[date]:
+            raise KeyError(f"No items for date: {date} and CRS: {crs}")
+        return self.data[date][crs]
+
+    def get_primary_item_for_date(self, date, preferred_crs=None):
+        """
+        Get the first item for a date based on CRS preference.
+        
+        Parameters
+        ----------
+            date: The date of item.
+            preferred_crs: The preferred CRS of item.
+        
+        Returns
+        -------
+            The first item from preferred CRS if available, otherwise first item from 
+            first alphabetical CRS for that date. Returns None if no items for date.
+        """
+        date = self._normalize_date(date)
+        if date not in self.data or not self.data[date]:
+            raise KeyError(f"No items for date: {date}")
+        
+        if preferred_crs is not None and preferred_crs in self.data[date]:
+            return self.data[date][preferred_crs][0]
+        else:
+            first_crs = self.get_crs_for_date(date)[0]
+            return self.data[date][first_crs][0]
+
+    def get_all_primary_items(self, preferred_crs=None):
+        """
+        Get items for each date selected based on CRS preference.
+        
+        Parameters
+        ----------
+            preferred_crs: The preferred CRS of item.
+        
+        Returns
+        -------
+            The list of items selected for each date from preferred CRS.
+        """
+        lst = []
+        for date in self.get_dates():
+            lst.append(self.get_primary_item_for_date(date, preferred_crs))
+        return lst
+    
+    def ordered_items(self):
+        """Iterate over all item lists grouped by date and CRS."""
+        for date in sorted(self.data.keys()):
+            for crs in sorted(self.data[date].keys()):
+                yield date, crs, self.data[date][crs]
+
 class NoElevationError(Exception):
     """Exception raised when elevation data is not found."""
     pass
@@ -138,32 +248,32 @@ def get_date_interval(event_date: str, days_before: int, days_after: int) -> str
     end = datetime(int(event_date[0:4]), int(event_date[4:6]), int(event_date[6:8])) + delt2
     return start.strftime("%Y-%m-%d") + '/' + end.strftime("%Y-%m-%d")
 
-def found_after_images(items: ItemCollection, event_date: str) -> bool:
-    """Returns whether products are found in query during or after a PRISM event date.
+def has_date_after_PRISM(dates: List[datetime], event_date_str: datetime) -> bool:
+    """Returns whether there exists dates during or after a PRISM event date.
+    Dates must be timezone aware (UTC)!
 
     Parameters
     ----------
-    items : ItemCollection
-    event_date : str
-        Formatted as YYYYMMDD.
+    dates : list[datetime]
+        List of datetime objects.
+    event_date_str : str
+        PRISM event date formatted as YYYYMMDD.
 
     Returns
     -------
     bool
-        True if query has products that lie on or after event date or False if not.
+        True if query has dates that lie on or after PRISM event date or False if not.
     """
-    dt = datetime.strptime(event_date, "%Y%m%d")
+    dt = datetime.strptime(event_date_str, "%Y%m%d")
     dt_1 = dt - timedelta(days=1)
     
     # PRISM DAY BEGINS AT 1200 UTC-0 THE DAY BEFORE
     prism_dt = datetime(dt_1.year, dt_1.month, dt_1.day, hour=12, tzinfo=timezone.utc)
 
     # Compare dates
-    for item in items:
-        datetime_object = item.datetime
-        if datetime_object >= prism_dt:
+    for date in dates:
+        if date >= prism_dt:
             return True
-
     return False
 
 def db_scale(x: np.ndarray) -> np.ndarray:
@@ -622,7 +732,7 @@ def colormap_to_rgb(arr: np.ndarray, cmap: str = 'viridis', r: Tuple[float, floa
 
     return rgb_array
 
-def fast_crop(item_href, bounds, nodata, dst_crs, resampling=Resampling.bilinear):
+def crop_to_bounds(item_href, bounds, dst_crs, nodata=0, resampling=Resampling.nearest):
     """Crops provided raster using a bounding box and corresponding box CRS a single item.
     If the item is in a different CRS than the bounding box, it will be reprojected using a Warped VRT.
     Replaces rasterio.merge.merge() for faster warping and cropping.
@@ -633,10 +743,10 @@ def fast_crop(item_href, bounds, nodata, dst_crs, resampling=Resampling.bilinear
         Path to the item.
     bounds : tuple
         Bounding box to crop item.
-    nodata : int
-        No data value to fill pixels in bounding box that falls outside the raster.
     dst_crs : str
         Destination CRS of the bounding box and cropped image.
+    nodata : int, optional
+        No data value to fill pixels in bounding box that falls outside the raster
     resampling : Resampling, optional
         Resampling method.
 
@@ -663,7 +773,7 @@ def fast_crop(item_href, bounds, nodata, dst_crs, resampling=Resampling.bilinear
             raise ValueError("Source CRS is missing from file.")
 
         # if the file is the same crs, no need to reproject
-        if dst_crs.equals(crs):
+        if dst_crs == crs:
             src_window = windows.from_bounds(dst_w, dst_s, dst_e, dst_n, src.transform)
 
             src_window_rnd_shp = src_window.round_lengths()

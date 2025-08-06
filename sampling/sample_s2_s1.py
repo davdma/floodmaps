@@ -25,9 +25,10 @@ import planetary_computer
 from utils.utils import (
     NLCD_CODE_TO_RGB,
     PRISMData,
+    DateCRSOrganizer,
     get_default_dir_path,
     get_date_interval,
-    found_after_images,
+    has_date_after_PRISM,
     setup_logging,
     get_history,
     db_scale,
@@ -38,6 +39,7 @@ from utils.utils import (
     get_state,
     colormap_to_rgb,
     NoElevationError,
+    crop_to_bounds
 )
 from utils.stac_providers import get_stac_provider
 
@@ -232,7 +234,7 @@ def pipeline_TCI(stac_provider, dir_path, save_as, dst_crs, item, bbox):
     visual_name = stac_provider.get_asset_names("s2")["visual"]
     item_href = stac_provider.sign_asset_href(item.assets[visual_name].href)
 
-    out_image, out_transform = rasterio.merge.merge([item_href], bounds=bbox, nodata=0, resampling=Resampling.bilinear)
+    out_image, out_transform = crop_to_bounds(item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
 
     with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=3, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=None) as dst:
         dst.write(out_image)
@@ -265,7 +267,7 @@ def pipeline_SCL(stac_provider, dir_path, save_as, dst_shape, dst_crs, dst_trans
     scl_name = stac_provider.get_asset_names("s2")["SCL"]
     item_href = stac_provider.sign_asset_href(item.assets[scl_name].href)
 
-    out_image, out_transform = rasterio.merge.merge([item_href], bounds=bbox, nodata=0)
+    out_image, out_transform = crop_to_bounds(item_href, bbox, dst_crs, nodata=0, resampling=Resampling.nearest)
     clouds = np.isin(out_image[0], [8, 9, 10]).astype(int)
 
     # need to resample to grid of tci
@@ -284,6 +286,15 @@ def pipeline_SCL(stac_provider, dir_path, save_as, dst_shape, dst_crs, dst_trans
     with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=1, height=h, width=w, crs=dst_crs, 
                         dtype=clouds.dtype, transform=dst_transform) as dst:
         dst.write(dest, 1)
+    
+    rgb_clouds = np.zeros((3, h, w), dtype=np.uint8)
+    rgb_clouds[0, :, :] = clouds * 255
+    rgb_clouds[1, :, :] = clouds * 255
+    rgb_clouds[2, :, :] = clouds * 255
+    
+    with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_clouds.shape[-2], width=rgb_clouds.shape[-1], 
+                       crs=dst_crs, dtype=rgb_clouds.dtype, transform=dst_transform, nodata=None) as dst:
+        dst.write(rgb_clouds)
 
 def pipeline_RGB(stac_provider, dir_path, save_as, dst_crs, item, bbox):
     """Generates B02 (B), B03 (G), B04 (R) rasters of S2 multispectral file.
@@ -312,9 +323,9 @@ def pipeline_RGB(stac_provider, dir_path, save_as, dst_crs, item, bbox):
     b04_item_href = stac_provider.sign_asset_href(item.assets[b04_name].href) # R
 
     # stack the three bands as rgb channels
-    blue_image, out_transform = rasterio.merge.merge([b02_item_href], bounds=bbox, nodata=0, resampling=Resampling.bilinear)
-    green_image, _ = rasterio.merge.merge([b03_item_href], bounds=bbox, nodata=0, resampling=Resampling.bilinear)
-    red_image, _ = rasterio.merge.merge([b04_item_href], bounds=bbox, nodata=0, resampling=Resampling.bilinear)
+    blue_image, out_transform = crop_to_bounds(b02_item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
+    green_image, _ = crop_to_bounds(b03_item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
+    red_image, _ = crop_to_bounds(b04_item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
 
     out_image = np.vstack((red_image, green_image, blue_image))
 
@@ -343,7 +354,7 @@ def pipeline_B08(stac_provider, dir_path, save_as, dst_crs, item, bbox):
     b08_name = stac_provider.get_asset_names("s2")["B08"]
     item_href = stac_provider.sign_asset_href(item.assets[b08_name].href)
 
-    out_image, out_transform = rasterio.merge.merge([item_href], bounds=bbox, nodata=0, resampling=Resampling.bilinear)
+    out_image, out_transform = crop_to_bounds(item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
 
     with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=1, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=0) as dst:
         dst.write(out_image)
@@ -369,12 +380,12 @@ def pipeline_NDWI(stac_provider, dir_path, save_as, dst_crs, item, bbox):
     b08_name = stac_provider.get_asset_names("s2")["B08"]
     b03_item_href = stac_provider.sign_asset_href(item.assets[b03_name].href)
 
-    out_image1, _ = rasterio.merge.merge([b03_item_href], bounds=bbox, nodata=0, resampling=Resampling.bilinear)
+    out_image1, _ = crop_to_bounds(b03_item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
     green = out_image1[0].astype(np.int32)
 
     b08_item_href = stac_provider.sign_asset_href(item.assets[b08_name].href)
 
-    out_image2, out_transform = rasterio.merge.merge([b08_item_href], bounds=bbox, nodata=0, resampling=Resampling.bilinear)
+    out_image2, out_transform = crop_to_bounds(b08_item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
     nir = out_image2[0].astype(np.int32)
     
     # calculate ndwi
@@ -444,7 +455,7 @@ def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, 
         dst.write(rasterize_roads, 1)
 
     with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_roads.shape[-2], width=rgb_roads.shape[-1], 
-                       crs=dst_crs, dtype=rgb_roads.dtype, transform=dst_transform, nodata=0) as dst:
+                       crs=dst_crs, dtype=rgb_roads.dtype, transform=dst_transform, nodata=None) as dst:
         dst.write(rgb_roads)
 
 def pipeline_dem(dir_path, save_as, dst_shape, dst_crs, dst_transform, bounds):
@@ -739,20 +750,48 @@ def pipeline_NLCD(dir_path, save_as, year, dst_shape, dst_crs, dst_transform):
     with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_img.shape[-2], width=rgb_img.shape[-1], crs=dst_crs, dtype=rgb_img.dtype, transform=dst_transform, nodata=None) as dst:
         dst.write(rgb_img)
 
-def coincident(items_s2, items_s1, hours):
-    """Checks if any S2 captures are within given number of hours of S1 captures."""
-    for sar in items_s1:
-        dt_sar = sar.datetime
-        for s2 in items_s2:
-            dt_s2 = s2.datetime
-            time_difference = abs(dt_sar - dt_s2)
+def coincident_items(items_s2, items_s1, hours):
+    """Checks if any S2 captures are within given number of hours of S1 captures.
+    
+    Parameters
+    ----------
+    items_s2 : list[Item]
+        List of S2 Item objects.
+    items_s1 : list[Item]
+        List of S1 Item objects.
+
+    Returns
+    -------
+    bool
+        True if any S2 captures are within given number of hours of S1 captures, False otherwise.
+    """
+    for item_s2 in items_s2:
+        dt_s2 = item_s2.datetime
+        for item_s1 in items_s1:
+            dt_s1 = item_s1.datetime
+            time_difference = abs(dt_s2 - dt_s1)
             hours_difference = time_difference.total_seconds() / 3600
             if hours_difference < hours:
                 return True
     return False
 
-def coincident_with(item_s1, items_s2, hours):
-    """Returns the date of the s2 image that the sar image is coincident with."""
+def coincident_with(items_s2, item_s1, hours):
+    """Returns the datetime object of the S2 item that the S1 item is coincident with
+    otherwise returns None.
+    
+    Parameters
+    ----------
+    items_s2 : list[Item]
+        List of S2 Item objects.
+    item_s1 : Item
+        S1 Item object.
+    
+    Returns
+    -------
+    datetime
+        The datetime object of the S2 item that the S1 item is coincident with,
+        otherwise returns None.
+    """
     coincident_dt = None
     dt_sar = item_s1.datetime
     for s2 in items_s2:
@@ -760,7 +799,7 @@ def coincident_with(item_s1, items_s2, hours):
         time_difference = abs(dt_sar - dt_s2)
         hours_difference = time_difference.total_seconds() / 3600
         if hours_difference < hours:
-            coincident_dt = dt_s2.strftime('%Y%m%d')
+            coincident_dt = dt_s2
             break
     return coincident_dt
 
@@ -877,16 +916,16 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
         if len(items_s1) == 0:
             logger.info(f'No S1 products found for date interval {time_of_interest}.')
         return False
-    elif not found_after_images(items_s2, event_date):
+    elif not has_date_after_PRISM([item.datetime for item in items_s2], event_date):
         logger.info(f'Products found but only before precipitation event date {event_date}.')
         return False
-    elif not coincident(items_s2, items_s1, within_hours):
+    elif not coincident_items(items_s2, items_s1, within_hours):
         logger.info(f'No coincident S1 and S2 products found within {within_hours} hours of each other.')
         return False
 
-    # group items by crs first
+    # filter out s2 cloudy/missing tiles and group items by dates in dictionary
     logger.info(f'Checking s2 cloud null percentage...')
-    s2_products_by_crs = dict()
+    s2_by_date_crs = DateCRSOrganizer()
     for item in items_s2:
         # filter out those w/ cloud null via cloud null percentage checks
         item_crs = pe.ext(item).crs_string
@@ -900,17 +939,27 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
             logger.debug(f'Sample {item.id} near event {event_date}, at {minx}, {miny}, {maxx}, {maxy} rejected due to {coverpercentage}% cloud or null cover.')
             continue
 
-        if item_crs in s2_products_by_crs:
-            s2_products_by_crs[item_crs].append(item)
-        else:
-            s2_products_by_crs[item_crs] = [item]
+        s2_by_date_crs.add_item(item, item.datetime, item_crs)
 
-    if not s2_products_by_crs:
+    # ensure one CRS still has post-event image after filters
+    s2_dates = s2_by_date_crs.get_dates()
+    if s2_by_date_crs.is_empty():
         logger.debug(f'No s2 images left after filtering...')
         return False
+    elif not has_date_after_PRISM(s2_dates, event_date):
+        logger.debug(f'No s2 images post event date after filtering...')
+        return False
 
+    # choose first CRS in alphabetical order for rasters
+    main_crs = s2_by_date_crs.get_all_crs()[0]
+    logger.debug(f'Using CRS for raster generation: {main_crs}')
+    Path(dir_path).mkdir(parents=True, exist_ok=True)
+
+    # filter out s1 cloudy/missing tiles and group items by dates in dictionary
     logger.info(f'Checking s1 null percentage...')
-    s1_products_by_crs = dict()
+    s1_by_date_crs = DateCRSOrganizer()
+    # peak ahead at the s2 items that will be selected with our crs
+    s2_items_used = s2_by_date_crs.get_all_primary_items(preferred_crs=main_crs)
     for item in items_s1:
         item_crs = pe.ext(item).crs_string
         polarizations = item.properties["sar:polarizations"]
@@ -918,11 +967,10 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
             logger.error(f'S1 product {item.id} VV or VH not found.')
             continue
 
-        # filter out non coincident sar products
-        if not item_crs in s2_products_by_crs:
-            logger.error(f"S1 product {item.id} crs {item_crs} not found in any of the s2 products: {', '.join(s2_products_by_crs.keys())}.")
-            continue
-        if not coincident(s2_products_by_crs[item_crs], [item], within_hours):
+        # filter out non coincident sar products with s2 products we've selected
+        coincident_dt = coincident_with(s2_items_used, item, within_hours)
+        if coincident_dt is None:
+            logger.debug(f'S1 product {item.id} not coincident with any of the selected S2 products.')
             continue
         
         try:
@@ -935,35 +983,13 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
             logger.debug(f'SAR sample {item.id} near event {event_date}, at {minx}, {miny}, {maxx}, {maxy} rejected due to {coverpercentage}% missing data.')
             continue
 
-        if item_crs in s1_products_by_crs:
-            s1_products_by_crs[item_crs].append(item)
-        else:
-            s1_products_by_crs[item_crs] = [item]
+        # should organize by the s2 item date that the s1 item is coincident with
+        s1_by_date_crs.add_item(item, coincident_dt, item_crs)
 
-    if not s1_products_by_crs:
+    if s1_by_date_crs.is_empty():
         logger.debug(f'No s1 images left after filtering...')
         return False
-        
-    # ensure one CRS still has post-event coincident image after filters
-    # choose that to be the crs we work with
-    logger.info('Checking once more for coincidence...')
-    valid_crs = None
-    for crs, s2_products in s2_products_by_crs.items():
-        if not found_after_images(s2_products, event_date):
-            continue
-        if crs not in s1_products_by_crs:
-            continue
 
-        valid_crs = crs
-        break
-
-    if valid_crs is None:
-        logger.debug(f'No valid crs found that satisfies criteria after filtering.')
-        return False
-    else:
-        Path(dir_path).mkdir(parents=True, exist_ok=True)
-        
-    # begin raster generation with chosen CRS!
     try:
         state = get_state(minx, miny, maxx, maxy)
         if state is None:
@@ -973,34 +999,29 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
         shutil.rmtree(dir_path)
         return False
 
-    # raster generation
+    # raster generation with chosen CRS
     logger.info('Beginning raster generation...')
     file_to_product = dict()
     try:
-        if valid_crs != PRISM_CRS:
-            conversion = transform(PRISM_CRS, valid_crs, (minx, maxx), (miny, maxy))
-            cbbox = conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]
-        else:
-            cbbox = prism_bbox
+        conversion = transform(PRISM_CRS, main_crs, (minx, maxx), (miny, maxy))
+        cbbox = conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]
+        
+        for date in s2_dates:
+            logger.debug(f'Processing S2 date: {date}')
+            dt = date.strftime('%Y%m%d') 
 
-        s2_completed_dt = set()
-        for item in s2_products_by_crs[valid_crs]:
-            dt = item.datetime.strftime('%Y%m%d') 
-            if dt in s2_completed_dt:
-                # Most of the time there are multiple overlapping s2 products on same date, can just choose one
-                logger.debug(f'For valid crs two s2 rasters found on same date.')
-                continue
-            else:
-                s2_completed_dt.add(dt)
-            dst_shape, dst_transform = pipeline_TCI(stac_provider, dir_path, f'tci_{dt}_{eid}', valid_crs, item, cbbox)
+            # use one item for date in preferred CRS
+            item = s2_by_date_crs.get_primary_item_for_date(date, preferred_crs=main_crs)
+            
+            dst_shape, dst_transform = pipeline_TCI(stac_provider, dir_path, f'tci_{dt}_{eid}', main_crs, item, cbbox)
             logger.debug(f'TCI raster completed for {dt}.')
-            pipeline_RGB(stac_provider, dir_path, f'rgb_{dt}_{eid}', valid_crs, item, cbbox)
+            pipeline_RGB(stac_provider, dir_path, f'rgb_{dt}_{eid}', main_crs, item, cbbox)
             logger.debug(f'RGB raster completed for {dt}.')
-            pipeline_B08(stac_provider, dir_path, f'b08_{dt}_{eid}', valid_crs, item, cbbox)
+            pipeline_B08(stac_provider, dir_path, f'b08_{dt}_{eid}', main_crs, item, cbbox)
             logger.debug(f'B08 raster completed for {dt}.')
-            pipeline_NDWI(stac_provider, dir_path, f'ndwi_{dt}_{eid}', valid_crs, item, cbbox)
+            pipeline_NDWI(stac_provider, dir_path, f'ndwi_{dt}_{eid}', main_crs, item, cbbox)
             logger.debug(f'NDWI raster completed for {dt}.')
-            pipeline_SCL(stac_provider, dir_path, f'clouds_{dt}_{eid}', dst_shape, valid_crs, dst_transform, item, cbbox)
+            pipeline_SCL(stac_provider, dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox)
             logger.debug(f'SCL raster completed for {dt}.')
 
             # record product used to generate rasters
@@ -1013,19 +1034,16 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
         logger.debug(f'All S2, B08, NDWI, SCL rasters completed successfully.')
 
         logger.debug(f'Downloading S1 rasters...')
-        s1_completed_dt = set()
-        for item in s1_products_by_crs[valid_crs]:
-            dt = item.datetime.strftime('%Y%m%d') 
-            if dt in s1_completed_dt:
-                logger.debug(f'For valid crs two s1 rasters found on same date.')
-                continue
-            else:
-                s1_completed_dt.add(dt)
-            cdt = coincident_with(item, s2_products_by_crs[valid_crs], within_hours)
-            if cdt is None:
-                logger.debug(f'No coincident date found for s1 product at {dt}. SAR not downloaded.')
-                continue
-            pipeline_S1(stac_provider, dir_path, f'sar_{cdt}_{dt}_{eid}', valid_crs, item, cbbox)
+        for date in s1_by_date_crs.get_dates():
+            # coincident date
+            cdt = date.strftime('%Y%m%d')
+
+            # item date
+            item = s1_by_date_crs.get_primary_item_for_date(date, preferred_crs=main_crs)
+            dt = item.datetime.strftime('%Y%m%d')
+
+            pipeline_S1(stac_provider, dir_path, f'sar_{cdt}_{dt}_{eid}', main_crs, item, cbbox)
+            logger.debug(f'S1 raster completed for {dt} coincident with S2 product at {cdt}.')
 
             # record product used to generate rasters
             file_to_product[f'sar_{cdt}_{dt}_{eid}'] = item.id
@@ -1033,15 +1051,15 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
         logger.debug(f'All coincident S1 rasters completed successfully.')
 
         # save all supplementary rasters in raw and rgb colormap
-        pipeline_roads(dir_path, f'roads_{eid}', dst_shape, valid_crs, dst_transform, state, buffer=1)
+        pipeline_roads(dir_path, f'roads_{eid}', dst_shape, main_crs, dst_transform, state, buffer=1)
         logger.debug(f'Roads raster completed successfully.')
-        pipeline_dem(dir_path, f'dem_{eid}', dst_shape, valid_crs, dst_transform, prism_bbox)
+        pipeline_dem(dir_path, f'dem_{eid}', dst_shape, main_crs, dst_transform, prism_bbox)
         logger.debug(f'DEM raster completed successfully.')
-        pipeline_flowlines(dir_path, f'flowlines_{eid}', dst_shape, valid_crs, dst_transform, prism_bbox, buffer=1)
+        pipeline_flowlines(dir_path, f'flowlines_{eid}', dst_shape, main_crs, dst_transform, prism_bbox, buffer=1)
         logger.debug(f'Flowlines raster completed successfully.')
-        pipeline_waterbody(dir_path, f'waterbody_{eid}', dst_shape, valid_crs, dst_transform, prism_bbox)
+        pipeline_waterbody(dir_path, f'waterbody_{eid}', dst_shape, main_crs, dst_transform, prism_bbox)
         logger.debug(f'Waterbody raster completed successfully.')
-        pipeline_NLCD(dir_path, f'nlcd_{eid}', int(eid[:4]), dst_shape, valid_crs, dst_transform)
+        pipeline_NLCD(dir_path, f'nlcd_{eid}', int(eid[:4]), dst_shape, main_crs, dst_transform)
         logger.debug(f'NLCD raster completed successfully.')
     except Exception as err:
         logger.error(f'Raster generation error: {err}, {type(err)}')
@@ -1057,7 +1075,7 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
             "Sample ID": eid,
             "Precipitation Event Date": event_date,
             "Cumulative Daily Precipitation (mm)": float(event_precip),
-            "CRS": valid_crs,
+            "CRS": main_crs,
             "State": state,
             "Bounding Box": {
                 "minx": minx,

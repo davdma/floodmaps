@@ -112,7 +112,9 @@ def main(roads=True, dem=True, nhd=True, nlcd=True):
         download_nlcd()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(prog='getsupplementary', description='Downloads TIGER roads, NHD, DEM, NLCD data. Run inside the sampling directory.')
+    parser = argparse.ArgumentParser(prog='getsupplementary', description="""This script is used
+        for setting up supplementary data required for the sampling scripts. Downloads TIGER roads,
+        NHD, DEM, and NLCD data. Run inside the sampling directory as it will create subfolders.""")
     parser.add_argument('--roads', action='store_true', help='download TIGER roads data')
     parser.add_argument('--dem', action='store_true', help='download DEM data')
     parser.add_argument('--nhd', action='store_true', help='download NHD data')

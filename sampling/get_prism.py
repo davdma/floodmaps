@@ -134,9 +134,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog='getprism', description="""This script
         can be used to setup PRISM data or to update existing PRISM data to match
         newly available dates. For setting up PRISM data from scratch, the start_date should be
-        20160801 as that is the 0 point of the netcdf time dimension. Otherwise, it can be the
-        last downloaded date.""")
-    parser.add_argument('--download', action='store_true', help='download PRISM precip data')
+        20160801 as that is the 0 point of the netcdf time dimension used for the project dataset.
+        Otherwise to add more dates, set start_date as the date of the most recently downloaded
+        precipitation file.""")
     parser.add_argument('--start_date', default='20160801', help='start date to download PRISM precip data from (default: 20160801)')
     parser.add_argument('--end_date', default='20241130', help='end date to download PRISM precip data to (default: 20241130)')
     args = parser.parse_args()

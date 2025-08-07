@@ -4,25 +4,31 @@ Discretizing the US Sentinel-2 and Sentinel-1 flood dataset:
 * One of the problems with aggregating a flood dataset is how to discretize it such that downloading and labeling can become systematic and efficient.
 * To solve this, tiles much smaller than the individual satellite product extent was chosen as the unit of discretization. The dataset is broken up into 4km x 4km tiles (or cells) within a grid across the continental US provided by [PRISM](https://prism.oregonstate.edu/). Each PRISM tile can have its S2 and S1 capture sampled at a particular date, labeled, and used as a datapoint for training.
 
+<p align="center" style="margin: 30px 0;">
+   <img width="2442" height="925" alt="samplingprismcell" src="https://github.com/user-attachments/assets/e602e061-0e03-4ae9-9b04-f2ade3d6c66c" />
+   <em>PRISM mesh grid displayed over satellite imagery in QGIS.</em>
+   <br><br>
+</p>
+
 The method for data collection is as follows:
 * Flood events are identified through high precipitation cells in the PRISM dataset from August 2016 onward. For cells that meet or exceed a specified precipitation threshold, the specific date, time, and georeferenced coordinates are then used to search for Sentinel-2 captures through Copernicus data providers (e.g. Planetary Computer or AWS).
 * The resulting captures are stored in event directories, where each "event" we denote simply as a cell we queried on a specified date with a high precipitation measurement.
 * Each event has an event id or `eid` in the format `YYYYMMDD_YCoord_XCoord` where `YCoord` and `XCoord` is the position of the cell on the grid defined by the PRISM dataset.
 * It may also be the case that some flood events and corresponding captures of interest have low precipitation (e.g. lie downstream of high precipitation cells) and get filtered out by this method. To ensure these are still included, an option `--manual` is added to the scripts to specify flooded cells without extreme precipitation for download.
 
-Currently supported channels:
-**S2 product channels**
+## Currently Supported Channels
+**S2 product channels:**
 * RGB reflectances
 * NIR band (B08)
 * NDWI layer (calculated as `(B03 - B08) / (B03 + B08)`)
 * True Color Image (TCI) visual channels
 * Cloud mask layer
 
-**S1 product channels**
+**S1 product channels:**
 * VV polarization layer
 * VH polarization layer
 
-**Product independent channels**
+**Product independent channels:**
 * DEM layer
 * Roads mask
 * Flowlines mask
@@ -58,6 +64,12 @@ There are several sampling scripts:
 * `sample_s2_s1.py` - this is for downloading tiles with both Sentinel-2 L2A and Sentinel-1 GRD layers that are temporally coincident. You will need to run this to produce the S1 dataset used for training the SAR model.
 * `sample_s1.py` - this is for downloading only Sentinel-1 GRD layers on top of a pre-existing S2 dataset directory created from `sample_s2.py`. Use this to add coincident S1 SAR layers to an already existing S2 dataset.
 * `sample_sar_multi.py` - this is for downloading multitemporal composite SAR data of the same cells represented in the S2 and S1 dataset. The difference being that it intentionally avoids the flood dates due to possible flood water inconsistencies in the temporal average.
+
+<p align="center" style="margin: 30px 0;">
+<img width="2552" height="1142" alt="samplingprismcell2" src="https://github.com/user-attachments/assets/a70a8aa6-2d81-426f-bbbc-dd35d33edc06" />
+<em>Example of a downloaded S2 event folder with its TCI image visualized.</em>
+   <br><br>
+</p>
 
 ## For Developers
 How the sampling scripts work:

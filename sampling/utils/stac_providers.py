@@ -102,7 +102,7 @@ class MicrosoftPlanetaryComputerProvider(STACProvider):
     
     def _initialize_catalog(self):
         """Initialize the Microsoft Planetary Computer catalog."""
-        # Set API key if not already set
+        # Set API key if not already set - will need to configure this for your own account
         if 'PC_SDK_SUBSCRIPTION_KEY' not in os.environ:
             os.environ['PC_SDK_SUBSCRIPTION_KEY'] = 'a613baefa08445269838bc3bc0dfe2d9'
         

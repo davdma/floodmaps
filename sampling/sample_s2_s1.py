@@ -44,7 +44,6 @@ from utils.utils import (
 from utils.stac_providers import get_stac_provider
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['PC_SDK_SUBSCRIPTION_KEY'] = 'a613baefa08445269838bc3bc0dfe2d9'
 from tensorflow.keras.layers import MaxPooling2D
 import tensorflow as tf
 
@@ -834,8 +833,8 @@ def pipeline_S1(stac_provider, dir_path, save_as, dst_crs, item, bbox):
     item_hrefs_vv = stac_provider.sign_asset_href(item.assets[vv_name].href)
     item_hrefs_vh = stac_provider.sign_asset_href(item.assets[vh_name].href)
 
-    out_image_vv, out_transform_vv = rasterio.merge.merge([item_hrefs_vv], bounds=bbox, nodata=0, resampling=Resampling.bilinear)
-    out_image_vh, out_transform_vh = rasterio.merge.merge([item_hrefs_vh], bounds=bbox, nodata=0, resampling=Resampling.bilinear)
+    out_image_vv, out_transform_vv = crop_to_bounds(item_hrefs_vv, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
+    out_image_vh, out_transform_vh = crop_to_bounds(item_hrefs_vh, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
 
     with rasterio.open(dir_path + save_as + '_vv.tif', 'w', driver='Gtiff', count=1, height=out_image_vv.shape[-2], width=out_image_vv.shape[-1], crs=dst_crs, dtype=out_image_vv.dtype, transform=out_transform_vv, nodata=-9999) as dst:
         db_vv = db_scale(out_image_vv[0])
@@ -1252,7 +1251,7 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
     return 0
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(prog='sampleS2andS1', description='Samples imagery from Copernicus SENTINEL-2 and SENTINEL-1 (through Microsoft Planetary Computer API) for top precipitation events and generates additional accompanying rasters for each event.')
+    parser = argparse.ArgumentParser(prog='sampleS2andS1', description='Samples imagery from Copernicus SENTINEL-2 and SENTINEL-1 (through a provider API) for top precipitation events and generates additional accompanying rasters for each event.')
     parser.add_argument('threshold', type=int, help='minimum daily cumulative precipitation (mm) threshold for search')
     parser.add_argument('-b', '--before', dest='days_before', default=2, type=int, help='number of days allowed for download before precipitation event (default: 2)')
     parser.add_argument('-a', '--after', dest='days_after', default=4, type=int, help='number of days allowed for download following precipitation event (default: 4)')

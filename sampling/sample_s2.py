@@ -42,7 +42,6 @@ from utils.utils import (
 from utils.stac_providers import get_stac_provider
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['PC_SDK_SUBSCRIPTION_KEY'] = 'a613baefa08445269838bc3bc0dfe2d9'
 from tensorflow.keras.layers import MaxPooling2D
 import tensorflow as tf
 
@@ -1069,7 +1068,7 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
     return 0
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(prog='sampleS2', description='Samples imagery from Copernicus SENTINEL-2 (through Microsoft Planetary Computer API) for top precipitation events and generates additional accompanying rasters for each event.')
+    parser = argparse.ArgumentParser(prog='sampleS2', description='Samples imagery from Copernicus SENTINEL-2 (through a provider API) for top precipitation events and generates additional accompanying rasters for each event.')
     parser.add_argument('threshold', type=int, help='minimum daily cumulative precipitation (mm) threshold for search')
     parser.add_argument('-b', '--before', dest='days_before', default=2, type=int, help='number of days allowed for download before precipitation event (default: 2)')
     parser.add_argument('-a', '--after', dest='days_after', default=4, type=int, help='number of days allowed for download following precipitation event (default: 4)')

@@ -1,5 +1,11 @@
 # Sampling Flood Data
 ## Overview
+
+<p align="center">
+   <img width="550" alt="datasetmethod" src="https://github.com/user-attachments/assets/3334f7e4-37b7-45a5-bb75-d300f19cfcc9" />
+   <br><br>
+</p>
+
 Discretizing the US Sentinel-2 and Sentinel-1 flood dataset:
 * One of the problems with aggregating a flood dataset is how to discretize it such that downloading and labeling can become systematic and efficient.
 * To solve this, tiles much smaller than the individual satellite product extent was chosen as the unit of discretization. The dataset is broken up into 4km x 4km tiles (or cells) within a grid across the continental US provided by [PRISM](https://prism.oregonstate.edu/). Each PRISM tile can have its S2 and S1 capture sampled at a particular date, labeled, and used as a datapoint for training.
@@ -76,7 +82,8 @@ How the sampling scripts work:
 1. Loads in a list of event indices (time, y, x) from either filtering PRISM precipitation or a manual file.
 2. For each event, look up products in the STAC data catalog that satisfy requirements (e.g. S2 must be within `x` days pre-event or `y` days post-event, S1 must be within `z` hours of an S2 product). S2 and S1 products are also filtered out based on percentage cloudy or null pixels (specified by the threshold `maxcoverpercentage`).
 3. For all valid products, picks one product CRS to crop and standardize the rest to the same projection and output shape. The chosen CRS determines the Affine transform and cell width and height from the bounding box.
-4. Downloads the data layers to the event folder `YYYYMMDD_YCoord_XCoord/` as `.tif` files. Colormaps or `cmap` files are also included for easy visualization of each layer in QGIS. Event metadata is saved in `metadata.json`.
+4. For each available date, generate rasters + supplementary layers. If multiple S2 or S1 products are present on a single date, only one is used to represent that date.
+5. Downloads the data layers to the event folder `YYYYMMDD_YCoord_XCoord/` as `.tif` files. Colormaps or `cmap` files are also included for easy visualization of each layer in QGIS. Event metadata is saved in `metadata.json`.
 
 Other items of note:
 * Previously processed event indices are tracked using a `history.pickle` file, so the scripts can be run iteratively to download more tiles within a pre-existing data directory. You can cap the maximum number of events you download at one time with `maxevents` argument.

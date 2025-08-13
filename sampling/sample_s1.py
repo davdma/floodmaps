@@ -15,6 +15,8 @@ import os
 import sys
 from utils.utils import db_scale, setup_logging, colormap_to_rgb, crop_to_bounds, DateCRSOrganizer
 from utils.stac_provider import get_stac_provider
+from utils.validate import validate_event_rasters
+
 PRISM_CRS = "EPSG:4269"
 SEARCH_CRS = "EPSG:4326"
 
@@ -205,7 +207,7 @@ def downloadS1(stac_provider, sample, within_days, maxcoverpercentage, replace=T
     bbox = (conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1])
 
     # if sar file already exists do not download
-    items_s1 = stac_provider.search_s1(bbox, time_of_interest)
+    items_s1 = stac_provider.search_s1(bbox, time_of_interest, query={"sar:instrument_mode": {"eq": "IW"}})
             
     logger.info('Filtering catalog search results...')
     if len(items_s1) == 0:
@@ -259,6 +261,15 @@ def downloadS1(stac_provider, sample, within_days, maxcoverpercentage, replace=T
         logger.debug(f'S1 raster completed for {dt} coincident with S2 product at {cdt}.')
             
     logger.debug(f'All S1 rasters downloaded.')
+
+    # validate raster shapes, CRS, transforms
+    result = validate_event_rasters(sample, logger=logger)
+    if not result.is_valid:
+        logger.error(f'Raster validation failed for event {eid}. Removing directory and contents.')
+        # shutil.rmtree(dir_path) - for now do not delete!
+        raise Exception(f'Raster validation failed for event {eid}.')
+        
+
     return True
 
 def main(within_days, maxcoverpercentage, dir_path=None, replace=True, source='mpc'):

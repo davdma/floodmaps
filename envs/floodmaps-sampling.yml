@@ -12,6 +12,7 @@ dependencies:
   - matplotlib
   - fiona
   - rasterio
+  - folium
   - pip
   - pip:
     - pyyaml

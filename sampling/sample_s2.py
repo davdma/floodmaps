@@ -40,6 +40,7 @@ from utils.utils import (
     crop_to_bounds
 )
 from utils.stac_providers import get_stac_provider
+from utils.validate import validate_event_rasters
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 from tensorflow.keras.layers import MaxPooling2D
@@ -272,9 +273,9 @@ def pipeline_SCL(stac_provider, dir_path, save_as, dst_shape, dst_crs, dst_trans
         dst.write(dest, 1)
 
     rgb_clouds = np.zeros((3, h, w), dtype=np.uint8)
-    rgb_clouds[0, :, :] = clouds * 255
-    rgb_clouds[1, :, :] = clouds * 255
-    rgb_clouds[2, :, :] = clouds * 255
+    rgb_clouds[0, :, :] = dest * 255
+    rgb_clouds[1, :, :] = dest * 255
+    rgb_clouds[2, :, :] = dest * 255
     
     with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_clouds.shape[-2], width=rgb_clouds.shape[-1], 
                        crs=dst_crs, dtype=rgb_clouds.dtype, transform=dst_transform, nodata=None) as dst:
@@ -784,7 +785,7 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, eve
 
     # STAC catalog search
     logger.info('Beginning catalog search...')
-    items_s2 = stac_provider.search_s2(bbox, time_of_interest)
+    items_s2 = stac_provider.search_s2(bbox, time_of_interest, query={"eo:cloud_cover": {"lt": 95}})
             
     logger.info('Filtering catalog search results...')
     if len(items_s2) == 0:
@@ -804,7 +805,7 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, eve
             coverpercentage = cloud_null_percentage(stac_provider, item, item_crs, prism_bbox)
             logger.info(f'Cloud null percentage for item {item.id}: {coverpercentage}')
         except Exception as err:
-            logger.error(f'Cloud null percentage calculation error for item {item.id}: {err}, {type(err)}')
+            logger.exception(f'Cloud null percentage calculation error for item {item.id}.')
             raise err
 
         if coverpercentage > maxcoverpercentage:
@@ -824,19 +825,18 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, eve
     # choose first CRS in alphabetical order for rasters
     main_crs = s2_by_date_crs.get_all_crs()[0]
     logger.debug(f'Using CRS for raster generation: {main_crs}')
-    Path(dir_path).mkdir(parents=True, exist_ok=True)
 
     try:
         state = get_state(minx, miny, maxx, maxy)
         if state is None:
             raise Exception(f'State not found for {event_date}, at {minx}, {miny}, {maxx}, {maxy}')
     except Exception as err:
-        logger.error(f'Error fetching state: {err}, {type(err)}. Id: {eid}. Removing directory and contents.')
-        shutil.rmtree(dir_path)
+        logger.exception(f'Error fetching state. Id: {eid}.')
         return False
 
     # raster generation with chosen CRS
     logger.info('Beginning raster generation...')
+    Path(dir_path).mkdir(parents=True, exist_ok=True)
     file_to_product = dict()
     try:
         # convert prism bbox to main CRS
@@ -887,6 +887,13 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, eve
         logger.error(f'Raster generation failed for {event_date}, at {minx}, {miny}, {maxx}, {maxy}. Id: {eid}. Removing directory and contents.')
         shutil.rmtree(dir_path)
         raise err
+    
+    # validate raster shapes, CRS, transforms
+    result = validate_event_rasters(dir_path, logger=logger)
+    if not result.is_valid:
+        logger.error(f'Raster validation failed for event {eid}. Removing directory and contents.')
+        # shutil.rmtree(dir_path) - for now do not delete!
+        raise Exception(f'Raster validation failed for event {eid}.')
         
     # lastly generate metadata file
     logger.info(f'Generating metadata file...')
@@ -1075,7 +1082,7 @@ if __name__ == '__main__':
     parser.add_argument('-c', '--maxcover', dest='maxcoverpercentage', default=30, type=int, help='maximum cloud and no data cover percentage (default: 30)')
     parser.add_argument('-s', '--maxevents', dest='maxevents', default=100, type=int, help='maximum number of extreme precipitation events to attempt downloading (default: 100)')
     parser.add_argument('-d', '--dir', dest='dir_path', help='specify a directory name for downloaded samples, format should end with backslash (default: None)')
-    parser.add_argument('-r', '--region', default=None, choices=['ceser'], help='sample from supported regions: ["ceser"]. (default: None)')
+    parser.add_argument('-r', '--region', default=None, choices=['ceser'], help='filter precipitation only from supported regions: ["ceser"]. (default: None)')
     parser.add_argument('-m', '--manual', default=None, help='text file for parsing manual event indices with format: time, y, x (default: None)')
     parser.add_argument('-f', '--config', default='configs/sample_s2_s1.yaml', dest='config_file', help='specify a custom configuration file path (default: configs/sample_s2_s1.yaml)')
     parser.add_argument('--source', choices=['mpc', 'aws'], default='mpc', help='Specify a provider (Microsoft Planetary Computer, AWS) for the ESA data (default: mpc)')

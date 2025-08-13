@@ -49,8 +49,9 @@ class STACProvider(ABC):
         """Get asset names for a given asset type."""
         pass
     
-    def search_s2(self, bbox: Tuple[float, float, float, float], 
-                  time_of_interest: str, max_cloud_cover: int = 95) -> ItemCollection:
+    def search_s2(self,
+                  bbox: Tuple[float, float, float, float], 
+                  time_of_interest: str, query: dict = None) -> ItemCollection:
         """Search for Sentinel-2 items."""
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
@@ -59,7 +60,7 @@ class STACProvider(ABC):
                     collections=[self.get_s2_collection_name()],
                     bbox=bbox,
                     datetime=time_of_interest,
-                    query={"eo:cloud_cover": {"lt": max_cloud_cover}}
+                    query=query
                 )
                 return search.item_collection()
             except pystac_client.exceptions.APIError as err:
@@ -73,8 +74,10 @@ class STACProvider(ABC):
                 self.logger.error(f'Catalog search failed: {err}, {type(err)}')
                 raise err
     
-    def search_s1(self, bbox: Tuple[float, float, float, float], 
-                  time_of_interest: str) -> ItemCollection:
+    def search_s1(self,
+                  bbox: Tuple[float, float, float, float], 
+                  time_of_interest: str,
+                  query: dict = None) -> ItemCollection:
         """Search for Sentinel-1 items."""
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
@@ -82,7 +85,8 @@ class STACProvider(ABC):
                 search = self.catalog.search(
                     collections=[self.get_s1_collection_name()],
                     bbox=bbox,
-                    datetime=time_of_interest
+                    datetime=time_of_interest,
+                    query=query
                 )
                 return search.item_collection()
             except pystac_client.exceptions.APIError as err:
@@ -141,7 +145,11 @@ class MicrosoftPlanetaryComputerProvider(STACProvider):
 
 
 class AWSProvider(STACProvider):
-    """AWS STAC provider implementation."""
+    """AWS STAC provider implementation.
+    
+    NOTE: The AWS S1 collection is in a requester pays S3 bucket,
+    so cannot be accessed without credentials. Will need to configure
+    AWS_SECRET_ACCESS_KEY."""
     
     def _initialize_catalog(self):
         """Initialize the AWS catalog."""

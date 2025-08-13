@@ -42,6 +42,7 @@ from utils.utils import (
     crop_to_bounds
 )
 from utils.stac_providers import get_stac_provider
+from utils.validate import validate_event_rasters
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 from tensorflow.keras.layers import MaxPooling2D
@@ -287,9 +288,9 @@ def pipeline_SCL(stac_provider, dir_path, save_as, dst_shape, dst_crs, dst_trans
         dst.write(dest, 1)
     
     rgb_clouds = np.zeros((3, h, w), dtype=np.uint8)
-    rgb_clouds[0, :, :] = clouds * 255
-    rgb_clouds[1, :, :] = clouds * 255
-    rgb_clouds[2, :, :] = clouds * 255
+    rgb_clouds[0, :, :] = dest * 255
+    rgb_clouds[1, :, :] = dest * 255
+    rgb_clouds[2, :, :] = dest * 255
     
     with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_clouds.shape[-2], width=rgb_clouds.shape[-1], 
                        crs=dst_crs, dtype=rgb_clouds.dtype, transform=dst_transform, nodata=None) as dst:
@@ -905,8 +906,8 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
 
     # STAC catalog search
     logger.info('Beginning catalog search...')
-    items_s2 = stac_provider.search_s2(bbox, time_of_interest)
-    items_s1 = stac_provider.search_s1(bbox, time_of_interest_sar)
+    items_s2 = stac_provider.search_s2(bbox, time_of_interest, query={"eo:cloud_cover": {"lt": 95}})
+    items_s1 = stac_provider.search_s1(bbox, time_of_interest_sar, query={"sar:instrument_mode": {"eq": "IW"}})
             
     logger.info('Filtering catalog search results...')
     if len(items_s2) == 0 or len(items_s1) == 0:
@@ -931,7 +932,7 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
         try:
             coverpercentage = cloud_null_percentage(stac_provider, item, item_crs, prism_bbox)
         except Exception as err:
-            logger.error(f'Cloud null percentage calculation error for item {item.id}: {err}, {type(err)}')
+            logger.exception(f'Cloud null percentage calculation error for item {item.id}.')
             raise err
 
         if coverpercentage > maxcoverpercentage:
@@ -952,7 +953,6 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
     # choose first CRS in alphabetical order for rasters
     main_crs = s2_by_date_crs.get_all_crs()[0]
     logger.debug(f'Using CRS for raster generation: {main_crs}')
-    Path(dir_path).mkdir(parents=True, exist_ok=True)
 
     # filter out s1 cloudy/missing tiles and group items by dates in dictionary
     logger.info(f'Checking s1 null percentage...')
@@ -961,10 +961,6 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
     s2_items_used = s2_by_date_crs.get_all_primary_items(preferred_crs=main_crs)
     for item in items_s1:
         item_crs = pe.ext(item).crs_string
-        polarizations = item.properties["sar:polarizations"]
-        if "VV" not in polarizations or "VH" not in polarizations:
-            logger.error(f'S1 product {item.id} VV or VH not found.')
-            continue
 
         # filter out non coincident sar products with s2 products we've selected
         coincident_dt = coincident_with(s2_items_used, item, within_hours)
@@ -975,7 +971,7 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
         try:
             coverpercentage = sar_missing_percentage(stac_provider, item, item_crs, prism_bbox)
         except Exception as err:
-            logger.error(f'Missing percentage calculation error for item {item.id}: {err}, {type(err)}')
+            logger.exception(f'Missing percentage calculation error for item {item.id}.')
             raise err
 
         if coverpercentage > maxcoverpercentage:
@@ -994,12 +990,12 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
         if state is None:
             raise Exception(f'State not found for {event_date}, at {minx}, {miny}, {maxx}, {maxy}')
     except Exception as err:
-        logger.error(f'Error fetching state: {err}, {type(err)}. Id: {eid}. Removing directory and contents.')
-        shutil.rmtree(dir_path)
+        logger.exception(f'Error fetching state. Id: {eid}.')
         return False
 
     # raster generation with chosen CRS
     logger.info('Beginning raster generation...')
+    Path(dir_path).mkdir(parents=True, exist_ok=True)
     file_to_product = dict()
     try:
         conversion = transform(PRISM_CRS, main_crs, (minx, maxx), (miny, maxy))
@@ -1065,6 +1061,13 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
         logger.error(f'Raster generation failed for {event_date}, at {minx}, {miny}, {maxx}, {maxy}. Id: {eid}. Removing directory and contents.')
         shutil.rmtree(dir_path)
         raise err
+
+    # validate raster shapes, CRS, transforms
+    result = validate_event_rasters(dir_path, logger=logger)
+    if not result.is_valid:
+        logger.error(f'Raster validation failed for event {eid}. Removing directory and contents.')
+        # shutil.rmtree(dir_path) - for now do not delete!
+        raise Exception(f'Raster validation failed for event {eid}.')
         
     # lastly generate metadata file
     logger.info(f'Generating metadata file...')
@@ -1240,7 +1243,7 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
                 rootLogger.info(f"Maximum number of events = {maxevents} reached. Stopping event sampling...")
                 break
     except Exception as err:
-        rootLogger.error(f"Unexpected error during event sampling: {err}, {type(err)}")
+        rootLogger.exception("Unexpected error during event sampling")
     finally:
         # store all previously processed events
         with open(dir_path + 'history.pickle', 'wb') as f:
@@ -1259,7 +1262,7 @@ if __name__ == '__main__':
     parser.add_argument('-s', '--maxevents', dest='maxevents', default=100, type=int, help='maximum number of extreme precipitation events to attempt downloading (default: 100)')
     parser.add_argument('-d', '--dir', dest='dir_path', help='specify a directory name for downloaded samples, format should end with backslash (default: None)')
     parser.add_argument('-w', '--within_hours', dest='within_hours', default=12, type=int, help='Floods event must have S1 and S2 data within this many hours. (default: 12)')
-    parser.add_argument('-r', '--region', default=None, choices=['ceser'], help='sample from supported regions: ["ceser"]. (default: None)')
+    parser.add_argument('-r', '--region', default=None, choices=['ceser'], help='filter precipitation only from supported regions: ["ceser"]. (default: None)')
     parser.add_argument('-m', '--manual', default=None, help='text file for parsing manual event indices with format: time, y, x (default: None)')
     parser.add_argument('-f', '--config', dest='config_file', help='specify a custom configuration file path')
     parser.add_argument('--source', choices=['mpc', 'aws'], default='mpc', help='Specify a provider (Microsoft Planetary Computer, AWS) for the ESA data (default: mpc)')

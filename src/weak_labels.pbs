@@ -15,4 +15,4 @@ conda activate floodmaps-sampling
 export PYTHONPATH=/lcrc/project/hydrosm/dma/src:$PYTHONPATH
 
 # Run sampling script
-python weak_labels.py --config_file configs/s2_unet_infer.yaml --format tif --data_dir samples_custom_7_4_10_sar_optional --post --replace
+python weak_labels.py --config_file configs/s2_unet_infer.yaml --format tif --data_dir samples_200_6_4_10_sar --manual last_two.txt --post

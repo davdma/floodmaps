@@ -20,8 +20,6 @@ OUTPUT_DIR = SRC_DIR / 'outputs'
 CONFIG_DIR = SRC_DIR / 'configs'
 RESULTS_DIR = SRC_DIR / 'results'
 
-# QUARANTINE DUE TO SHAPE MISMATCH (NEED TO FIX): label_20190908_20190906_375_1133.tif
-
 TRAIN_LABELS = ["label_20150919_20150917_496_811.tif", "label_20150919_20150917_497_812.tif",
                 "label_20151112_20151109_472_940.tif", "label_20151112_20151109_473_939.tif",
                 "label_20151112_20151109_473_940.tif", "label_20151112_20151109_473_941.tif",
@@ -41,8 +39,8 @@ VAL_LABELS = ["label_20150919_20150917_496_812.tif", "label_20150919_20150917_49
 TEST_LABELS = ["label_20170830_20170826_487_695.tif",
                "label_20170830_20170829_497_709.tif",
                "label_20180818_20180815_304_703.tif",
-               "label_20170830_20170828_482_695.tif"]
-               # "label_20190908_20190906_375_1133.tif" originally in test
+               "label_20170830_20170828_482_695.tif",
+               "label_20190908_20190906_375_1133.tif"]
 
 DAMP_DEFAULT = 1.0
 CU_DEFAULT = 0.523 # 0.447 is sqrt(1/number of looks)

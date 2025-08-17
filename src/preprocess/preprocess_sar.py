@@ -438,6 +438,11 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
     std = trainStd(train_events, mean, sample_dir, filter=filter)
     logger.info('Mean and std of training tiles calculated.')
 
+    # set mean and std of binary channels at the end to 0 and 1
+    bchannels = 3 # if flowlines included
+    mean[-bchannels:] = 0
+    std[-bchannels:] = 1
+
     # also store training mean std statistics in file
     stats_file = pre_sample_dir / f'mean_std_{size}_{samples}_{filter}.pkl'
     with open(stats_file, 'wb') as f:

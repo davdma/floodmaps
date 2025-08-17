@@ -433,7 +433,14 @@ def get_sample_prediction_s2(model, cfg, standardize, train_mean, event_path, dt
     label[missing_vals] = 0
     return label
 
-def main(cfg, format="tif", replace=True, data_dir="", post=False):
+def parse_manual_file(manual_file):
+    """Parse manual file to get EIDs to predict.
+    Each line should contain one EID string in the event directory."""
+    with open(manual_file, 'r') as f:
+        eids = [line.strip() for line in f]
+    return eids
+
+def main(cfg, format="tif", replace=True, data_dir="", post=False, manual=None):
     """Generates machine labels for dataset using tuned S2 optical model.
 
     Note: run with conda environment 'floodmaps'.
@@ -480,8 +487,14 @@ def main(cfg, format="tif", replace=True, data_dir="", post=False):
 
     standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
 
-    # iterate over all events in dataset dir
-    lst = (SAMPLES_DIR / data_dir).glob("[0-9]*")
+    # get list of events to predict
+    lst = []
+    if manual is not None:
+        eids = parse_manual_file(manual)
+        lst.extend([SAMPLES_DIR / data_dir / eid for eid in eids])
+    else:
+        # iterate over all events in dataset dir
+        lst.extend((SAMPLES_DIR / data_dir).glob("[0-9]*"))
 
     # get eid then use to find the tci dates for each event
     p = re.compile('tci_(\d{8})_(\d{8})_(.+).tif')
@@ -531,8 +544,9 @@ if __name__ == '__main__':
     parser.add_argument('-f', '--format', default="tif", choices=["npy", "tif"], help='prediction label format: npy, tif (default: tif)')
     parser.add_argument('--replace', action='store_true', help='overwrite all previously made predictions (default: False)')
     parser.add_argument('--data_dir', default='samples_200_6_4_10_sar/', help='dataset directory to make predictions in (default: samples_200_6_4_10_sar/)')
+    parser.add_argument('--manual', default=None, help='manual file to specify list of EIDs in directory for predictions (default: None)')
     parser.add_argument('--post', action='store_true', help='only label post-event images (default: False)')
 
     _args = parser.parse_args()
     cfg = Config(**_args.__dict__)
-    sys.exit(main(cfg, format=_args.format, replace=_args.replace, data_dir=_args.data_dir, post=_args.post))
+    sys.exit(main(cfg, format=_args.format, replace=_args.replace, data_dir=_args.data_dir, post=_args.post, manual=_args.manual))

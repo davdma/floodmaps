@@ -402,7 +402,7 @@ def pipeline_NDWI(stac_provider, dir_path, save_as, dst_crs, item, bbox):
     with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=ndwi_colored.shape[-2], width=ndwi_colored.shape[-1], crs=dst_crs, dtype=ndwi_colored.dtype, transform=out_transform, nodata=None) as dst:
         dst.write(ndwi_colored)
 
-def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, buffer=0):
+def pipeline_roads(dir_path, save_as, prism_bbox, dst_shape, dst_crs, dst_transform, state, buffer=0):
     """Generates raster with burned in geometries of roads given destination raster properties.
 
     Parameters
@@ -411,6 +411,9 @@ def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, 
         Path for saving generated raster. 
     save_as : str
         Name of file to be saved (do not include extension!).
+    prism_bbox : (float, float, float, float)
+        Tuple in the order minx, miny, maxx, maxy, representing bounding box, 
+        in PRISM CRS.
     dst_shape : (int, int)
         Shape of output raster.
     dst_crs : obj
@@ -424,7 +427,12 @@ def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, 
     """
     # find state shape file
     with fiona.open(Path(config.roads_directory) / f'{state.strip().upper()}.shp', "r") as shapefile:
-        shapes = [transform_geom(shapefile.crs, dst_crs, feature["geometry"]) for feature in shapefile]
+        # Convert bounding box to shapefile CRS
+        bbox_in_shp_crs = transform_bounds(PRISM_CRS, shapefile.crs, *prism_bbox)
+        
+        # Use fiona's spatial filtering instead of loading everything
+        shapes = [transform_geom(shapefile.crs, dst_crs, feature["geometry"]) 
+                 for feature in shapefile.filter(bbox=bbox_in_shp_crs)]
 
     if shapes:
         rasterize_roads = rasterize(
@@ -1046,7 +1054,8 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
         logger.debug(f'All coincident S1 rasters completed successfully.')
 
         # save all supplementary rasters in raw and rgb colormap
-        pipeline_roads(dir_path, f'roads_{eid}', dst_shape, main_crs, dst_transform, state, buffer=1)
+        logger.info('Processing supplementary rasters...')
+        pipeline_roads(dir_path, f'roads_{eid}', prism_bbox, dst_shape, main_crs, dst_transform, state, buffer=1)
         logger.debug(f'Roads raster completed successfully.')
         pipeline_dem(dir_path, f'dem_{eid}', dst_shape, main_crs, dst_transform, prism_bbox)
         logger.debug(f'DEM raster completed successfully.')

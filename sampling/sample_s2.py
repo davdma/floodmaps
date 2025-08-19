@@ -899,10 +899,11 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, eve
     logger.info('**********************************')
     logger.info('START OF EVENT TASK LOG:')
     logger.info(f'Beginning event {eid} download...')
-    logger.info(f'Event on {event_date} with precipitation {event_precip}mm at bounds: {prism_bbox}')
+
+    minx, miny, maxx, maxy = prism_bbox
+    logger.info(f'Event on {event_date} with precipitation {event_precip}mm at bounds: {minx}, {miny}, {maxx}, {maxy}')
 
     # need to transform box from EPSG 4269 to EPSG 4326 for query
-    minx, miny, maxx, maxy = prism_bbox
     conversion = transform(PRISM_CRS, SEARCH_CRS, (minx, maxx), (miny, maxy))
     bbox = (conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1])
     dir_path = dir_path + eid + '/'

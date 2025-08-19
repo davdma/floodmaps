@@ -1,7 +1,6 @@
 import argparse
 from datetime import datetime
 from pathlib import Path
-from contextlib import ExitStack
 import sys
 import logging
 import numpy as np
@@ -11,14 +10,13 @@ import json
 import pickle
 import fiona
 import shutil
-from osgeo import gdal, ogr
+from osgeo import gdal, ogr, osr
 from rasterio.transform import array_bounds
 from rasterio.windows import from_bounds, Window
 from rasterio.warp import calculate_default_transform, reproject, Resampling, transform_bounds
-from rasterio.features import rasterize
 import rasterio.merge
 import rasterio
-from fiona.transform import transform, transform_geom
+from fiona.transform import transform
 from pystac.extensions.projection import ProjectionExtension as pe
 import pystac_client
 from utils.utils import (
@@ -41,10 +39,6 @@ from utils.utils import (
 )
 from utils.stac_providers import get_stac_provider
 from utils.validate import validate_event_rasters
-
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-from tensorflow.keras.layers import MaxPooling2D
-import tensorflow as tf
 
 # Import configuration
 from utils.config import DataConfig
@@ -114,69 +108,33 @@ def get_nlcd_range():
         NLCD_RANGE = (min(nlcd_years), max(nlcd_years))
     return NLCD_RANGE
 
-def make_box(bounds):
-    """Returns a box polygon using a bounding box of longitude latitude coordinates.
-    
-    Parameters
-    ----------
-    bounds : (float, float, float, float)
-        Tuple in the order minx, miny, maxx, maxy representing bounding box.
-
-    Returns
-    -------
-    ogr.Geometry
-        GDAL/OGR polygon object.
-    """
-    minX, minY, maxX, maxY = bounds
-    
-    # Create ring
-    ring = ogr.Geometry(ogr.wkbLinearRing)
-    ring.AddPoint(minX, minY)
-    ring.AddPoint(maxX, minY)
-    ring.AddPoint(maxX, maxY)
-    ring.AddPoint(minX, maxY)
-    ring.AddPoint(minX, minY)
-
-    poly = ogr.Geometry(ogr.wkbPolygon)
-    poly.AddGeometry(ring)
-    return poly
-
-def GetHU4Codes(bbox):
+def GetHU4Codes(prism_bbox):
     """
     Queries national watershed boundary dataset for HUC 4 codes representing
     hydrologic units that intersect with bounding box.
 
     Parameters
     ----------
-    bbox : (float, float, float, float)
-        Tuple in the order minx, miny, maxx, maxy, representing bounding box.
+    prism_bbox : (float, float, float, float)
+        Tuple in the order minx, miny, maxx, maxy, representing bounding box in PRISM_CRS = EPSG:4269.
 
     Returns
     -------
     list[str]
         HU4 codes.
     """
-    # TODO: for newer gdal add context manager for opening file
-    wbd = gdal.OpenEx(str('/vsizip/' / Path(config.nhd_wbd_file) / 'WBD_National_GDB.gdb'))
-    wbdhu4 = wbd.GetLayerByIndex(4)
+    with gdal.OpenEx(config.nhd_wbd_file) as ds:
+        minx, miny, maxx, maxy = prism_bbox
+        layer = ds.GetLayerByIndex(4)
+        layer.SetSpatialFilterRect(minx, miny, maxx, maxy)
+        
+        huc4_codes = []
+        for feature in layer:
+            huc4_code = feature.GetField('huc4')
+            if huc4_code:
+                huc4_codes.append(huc4_code)
 
-    lst = []
-    boundpoly = make_box(bbox)
-    for feature in wbdhu4:
-        if feature.GetGeometryRef().Intersects(boundpoly):
-            lst.append(feature.GetField('huc4'))
-
-    return lst
-
-def buffer_raster(arr, buffer):
-    """Add buffer to 2d numpy array."""
-    x = tf.constant(arr)
-    x = tf.reshape(x, [1, arr.shape[0], arr.shape[1], 1])
-    max_pool_2d = MaxPooling2D(pool_size=(buffer, buffer),
-       strides=(1, 1), padding='same')
-    pooled = max_pool_2d(x)
-    buffer_arr = pooled.numpy()[0, :, :, 0]
-    return buffer_arr
+    return huc4_codes
 
 def cloud_null_percentage(stac_provider, item, item_crs, bbox):
     """Calculates the percentage of pixels in the bounding box of the S2 image that are cloud or null."""
@@ -201,10 +159,10 @@ def pipeline_TCI(stac_provider, dir_path, save_as, dst_crs, item, bbox):
         Path for saving generated raster. 
     save_as : str
         Name of file to be saved (do not include extension!)
-    dst_crs : obj
+    dst_crs : str
         Coordinate reference system of output raster.
-    items : list[Item]
-        List of PyStac Item objects
+    item : Item
+        PyStac Item object.
     bbox : (float, float, float, float)
         Tuple in the order minx, miny, maxx, maxy, representing bounding box, 
         should be in CRS specified by dst_crs.
@@ -239,12 +197,12 @@ def pipeline_SCL(stac_provider, dir_path, save_as, dst_shape, dst_crs, dst_trans
         Name of file to be saved (do not include extension!).
     dst_shape : (int, int)
         Shape of output raster.
-    dst_crs : obj
+    dst_crs : str
         Coordinate reference system of output raster.
     dst_transform : rasterio.affine.Affine()
         Transform of TCI raster.
-    items : list[Item]
-        List of PyStac Item objects.
+    item : Item
+        PyStac Item object.
     bbox : (float, float, float, float)
         Tuple in the order minx, miny, maxx, maxy, representing bounding box, 
         should be in CRS specified by dst_crs.
@@ -292,10 +250,10 @@ def pipeline_RGB(stac_provider, dir_path, save_as, dst_crs, item, bbox):
         Path for saving generated raster. 
     save_as : str
         Name of file to be saved (do not include extension!).
-    dst_crs : obj
+    dst_crs : str
         Coordinate reference system of output raster.
-    items : list[Item]
-        List of PyStac Item objects.
+    item : Item
+        PyStac Item object.
     box : (float, float, float, float)
         Tuple in the order minx, miny, maxx, maxy, representing bounding box, 
         should be in CRS specified by dst_crs.
@@ -328,10 +286,10 @@ def pipeline_B08(stac_provider, dir_path, save_as, dst_crs, item, bbox):
         Path for saving generated raster. 
     save_as : str
         Name of file to be saved (do not include extension!).
-    dst_crs : obj
+    dst_crs : str
         Coordinate reference system of output raster.
-    items : list[Item]
-        List of PyStac Item objects.
+    item : Item
+        PyStac Item object.
     box : (float, float, float, float)
         Tuple in the order minx, miny, maxx, maxy, representing bounding box, 
         should be in CRS specified by dst_crs.
@@ -355,8 +313,10 @@ def pipeline_NDWI(stac_provider, dir_path, save_as, dst_crs, item, bbox):
         Path for saving generated raster. 
     save_as : str
         Name of raw ndwi file to be saved (do not include extension!).
-    items : list[Item]
-        List of PyStac Item objects.
+    dst_crs : str
+        Coordinate reference system of output raster.
+    item : Item
+        PyStac Item object.
     bbox : (float, float, float, float)
         Tuple in the order minx, miny, maxx, maxy, representing bounding box, 
         should be in CRS specified by dst_crs.
@@ -387,7 +347,7 @@ def pipeline_NDWI(stac_provider, dir_path, save_as, dst_crs, item, bbox):
     with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=ndwi_colored.shape[-2], width=ndwi_colored.shape[-1], crs=dst_crs, dtype=ndwi_colored.dtype, transform=out_transform, nodata=None) as dst:
         dst.write(ndwi_colored)
 
-def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, buffer=0):
+def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, prism_bbox):
     """Generates raster with burned in geometries of roads given destination raster properties.
 
     Parameters
@@ -398,42 +358,103 @@ def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, 
         Name of file to be saved (do not include extension!).
     dst_shape : (int, int)
         Shape of output raster.
-    dst_crs : obj
+    dst_crs : str
         Coordinate reference system of output raster.
     dst_transform : rasterio.affine.Affine()
         Transformation matrix for mapping pixel coordinates to coordinate system of output raster.
     state : str
         State of raster location.
-    buffer : int, optional
-        Buffer the geometry line thickness by certain number of pixels.
+    prism_bbox : (float, float, float, float)
+        Tuple in the order minx, miny, maxx, maxy, representing bounding box, 
+        in PRISM CRS.
     """
-    # find state shape file
-    with fiona.open(Path(config.roads_directory) / f'{state.strip().upper()}.shp', "r") as shapefile:
-        shapes = [transform_geom(shapefile.crs, dst_crs, feature["geometry"]) for feature in shapefile]
+    mem_ds = None
+    raster_ds = None
+    minx, miny, maxx, maxy = prism_bbox
+    try:
+        with gdal.OpenEx(Path(config.roads_directory) / f'{state.strip().upper()}.shp') as ds:
+            layer = ds.GetLayer()
+            layer.SetSpatialFilterRect(minx, miny, maxx, maxy)
 
-    if shapes:
-        rasterize_roads = rasterize(
-            [(line, 1) for line in shapes],
-            out_shape=dst_shape,
-            transform=dst_transform,
-            fill=0,
-            all_touched=True,
-            dtype=np.uint8)
+            dst_srs = osr.SpatialReference()
+            dst_srs.SetFromUserInput(dst_crs)
 
-        if buffer > 0:
-            rasterize_roads = buffer_raster(rasterize_roads, buffer)
+            ct = osr.CoordinateTransformation(layer.GetSpatialRef(), dst_srs)
+
+            # Create in-memory layer with transformed geometries
+            mem_driver = ogr.GetDriverByName('Memory')
+            mem_ds = mem_driver.CreateDataSource('memData')
+            mem_layer = mem_ds.CreateLayer('roads', dst_srs, ogr.wkbLineString)
+
+            # Add a field for burn values
+            field_defn = ogr.FieldDefn('burn_value', ogr.OFTInteger)
+            mem_layer.CreateField(field_defn)
             
-        # Create RGB raster
-        rgb_roads = np.zeros((3, rasterize_roads.shape[0], rasterize_roads.shape[1]), dtype=np.uint8)
-    
-        # Set values in the 3D array based on the binary_array
-        rgb_roads[0, :, :] = rasterize_roads * 255
-        rgb_roads[1, :, :] = rasterize_roads * 255
-        rgb_roads[2, :, :] = rasterize_roads * 255
-    else:
-        # if no shapes to rasterize
-        rasterize_roads = np.zeros(dst_shape, dtype=np.uint8)
-        rgb_roads = np.zeros((3, *dst_shape), dtype=np.uint8)
+            # get transformed geometries in GeoJSON like format or Obj
+            for feat in layer:
+                geom = feat.GetGeometryRef().Clone()
+                geom.Transform(ct)
+                out_feature = ogr.Feature(mem_layer.GetLayerDefn())
+                out_feature.SetGeometry(geom)
+                out_feature.SetField('burn_value', 1)  # Value to burn into raster
+                mem_layer.CreateFeature(out_feature)
+                out_feature = None
+                geom = None
+
+        # Check if we have any features
+        feature_count = mem_layer.GetFeatureCount()
+        if feature_count > 0:
+            # Create in-memory raster dataset
+            height, width = dst_shape
+            
+            # Convert rasterio transform to GDAL geotransform
+            # rasterio: (x_offset, x_scale, xy_skew, y_offset, yx_skew, y_scale)
+            # GDAL: (x_offset, x_scale, xy_skew, y_offset, yx_skew, y_scale)
+            geotransform = (
+                dst_transform.c,    # x_offset (top-left x)
+                dst_transform.a,    # x_scale (pixel width)
+                dst_transform.b,    # xy_skew (rotation)
+                dst_transform.f,    # y_offset (top-left y)
+                dst_transform.d,    # yx_skew (rotation) 
+                dst_transform.e     # y_scale (pixel height, usually negative)
+            )
+            
+            # Create raster dataset in memory
+            raster_driver = gdal.GetDriverByName('MEM')
+            raster_ds = raster_driver.Create('', width, height, 1, gdal.GDT_Byte)
+            raster_ds.SetGeoTransform(geotransform)
+            raster_ds.SetProjection(dst_srs.ExportToWkt())
+            
+            # Get the raster band
+            band = raster_ds.GetRasterBand(1)
+            band.SetNoDataValue(0)
+            band.Fill(0)  # Initialize with 0
+            
+            # Burn value of 1 for all features
+            gdal.RasterizeLayer(raster_ds, [1], mem_layer, 
+                                burn_values=[1], options=['ALL_TOUCHED=TRUE'])
+
+            # Read the rasterized data
+            rasterize_roads = band.ReadAsArray()
+
+            # Create RGB raster
+            rgb_roads = np.zeros((3, rasterize_roads.shape[0], rasterize_roads.shape[1]), dtype=np.uint8)
+            
+            # Set values in the 3D array based on the binary_array
+            rgb_roads[0, :, :] = rasterize_roads * 255
+            rgb_roads[1, :, :] = rasterize_roads * 255
+            rgb_roads[2, :, :] = rasterize_roads * 255
+        else:
+            # if no shapes to rasterize
+            rasterize_roads = np.zeros(dst_shape, dtype=np.uint8)
+            rgb_roads = np.zeros((3, *dst_shape), dtype=np.uint8)
+    except Exception as e:
+        raise e
+    finally:
+        if mem_ds:
+            mem_ds = None
+        if raster_ds:
+            raster_ds = None
 
     with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=1, height=rasterize_roads.shape[-2], width=rasterize_roads.shape[-1], 
                        crs=dst_crs, dtype=rasterize_roads.dtype, transform=dst_transform, nodata=0) as dst:
@@ -520,8 +541,11 @@ def pipeline_dem(dir_path, save_as, dst_shape, dst_crs, dst_transform, bounds):
     with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=dem_cmap.shape[-2], width=dem_cmap.shape[-1], crs=dst_crs, dtype=dem_cmap.dtype, transform=dst_transform, nodata=None) as dst:
         dst.write(dem_cmap)
 
-def pipeline_flowlines(dir_path, save_as, dst_shape, dst_crs, dst_transform, bbox, buffer=3, filter=['460\d{2}', '558\d{2}', '336\d{2}', '334\d{2}', '42801', '42802', '42805', '42806', '42809']):
+def pipeline_flowlines(dir_path, save_as, dst_shape, dst_crs, dst_transform, prism_bbox,  
+exact_fcodes=['46000', '46003', '46006', '46007', '55800', '33600', '33601', '33603', '33400', '42801', '42802', '42805', '42806', '42809']):
     """Generates raster with burned in geometries of flowlines given destination raster properties.
+
+    NOTE: FCode for flowlines can be referenced here: https://files.hawaii.gov/dbedt/op/gis/data/NHD%20Complete%20FCode%20Attribute%20Value%20List.pdf
 
     Parameters
     ----------
@@ -535,46 +559,88 @@ def pipeline_flowlines(dir_path, save_as, dst_shape, dst_crs, dst_transform, bbo
         Coordinate reference system of output raster.
     dst_transform : rasterio.affine.Affine()
         Transformation matrix for mapping pixel coordinates to coordinate system of output raster.
-    bbox : (float, float, float, float)
-        Tuple in the order minx, miny, maxx, maxy, representing bounding box.
-    buffer : int, optional
-        Buffer the geometry line thickness by certain number of pixels.
-    filter : list[str], optional
-        List of regex patterns for filtering specific flowline features based on their NHDPlus dataset FCodes.
+    prism_bbox : (float, float, float, float)
+        Tuple in the order minx, miny, maxx, maxy, representing bounding box, 
+        in PRISM CRS.
+    exact_fcodes : list[str], optional
+        List of flowline feature FCodes to filter for e.g. ["42801", "42805", "46002"].
     """
-    with ExitStack() as stack:
-        files = [stack.enter_context(fiona.open(f'/vsizip/NHD/NHDPLUS_H_{code}_HU4_GDB.zip/NHDPLUS_H_{code}_HU4_GDB.gdb', layer='NHDFlowline')) for code in GetHU4Codes(bbox)]
-        if not files:
-            raise Exception(f"No flowline files found for HU4 codes in bounding box {bbox}")
+    where_clause = f"FCode IN ({','.join(exact_fcodes)})"
+    minx, miny, maxx, maxy = prism_bbox
 
-        files_crs = {file.crs for file in files}
-        if len(files_crs) > 1:
-            raise Exception("CRS of all files must match")
-        src_crs = files[0].crs
+    mem_ds = None
+    raster_ds = None
+
+    try:
+        # Create in-memory layer with transformed geometries
+        dst_srs = osr.SpatialReference()
+        dst_srs.SetFromUserInput(dst_crs)
+        mem_driver = ogr.GetDriverByName('Memory')
+        mem_ds = mem_driver.CreateDataSource('memData')
+        mem_layer = mem_ds.CreateLayer('flowlines', dst_srs, ogr.wkbMultiLineString)
         
-        shapes = []
-        p = re.compile('|'.join(filter))
-        for i, lyr in enumerate(files):
-            for _, feat in lyr.items(bbox=bbox):
-                m = p.match(str(feat.properties['FCode']))
-                if m:
-                    shapes.append((transform_geom(src_crs, dst_crs, feat.geometry), 1))
+        # Add a field for burn values
+        field_defn = ogr.FieldDefn('burn_value', ogr.OFTInteger)
+        mem_layer.CreateField(field_defn)
 
-        if shapes:
-            flowlines = rasterize(
-                shapes,
-                out_shape=dst_shape,
-                transform=dst_transform,
-                fill=0,
-                all_touched=True,
-                dtype=np.uint8)
+        for code in GetHU4Codes(prism_bbox):
+            with gdal.OpenEx(f'NHD/NHDPLUS_H_{code}_HU4_GDB.gdb') as ds:
+                layer = ds.GetLayerByName('NHDFlowline')
+                layer.SetSpatialFilterRect(minx, miny, maxx, maxy)
+                if exact_fcodes:
+                    layer.SetAttributeFilter(where_clause)
 
-            if buffer > 0:
-                flowlines = buffer_raster(flowlines, buffer)
+                ct = osr.CoordinateTransformation(layer.GetSpatialRef(), dst_srs)
+
+                for feat in layer:
+                    geom = feat.GetGeometryRef().Clone()
+                    geom.Transform(ct)
+                    out_feature = ogr.Feature(mem_layer.GetLayerDefn())
+                    out_feature.SetGeometry(geom)
+                    out_feature.SetField('burn_value', 1)  # Value to burn into raster
+                    mem_layer.CreateFeature(out_feature)
+                    out_feature = None
+                    geom = None
+        
+        # Check if we have any features
+        feature_count = mem_layer.GetFeatureCount()
+        if feature_count > 0:
+            # Create in-memory raster dataset
+            height, width = dst_shape
+            
+            # Convert rasterio transform to GDAL geotransform
+            # rasterio: (x_offset, x_scale, xy_skew, y_offset, yx_skew, y_scale)
+            # GDAL: (x_offset, x_scale, xy_skew, y_offset, yx_skew, y_scale)
+            geotransform = (
+                dst_transform.c,    # x_offset (top-left x)
+                dst_transform.a,    # x_scale (pixel width)
+                dst_transform.b,    # xy_skew (rotation)
+                dst_transform.f,    # y_offset (top-left y)
+                dst_transform.d,    # yx_skew (rotation) 
+                dst_transform.e     # y_scale (pixel height, usually negative)
+            )
+            
+            # Create raster dataset in memory
+            raster_driver = gdal.GetDriverByName('MEM')
+            raster_ds = raster_driver.Create('', width, height, 1, gdal.GDT_Byte)
+            raster_ds.SetGeoTransform(geotransform)
+            raster_ds.SetProjection(dst_srs.ExportToWkt())
+            
+            # Get the raster band
+            band = raster_ds.GetRasterBand(1)
+            band.SetNoDataValue(0)
+            band.Fill(0)  # Initialize with 0
+            
+            # Burn value of 1 for all features
+            gdal.RasterizeLayer(raster_ds, [1], mem_layer, 
+                                burn_values=[1], options=['ALL_TOUCHED=TRUE'])
+
+            # Read the rasterized data
+            flowlines = band.ReadAsArray()
 
             # Create RGB raster
             rgb_flowlines = np.zeros((3, flowlines.shape[0], flowlines.shape[1]), dtype=np.uint8)
-        
+            
             # Set values in the 3D array based on the binary_array
             rgb_flowlines[0, :, :] = flowlines * 255
             rgb_flowlines[1, :, :] = flowlines * 255
@@ -583,7 +649,14 @@ def pipeline_flowlines(dir_path, save_as, dst_shape, dst_crs, dst_transform, bbo
             # if no shapes to rasterize
             flowlines = np.zeros(dst_shape, dtype=np.uint8)
             rgb_flowlines = np.zeros((3, *dst_shape), dtype=np.uint8)
-
+    except Exception as e:
+        raise e
+    finally:
+        if mem_ds:
+            mem_ds = None
+        if raster_ds:
+            raster_ds = None
+    
     # flowlines raw
     with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=1, height=flowlines.shape[-2], width=flowlines.shape[-1], 
                        crs=dst_crs, dtype=flowlines.dtype, transform=dst_transform, nodata=0) as dst:
@@ -593,7 +666,7 @@ def pipeline_flowlines(dir_path, save_as, dst_shape, dst_crs, dst_transform, bbo
     with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_flowlines.shape[-2], width=rgb_flowlines.shape[-1], crs=dst_crs, dtype=rgb_flowlines.dtype, transform=dst_transform, nodata=None) as dst:
         dst.write(rgb_flowlines)
 
-def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, bbox):
+def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, prism_bbox):
     """Generates raster with burned in geometries of waterbodies given destination raster properties.
 
     Parameters
@@ -608,41 +681,86 @@ def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, bbo
         Coordinate reference system of output raster.
     dst_transform : rasterio.affine.Affine()
         Transformation matrix for mapping pixel coordinates to coordinate system of output raster.
-    bbox : (float, float, float, float)
-        Tuple in the order minx, miny, maxx, maxy, representing bounding box.
+    prism_bbox : (float, float, float, float)
+        Tuple in the order minx, miny, maxx, maxy, representing bounding box, 
+        in PRISM CRS.
     """
-    with ExitStack() as stack:
-        files = [stack.enter_context(fiona.open(f'/vsizip/NHD/NHDPLUS_H_{code}_HU4_GDB.zip/NHDPLUS_H_{code}_HU4_GDB.gdb', layer='NHDWaterbody')) for code in GetHU4Codes(bbox)]
-        if not files:
-            raise Exception(f"No waterbody files found for HU4 codes in bounding box {bbox}")
+    # filter out estuary
+    where_clause = "FCode <> 49300"
 
-        files_crs = {file.crs for file in files}
-        if len(files_crs) > 1:
-            raise Exception("CRS of all files must match")
-        src_crs = files[0].crs
+    minx, miny, maxx, maxy = prism_bbox
+    mem_ds = None
+    raster_ds = None
+
+    try:
+        # Create in-memory layer with transformed geometries
+        dst_srs = osr.SpatialReference()
+        dst_srs.SetFromUserInput(dst_crs)
+        mem_driver = ogr.GetDriverByName('Memory')
+        mem_ds = mem_driver.CreateDataSource('memData')
+        mem_layer = mem_ds.CreateLayer('waterbody', dst_srs, ogr.wkbMultiPolygon)
         
-        shapes = []
-        for lyr in files:
-            for _, feat in lyr.items(bbox=bbox):
-                fcode = feat.properties['FCode']
-                # filter out estuary
-                if fcode == 49300: 
-                    continue
-                    
-                shapes.append((transform_geom(src_crs, dst_crs, feat.geometry), 1))
+        # Add a field for burn values
+        field_defn = ogr.FieldDefn('burn_value', ogr.OFTInteger)
+        mem_layer.CreateField(field_defn)
 
-        if shapes:
-            waterbody = rasterize(
-                shapes,
-                out_shape=dst_shape,
-                transform=dst_transform,
-                fill=0,
-                all_touched=True,
-                dtype=np.uint8)
+        for code in GetHU4Codes(prism_bbox):
+            with gdal.OpenEx(f'NHD/NHDPLUS_H_{code}_HU4_GDB.gdb') as ds:
+                layer = ds.GetLayerByName('NHDWaterbody')
+                layer.SetSpatialFilterRect(minx, miny, maxx, maxy)
+                layer.SetAttributeFilter(where_clause)
+
+                ct = osr.CoordinateTransformation(layer.GetSpatialRef(), dst_srs)
+
+                for feat in layer:
+                    geom = feat.GetGeometryRef().Clone()
+                    geom.Transform(ct)
+                    out_feature = ogr.Feature(mem_layer.GetLayerDefn())
+                    out_feature.SetGeometry(geom)
+                    out_feature.SetField('burn_value', 1)  # Value to burn into raster
+                    mem_layer.CreateFeature(out_feature)
+                    out_feature = None
+                    geom = None
+        
+        # Check if we have any features
+        feature_count = mem_layer.GetFeatureCount()
+        if feature_count > 0:
+            # Create in-memory raster dataset
+            height, width = dst_shape
+            
+            # Convert rasterio transform to GDAL geotransform
+            # rasterio: (x_offset, x_scale, xy_skew, y_offset, yx_skew, y_scale)
+            # GDAL: (x_offset, x_scale, xy_skew, y_offset, yx_skew, y_scale)
+            geotransform = (
+                dst_transform.c,    # x_offset (top-left x)
+                dst_transform.a,    # x_scale (pixel width)
+                dst_transform.b,    # xy_skew (rotation)
+                dst_transform.f,    # y_offset (top-left y)
+                dst_transform.d,    # yx_skew (rotation) 
+                dst_transform.e     # y_scale (pixel height, usually negative)
+            )
+            
+            # Create raster dataset in memory
+            raster_driver = gdal.GetDriverByName('MEM')
+            raster_ds = raster_driver.Create('', width, height, 1, gdal.GDT_Byte)
+            raster_ds.SetGeoTransform(geotransform)
+            raster_ds.SetProjection(dst_srs.ExportToWkt())
+            
+            # Get the raster band
+            band = raster_ds.GetRasterBand(1)
+            band.SetNoDataValue(0)
+            band.Fill(0)  # Initialize with 0
+            
+            # Burn value of 1 for all features
+            gdal.RasterizeLayer(raster_ds, [1], mem_layer, 
+                                burn_values=[1], options=['ALL_TOUCHED=TRUE'])
+
+            # Read the rasterized data
+            waterbody = band.ReadAsArray()
 
             # Create RGB raster
             rgb_waterbody = np.zeros((3, waterbody.shape[0], waterbody.shape[1]), dtype=np.uint8)
-        
+            
             # Set values in the 3D array based on the binary_array
             rgb_waterbody[0, :, :] = waterbody * 255
             rgb_waterbody[1, :, :] = waterbody * 255
@@ -651,7 +769,14 @@ def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, bbo
             # if no shapes to rasterize
             waterbody = np.zeros(dst_shape, dtype=np.uint8)
             rgb_waterbody = np.zeros((3, *dst_shape), dtype=np.uint8)
-
+    except Exception as e:
+        raise e
+    finally:
+        if mem_ds:
+            mem_ds = None
+        if raster_ds:
+            raster_ds = None
+    
     # waterbody raw
     with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=1, height=waterbody.shape[-2], width=waterbody.shape[-1], crs=dst_crs, dtype=waterbody.dtype, transform=dst_transform, nodata=0) as dst:
         dst.write(waterbody, 1)
@@ -872,11 +997,11 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, eve
         logger.debug(f'All S2, B08, NDWI, SCL rasters completed successfully.')
 
         # save all supplementary rasters in raw and rgb colormap
-        pipeline_roads(dir_path, f'roads_{eid}', dst_shape, main_crs, dst_transform, state, buffer=1)
+        pipeline_roads(dir_path, f'roads_{eid}', dst_shape, main_crs, dst_transform, state, prism_bbox)
         logger.debug(f'Roads raster completed successfully.')
         pipeline_dem(dir_path, f'dem_{eid}', dst_shape, main_crs, dst_transform, prism_bbox)
         logger.debug(f'DEM raster completed successfully.')
-        pipeline_flowlines(dir_path, f'flowlines_{eid}', dst_shape, main_crs, dst_transform, prism_bbox, buffer=1)
+        pipeline_flowlines(dir_path, f'flowlines_{eid}', dst_shape, main_crs, dst_transform, prism_bbox)
         logger.debug(f'Flowlines raster completed successfully.')
         pipeline_waterbody(dir_path, f'waterbody_{eid}', dst_shape, main_crs, dst_transform, prism_bbox)
         logger.debug(f'Waterbody raster completed successfully.')

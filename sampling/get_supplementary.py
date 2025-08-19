@@ -77,7 +77,11 @@ def download_dem():
             download_url(product, f'Elevation/{match.group()}.tif')
 
 def download_nhd():
-    """Download WBD and all NHDPlus GDB datasets."""
+    """Download WBD and all NHDPlus GDB datasets.
+    
+    NOTE: You will need to unzip each zip file in the NHD directory. Reading compressed .zip files
+    is extremely slow so the scripts will not work with them.
+    """
     os.makedirs('NHD', exist_ok=True)
 
     # Download WBD

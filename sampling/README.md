@@ -46,8 +46,15 @@ To use the data download scripts and setup the `sampling/` directory in the clon
 
 Scripts for downloading PRISM and supplementary datasets:
 * `get_prism.py` - run this first for downloading PRISM precipitation zip files and collating into NetCDF data file. Can later be used for updating precip data to latest available on PRISM.
-* `get_supplementary.py` - for downloading TIGER roads, NHD, DEM, NLCD data.
-    * For the DEM data you will need to filter for 1/3 arc second DEM and download the txt file of products via https://apps.nationalmap.gov/downloader/ and save as `neddownload.txt` inside of `sampling/` for the DEM downloading to work.
+* `get_supplementary.py` - run this for downloading TIGER roads, NHD, DEM, NLCD datasets needed for supplementary rasters.
+    * For the DEM data you will need to filter for 1/3 arc second DEM and download the txt file of products via https://apps.nationalmap.gov/downloader/ and save as `neddownload.txt` inside of `sampling/` for the DEM downloading to work. The one in the repo is for reference.
+    * For the NHD data once you have downloaded the `.zip` files, you will need to unzip them in the NHD folder. You can use the following bash command:
+
+```bash
+for f in *.zip; do
+    unzip "$f" && rm "$f"
+done
+```
 
 Then you will need to create a yaml configuration file (e.g. in `sampling/configs/`) to specify the file paths to the PRISM and supplementary data you have downloaded. An example `configs/sample_s2_s1.yaml` file with the paths to the PRISM NetCDF file, meshgrid, region shapefiles (e.g. Illinois CESER boundary) among other data needed by the sampling scripts:
 

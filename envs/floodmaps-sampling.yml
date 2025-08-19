@@ -22,4 +22,3 @@ dependencies:
     - tqdm
     - requests
     - geopy
-    - tensorflow

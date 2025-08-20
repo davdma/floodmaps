@@ -1,10 +1,11 @@
 # Sampling Flood Data
 ## Overview
 
-<p align="center">
-   <img width="550" alt="datasetmethod" src="https://github.com/user-attachments/assets/3334f7e4-37b7-45a5-bb75-d300f19cfcc9" />
-   <br><br>
-</p>
+<div align="center">
+<img width="550" alt="datasetmethod" src="https://github.com/user-attachments/assets/3334f7e4-37b7-45a5-bb75-d300f19cfcc9" />
+<p style="width: 60%; margin: 0 auto;"><em>Figure 1: Flow chart of flood imagery sampling pipeline.
+</em></p>
+</div>
 
 Discretizing the US Sentinel-2 and Sentinel-1 flood dataset:
 * One of the problems with aggregating a flood dataset is how to discretize it such that downloading and labeling can become systematic and efficient.
@@ -12,7 +13,7 @@ Discretizing the US Sentinel-2 and Sentinel-1 flood dataset:
 
 <p align="center" style="margin: 30px 0;">
    <img width="2442" height="925" alt="samplingprismcell" src="https://github.com/user-attachments/assets/e602e061-0e03-4ae9-9b04-f2ade3d6c66c" />
-   <em>PRISM mesh grid displayed over satellite imagery in QGIS.</em>
+   <em>Figure 2: PRISM mesh grid displayed over satellite imagery in QGIS.</em>
    <br><br>
 </p>
 
@@ -80,7 +81,7 @@ There are several sampling scripts:
 
 <p align="center" style="margin: 30px 0;">
 <img width="2552" height="1142" alt="samplingprismcell2" src="https://github.com/user-attachments/assets/a70a8aa6-2d81-426f-bbbc-dd35d33edc06" />
-<em>Example of a downloaded S2 event folder with its TCI image visualized.</em>
+<em>Figure 3: Example of a downloaded S2 event folder with its TCI image visualized.</em>
    <br><br>
 </p>
 

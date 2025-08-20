@@ -60,11 +60,11 @@ For our water pixel detection model, we tested multiple built-in architectures t
 
 We experimented with a discriminator head on top of original classifier to create a two part model. The discriminator would first take the input patch and determine whether the patch has water or not. If the discriminator detects water in the patch, it proceeds to run the patch through the UNet, otherwise it outputs a zero tensor. This two head model design allows us to skip unnecessary computation if the patch contains no water, and to also avoid poor predictions if the patch is cloudy.
 
-<p align="center">
-  <img src="https://github.com/davdma/floodmaps/assets/42689743/78d029d1-2f32-4991-b62f-c5d6d6ca0167" height="500">
-<p align="center">
-
-**Figure 6:** Prediction results on a large flood tile. Using our initial model on unlabelled data allows us to automate our ground truthing process.
+<div align="center">
+<img width="75%" alt="labelmapwtile" src="https://github.com/davdma/floodmaps/assets/42689743/78d029d1-2f32-4991-b62f-c5d6d6ca0167" />
+<p style="width: 60%; margin: 0 auto;"><em>Figure 6: Prediction results on a large flood tile. Using our initial model on unlabelled data allows us to automate our ground truthing process.
+</em></p>
+</div>
 
 With the initial tuned UNet and UNet++ models, we visualized their predictions on unseen flood tiles in QGIS with georeferencing. Overlaid on high resolution satellite images, we were able to identify patterns and see how the model performs in practice. In the example below, we see that the model is a very powerful predictor of open water, and has a strong ability to distinguish fine outlines of water bodies. We also see some limitations of our model: due to the 10m resolution of the input channels, water bodies that are <10m have a higher likelihood of going undetected. Another limitation of note is cloud cover. In practice a percentage of the input satellite images will be obscured by clouds, making it hard for the model to see the waterbodies, and in the example below the model performs the worst in areas obscured by cloud cover (top right corner of waterbody - these clouds are not visible in the high res overlaid Google satellite image). 
 

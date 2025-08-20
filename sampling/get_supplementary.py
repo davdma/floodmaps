@@ -26,7 +26,7 @@ def download_roads():
     # statefips.txt is a file that contains the FIPS codes for each state.
     # e.g. 17,ILLINOIS
     statefips = dict()
-    with open('statefips.txt', 'r') as file:
+    with open('setup/statefips.txt', 'r') as file:
         for line in file:
             digits, state = line.split(',')
             statefips[digits] = state.rstrip()
@@ -53,7 +53,7 @@ def download_dem():
     Accessed via 3DEP 1/3 arc-second DEM.
     
     Use https://apps.nationalmap.gov/downloader/ to filter for 1/3 arc-second (10m) current
-    DEM. Then download the search results into neddownload.txt."""
+    DEM. Then download the search results into setup/neddownload.txt."""
     # there are no duplicates in download links
     # make Elevation directory if it doesn't exist
     os.makedirs('Elevation', exist_ok=True)
@@ -67,7 +67,7 @@ def download_dem():
             current_products.add(match.group())
 
     all_products = []
-    with open("neddownload.txt", 'r') as file:
+    with open("setup/neddownload.txt", 'r') as file:
         for line in file:
             all_products.append(line.rstrip())
 
@@ -89,7 +89,7 @@ def download_nhd():
     
     # download all NHDPlus GDB datasets
     p = re.compile("NHDPLUS_H_\d{4}_HU4_GDB.zip")
-    with open('nhdfilenames.txt', 'r') as f:
+    with open('setup/nhdfilenames.txt', 'r') as f:
         for filename in p.findall(f.read()):
             download_url(f'https://prd-tnm.s3.amazonaws.com/StagedProducts/Hydrography/NHDPlusHR/Beta/GDB/{filename}', f'NHD/{filename}')
 

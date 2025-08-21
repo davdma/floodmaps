@@ -9,18 +9,37 @@ import argparse
 from random import Random
 import logging
 import pickle
+from typing import List, Optional, Tuple
+
+try:
+    import yaml
+except Exception:
+    yaml = None
 
 from utils.utils import TRAIN_LABELS, VAL_LABELS, TEST_LABELS, SRC_DIR, DATA_DIR, SAMPLES_DIR
 ### TO IMPLEMENT: SAMPLING FROM PREDICTED LABEL TILES ALSO INSTEAD OF HUMAN LABELS
 
-def random_crop(label_names, size, num_samples, rng, pre_sample_dir, sample_dir, label_dir, typ="train"):
+def _find_event_dir(img_dt: str, eid: str, sample_dirs: List[str]) -> Optional[Path]:
+    """Find the first dataset directory under sampling/ that contains the
+    eid directory.
+
+    Returns the event directory Path or None if not found.
+    """
+    for sd in sample_dirs:
+        event_dir = SAMPLES_DIR / sd / eid
+        if not event_dir.is_dir():
+            continue
+        return event_dir
+    return None
+
+def random_crop(label_paths, size, num_samples, rng, pre_sample_dir, sample_dirs, typ="train"):
     """Uniformly samples patches of dimension size x size across each dataset tile, and saves
     all patches in train, val, test sets into respective npy files.
 
     Parameters
     ----------
-    label_names : list[str]
-        List of file paths to manually ground-truthed tile labels.
+    label_paths : list[str]
+        List of label file paths relative to sampling/ to manually ground-truthed tile labels.
     size : int
         Size of the sampled patches.
     num_samples : int
@@ -29,35 +48,33 @@ def random_crop(label_names, size, num_samples, rng, pre_sample_dir, sample_dir,
         Random number generator.
     pre_sample_dir : Path
         Directory to save the sampled patches.
-    sample_dir : str
-        Directory containing raw S2 tiles for patch sampling.
-    label_dir : str
-        Directory containing raw S2 tile labels for patch sampling.
+    sample_dirs : list[str]
+        One or more dataset directories under sampling/ that contain the S2 tiles.
     typ : str
         Subset assigned to the saved patches: train, val, test.
     """
     logger = logging.getLogger('preprocessing')
     
     # 16 channels for 11 data + 1 label channel + 3 TCI + 1 NLCD
-    total_patches = num_samples * len(label_names)
+    total_patches = num_samples * len(label_paths)
     dataset = np.empty((total_patches, 16, size, size), dtype=np.float32)
 
     tiles = []
-    for label_file in label_names:
+    for label_rel in label_paths:
         p = re.compile('label_(\d{8})_(.+).tif')
-        m = p.search(label_file)
+        m = p.search(label_rel)
 
         if m:
             tile_date = m.group(1)
             eid = m.group(2)
         else:
-            raise ValueError(f'Label file {label_file} does not match expected format.')
+            raise ValueError(f'Label file {label_rel} does not match expected format.')
 
-        with rasterio.open(SAMPLES_DIR / label_dir / label_file) as src:
+        with rasterio.open(SAMPLES_DIR / label_rel) as src:
             label_raster = src.read([1, 2, 3])
             # if label has any values != 0 or 255 then print to log!
             if np.any((label_raster > 0) & (label_raster < 255)):
-                logger.debug(f'{label_file} values are not 0 or 255.')
+                logger.debug(f'{label_rel} values are not 0 or 255.')
                 
             label_binary = np.where(label_raster[0] != 0, 1, 0)
             label_binary = np.expand_dims(label_binary, axis = 0)
@@ -65,15 +82,20 @@ def random_crop(label_names, size, num_samples, rng, pre_sample_dir, sample_dir,
             HEIGHT = src.height
             WIDTH = src.width
 
-        tci_file = SAMPLES_DIR / sample_dir / eid / f'tci_{tile_date}_{eid}.tif'
-        rgb_file = SAMPLES_DIR / sample_dir / eid / f'rgb_{tile_date}_{eid}.tif'
-        b08_file = SAMPLES_DIR / sample_dir / eid / f'b08_{tile_date}_{eid}.tif'
-        ndwi_file = SAMPLES_DIR / sample_dir / eid / f'ndwi_{tile_date}_{eid}.tif'
-        dem_file = SAMPLES_DIR / sample_dir / eid / f'dem_{eid}.tif'
-        waterbody_file = SAMPLES_DIR / sample_dir / eid / f'waterbody_{eid}.tif'
-        roads_file = SAMPLES_DIR / sample_dir / eid / f'roads_{eid}.tif'
-        flowlines_file = SAMPLES_DIR / sample_dir / eid / f'flowlines_{eid}.tif'
-        nlcd_file = SAMPLES_DIR / sample_dir / eid / f'nlcd_{eid}.tif'
+        event_dir = _find_event_dir(tile_date, eid, sample_dirs)
+        if event_dir is None:
+            logger.info(f'No matching event assets found for label {label_rel}; skipping.')
+            continue
+
+        tci_file = event_dir / f'tci_{tile_date}_{eid}.tif'
+        rgb_file = event_dir / f'rgb_{tile_date}_{eid}.tif'
+        b08_file = event_dir / f'b08_{tile_date}_{eid}.tif'
+        ndwi_file = event_dir / f'ndwi_{tile_date}_{eid}.tif'
+        dem_file = event_dir / f'dem_{eid}.tif'
+        waterbody_file = event_dir / f'waterbody_{eid}.tif'
+        roads_file = event_dir / f'roads_{eid}.tif'
+        flowlines_file = event_dir / f'flowlines_{eid}.tif'
+        nlcd_file = event_dir / f'nlcd_{eid}.tif'
 
         with rasterio.open(tci_file) as src:
             tci_raster = src.read()
@@ -115,7 +137,7 @@ def random_crop(label_names, size, num_samples, rng, pre_sample_dir, sample_dir,
         except ValueError as e:
             # print all the shapes for debugging
             print(f'Shapes do not match!')
-            print(f'label file: {label_file}')
+            print(f'label file: {label_rel}')
             print(f'rgb_raster shape: {rgb_raster.shape}')
             print(f'b08_raster shape: {b08_raster.shape}')
             print(f'ndwi_raster shape: {ndwi_raster.shape}')
@@ -153,7 +175,7 @@ def random_crop(label_names, size, num_samples, rng, pre_sample_dir, sample_dir,
     output_file = pre_sample_dir / f'{typ}_patches.npy'
     np.save(output_file, dataset)
 
-def loadMaskedStack(img_dt, eid, sample_dir):
+def loadMaskedStack(img_dt, eid, sample_dirs: List[str]):
     """Load and mask the stack of non-binary channels.
 
     Parameters
@@ -162,20 +184,21 @@ def loadMaskedStack(img_dt, eid, sample_dir):
         Image date.
     eid : str
         Event id.
-    sample_dir : str
-        Directory containing S2 tiles for patch sampling.
+    sample_dirs : list[str]
+        Dataset directories containing S2 tiles for patch sampling.
 
     Returns
     -------
     masked_stack : ndarray
         Stack of channels with missing values masked out.
     """
-    sample_path = SAMPLES_DIR / sample_dir
-    # tci_file = sample_path / eid / f'tci_{img_dt}_{eid}.tif'
-    rgb_file = sample_path / eid / f'rgb_{img_dt}_{eid}.tif'
-    b08_file = sample_path / eid / f'b08_{img_dt}_{eid}.tif'
-    ndwi_file = sample_path / eid / f'ndwi_{img_dt}_{eid}.tif'
-    dem_file = sample_path / eid / f'dem_{eid}.tif'
+    event_dir = _find_event_dir(img_dt, eid, sample_dirs)
+    if event_dir is None:
+        raise FileNotFoundError(f"Could not find assets for event {eid} across provided sample_dirs: {sample_dirs}")
+    rgb_file = event_dir / f'rgb_{img_dt}_{eid}.tif'
+    b08_file = event_dir / f'b08_{img_dt}_{eid}.tif'
+    ndwi_file = event_dir / f'ndwi_{img_dt}_{eid}.tif'
+    dem_file = event_dir / f'dem_{eid}.tif'
 
     with rasterio.open(rgb_file) as src:
         rgb_raster = src.read().reshape((3, -1))
@@ -204,7 +227,7 @@ def loadMaskedStack(img_dt, eid, sample_dir):
 
     return masked_stack
 
-def trainMean(train_events, sample_dir):
+def trainMean(train_events, sample_dirs: List[str]):
     """Calculate mean and std of non-binary channels.
 
     Parameters
@@ -212,8 +235,8 @@ def trainMean(train_events, sample_dir):
     train_events : list[tuple[str, str]]
         List of training flood event folders where raw data tiles are stored.
         First element is the image date, second element is the event id.
-    sample_dir : str
-        Directory containing S2 tiles for patch sampling.
+    sample_dirs : list[str]
+        Dataset directories containing S2 tiles for patch sampling.
 
     Returns
     -------
@@ -225,7 +248,7 @@ def trainMean(train_events, sample_dir):
     total_sum = np.zeros(8, dtype=np.float64) # 8 non-binary channels for original s2 data
 
     for img_dt, eid in train_events:
-        masked_stack = loadMaskedStack(img_dt, eid, sample_dir)
+        masked_stack = loadMaskedStack(img_dt, eid, sample_dirs)
 
         # calculate mean and var across channels
         channel_sums = np.sum(masked_stack, axis=1)
@@ -238,7 +261,7 @@ def trainMean(train_events, sample_dir):
     # calculate final statistics
     return overall_channel_mean
 
-def trainStd(train_events, train_means, sample_dir):
+def trainStd(train_events, train_means, sample_dirs: List[str]):
     """Calculate std of non-binary channels.
 
     Parameters
@@ -248,8 +271,8 @@ def trainStd(train_events, train_means, sample_dir):
         First element is the image date, second element is the event id.
     train_means : ndarray
         Channel means.
-    sample_dir : str
-        Directory containing S2 tiles for patch sampling.
+    sample_dirs : list[str]
+        Dataset directories containing S2 tiles for patch sampling.
 
     Returns
     -------
@@ -261,7 +284,7 @@ def trainStd(train_events, train_means, sample_dir):
     variances = np.zeros(8, dtype=np.float64) # 8 non-binary channels for original s2 data
 
     for img_dt, eid in train_events:
-        masked_stack = loadMaskedStack(img_dt, eid, sample_dir)
+        masked_stack = loadMaskedStack(img_dt, eid, sample_dirs)
 
         # calculate var across channels
         deviations = masked_stack - np.array(train_means).reshape(-1, 1)
@@ -277,7 +300,7 @@ def trainStd(train_events, train_means, sample_dir):
     # calculate final std statistics
     return overall_channel_std
 
-def main(size, samples, seed, method='random', sample_dir='samples_200_5_4_35/', label_dir='labels/'):
+def main(size, samples, seed, method='random', sample_dir='samples_200_5_4_35/', label_dir='labels/', config: Optional[str] = None):
     """Preprocesses raw S2 tiles and corresponding labels into smaller patches. The data will be stored
     as separate npy files for train, val, and test sets, along with a mean_std.pkl file containing the
     mean and std of the training tiles.
@@ -292,9 +315,11 @@ def main(size, samples, seed, method='random', sample_dir='samples_200_5_4_35/',
     method : str
         Sampling method.
     sample_dir : str
-        Directory containing raw S2 tiles for patch sampling.
+        Directory containing raw S2 tiles for patch sampling. Ignored if config is provided.
     label_dir : str
-        Directory containing raw S2 tile labels for patch sampling.
+        Directory containing raw S2 tile labels for patch sampling. Ignored if config is provided.
+    config : str, optional
+        Path to YAML config file. If provided, overrides sample_dir and label_dir and hardcoded splits.
     """
     logger = logging.getLogger('preprocessing')
     logger.setLevel(logging.DEBUG)
@@ -309,14 +334,33 @@ def main(size, samples, seed, method='random', sample_dir='samples_200_5_4_35/',
     pre_sample_dir = DATA_DIR / 's2' / f'samples_{size}_{samples}'
     pre_sample_dir.mkdir(parents=True, exist_ok=True)
 
+    # Resolve splits and sample dirs
+    if config is not None:
+        if yaml is None:
+            raise ImportError("PyYAML is required to use --config. Please install with `pip install pyyaml`.")
+        with open(config, 'r') as f:
+            cfg = yaml.safe_load(f)
+        cfg_s2 = cfg.get('s2', {})
+        label_splits = cfg_s2.get('label_splits', {})
+        train_labels = label_splits.get('train', [])
+        val_labels = label_splits.get('val', [])
+        test_labels = label_splits.get('test', [])
+        sample_dirs_list = cfg_s2.get('sample_dirs', [sample_dir])
+    else:
+        # Backward-compatible: use hardcoded labels + single sample_dir/label_dir
+        train_labels = [str(Path(label_dir) / lf) for lf in TRAIN_LABELS]
+        val_labels = [str(Path(label_dir) / lf) for lf in VAL_LABELS]
+        test_labels = [str(Path(label_dir) / lf) for lf in TEST_LABELS]
+        sample_dirs_list = [sample_dir]
+
     # get event directories from the training labels for mean and std calculation
     p = re.compile('label_(\d{8})_(.+).tif')
-    train_events = [(p.search(label).group(1), p.search(label).group(2)) for label in TRAIN_LABELS]
+    train_events = [(p.search(label).group(1), p.search(label).group(2)) for label in train_labels]
 
     # calculate mean and std of train tiles
     logger.info('Calculating mean and std of training tiles...')
-    mean_cont = trainMean(train_events, sample_dir)
-    std_cont = trainStd(train_events, mean, sample_dir)
+    mean_cont = trainMean(train_events, sample_dirs_list)
+    std_cont = trainStd(train_events, mean_cont, sample_dirs_list)
     logger.info('Mean and std of training tiles calculated.')
 
     # set mean and std of binary channels at the end to 0 and 1
@@ -334,9 +378,9 @@ def main(size, samples, seed, method='random', sample_dir='samples_200_5_4_35/',
     
     if method == 'random':
         rng = Random(seed)
-        random_crop(TRAIN_LABELS, size, samples, rng, pre_sample_dir, sample_dir, label_dir, typ="train")
-        random_crop(VAL_LABELS, size, samples, rng, pre_sample_dir, sample_dir, label_dir, typ="val")
-        random_crop(TEST_LABELS, size, samples, rng, pre_sample_dir, sample_dir, label_dir, typ="test")
+        random_crop(train_labels, size, samples, rng, pre_sample_dir, sample_dirs_list, typ="train")
+        random_crop(val_labels, size, samples, rng, pre_sample_dir, sample_dirs_list, typ="val")
+        random_crop(test_labels, size, samples, rng, pre_sample_dir, sample_dirs_list, typ="test")
         logger.info('Random samples generated.')
 
     logger.debug('Preprocessing complete.')
@@ -349,6 +393,7 @@ if __name__ == '__main__':
     parser.add_argument('-m', '--method', dest='method', default='random', choices=['random'], help='sampling method (default: random)')
     parser.add_argument('--sdir', dest='sample_dir', default='samples_200_5_4_35', help='data directory in the sampling folder (default: samples_200_5_4_35)')
     parser.add_argument('--ldir', dest='label_dir', default='labels', help='label directory in the sampling folder (default: labels)')
+    parser.add_argument('--config', dest='config', default=None, help='YAML config file path defining splits and directories')
     
     args = parser.parse_args()
-    sys.exit(main(args.size, args.samples, args.seed, method=args.method, sample_dir=args.sample_dir, label_dir=args.label_dir))
+    sys.exit(main(args.size, args.samples, args.seed, method=args.method, sample_dir=args.sample_dir, label_dir=args.label_dir, config=args.config))

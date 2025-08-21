@@ -10,10 +10,16 @@ from random import Random
 import logging
 import pickle
 from sklearn.model_selection import train_test_split
+from typing import List, Optional, Tuple
+
+try:
+    import yaml
+except Exception:
+    yaml = None
 
 from utils.utils import enhanced_lee_filter, SRC_DIR, DATA_DIR, SAMPLES_DIR
 
-def random_crop(events, size, num_samples, rng, pre_sample_dir, sample_dir, cloud_threshold, filter='raw', typ="train"):
+def random_crop(events: List[Path], size, num_samples, rng, pre_sample_dir, cloud_threshold, filter='raw', typ="train"):
     """Uniformly samples patches of dimension size x size across each dataset tile. The
     patches are saved together with labels into one file for minibatching.
 
@@ -29,8 +35,6 @@ def random_crop(events, size, num_samples, rng, pre_sample_dir, sample_dir, clou
         Random number generator.
     pre_sample_dir : Path
         Directory to save the sampled patches.
-    sample_dir : str
-        Directory containing raw S1 tiles for patch sampling.
     cloud_threshold : float
         Maximum patch cloud percentage. Patches above this threshold are filtered out.
     filter : str
@@ -86,14 +90,13 @@ def random_crop(events, size, num_samples, rng, pre_sample_dir, sample_dir, clou
                 WIDTH = src.width
 
             # skip missing data w tci and sar combined
-            sample_path = SAMPLES_DIR / sample_dir
-            tci_file = sample_path / eid / f'tci_{img_dt}_{eid}.tif'
-            dem_file = sample_path / eid / f'dem_{eid}.tif'
-            waterbody_file = sample_path / eid / f'waterbody_{eid}.tif'
-            roads_file = sample_path / eid / f'roads_{eid}.tif'
-            flowlines_file = sample_path / eid / f'flowlines_{eid}.tif'
-            cloud_file = sample_path / eid / f'clouds_{img_dt}_{eid}.tif'
-            nlcd_file = sample_path / eid / f'nlcd_{eid}.tif'
+            tci_file = event / f'tci_{img_dt}_{eid}.tif'
+            dem_file = event / f'dem_{eid}.tif'
+            waterbody_file = event / f'waterbody_{eid}.tif'
+            roads_file = event / f'roads_{eid}.tif'
+            flowlines_file = event / f'flowlines_{eid}.tif'
+            cloud_file = event / f'clouds_{img_dt}_{eid}.tif'
+            nlcd_file = event / f'nlcd_{eid}.tif'
 
             with rasterio.open(tci_file) as src:
                 tci_raster = src.read()
@@ -184,15 +187,15 @@ def random_crop(events, size, num_samples, rng, pre_sample_dir, sample_dir, clou
 
     logger.info('Sampling complete.')
 
-def trainMean(train_events, sample_dir, filter="raw"):
+def trainMean(train_events: List[Path], filter="raw"):
     """Calculate mean and std of non-binary channels, filtering out cloud pixels and missing sar pixels.
 
     Parameters
     ----------
     train_events : list[Path]
         List of training flood event folders where raw data tiles are stored.
-    sample_dir : str
-        Directory containing raw S1 tiles for patch sampling.
+    train_events : list[Path]
+        Event directories across one or more datasets.
     filter : str
         Specifying filter='raw' does not apply any filters to the patches. Using filter='lee' applies Enhanced Lee Filter.
         See https://desktop.arcgis.com/en/arcmap/latest/manage-data/raster-and-images/speckle-function.htm.
@@ -236,9 +239,8 @@ def trainMean(train_events, sample_dir, filter="raw"):
             sar_vh_file = sar_vv_files[0][:-6] + 'vh.tif'
 
             # skip missing data w tci and sar combined
-            sample_path = SAMPLES_DIR / sample_dir
-            dem_file = sample_path / eid / f'dem_{eid}.tif'
-            cloud_file = sample_path / eid / f'clouds_{img_dt}_{eid}.tif'
+            dem_file = event / f'dem_{eid}.tif'
+            cloud_file = event / f'clouds_{img_dt}_{eid}.tif'
 
             with rasterio.open(sar_vv_file) as src:
                 vv_raster = src.read()
@@ -284,7 +286,7 @@ def trainMean(train_events, sample_dir, filter="raw"):
     # calculate final statistics
     return overall_channel_mean
 
-def trainStd(train_events, train_means, sample_dir, filter="raw"):
+def trainStd(train_events: List[Path], train_means, filter="raw"):
     """Calculate mean and std of non binary channels, filtering out cloud pixels and missing sar pixels.
 
     Parameters
@@ -293,8 +295,8 @@ def trainStd(train_events, train_means, sample_dir, filter="raw"):
         List of training flood event folders where raw data tiles are stored.
     train_means : ndarray
         Channel means.
-    sample_dir : str
-        Directory containing raw S1 tiles for patch sampling.
+    train_events : list[Path]
+        Event directories across one or more datasets.
     filter : str
         Specifying filter='raw' does not apply any filters to the patches. Using filter='lee' applies Enhanced Lee Filter.
         See https://desktop.arcgis.com/en/arcmap/latest/manage-data/raster-and-images/speckle-function.htm.
@@ -336,9 +338,8 @@ def trainStd(train_events, train_means, sample_dir, filter="raw"):
             sar_vh_file = sar_vv_files[0][:-6] + 'vh.tif'
 
             # skip missing data w tci and sar combined
-            sample_path = SAMPLES_DIR / sample_dir
-            dem_file = sample_path / eid / f'dem_{eid}.tif'
-            cloud_file = sample_path / eid / f'clouds_{img_dt}_{eid}.tif'
+            dem_file = event / f'dem_{eid}.tif'
+            cloud_file = event / f'clouds_{img_dt}_{eid}.tif'
 
             with rasterio.open(sar_vv_file) as src:
                 vv_raster = src.read()
@@ -389,7 +390,7 @@ def trainStd(train_events, train_means, sample_dir, filter="raw"):
     return overall_channel_std
 
 
-def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None, sample_dir='samples_200_6_4_10_sar/'):
+def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None, sample_dir='samples_200_6_4_10_sar/', config: Optional[str] = None):
     """Preprocesses raw S1 tiles and corresponding labels into smaller patches.
 
     Parameters
@@ -419,16 +420,50 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
     pre_sample_dir = DATA_DIR / 'sar' / f'samples_{size}_{samples}_{filter}'
     pre_sample_dir.mkdir(parents=True, exist_ok=True)
 
-    # randomly select samples to be in train and test set
-    sample_path = SAMPLES_DIR / sample_dir
-    all_events = list(sample_path.glob('[0-9]*'))
-    train_events, val_test_events = train_test_split(all_events, test_size=0.2, random_state=seed - 20)
-    val_events, test_events = train_test_split(val_test_events, test_size=0.5, random_state=seed + 1222)
+    # Resolve input directories and split ratios
+    if config is not None:
+        if yaml is None:
+            raise ImportError("PyYAML is required to use --config. Please install with `pip install pyyaml`.")
+        with open(config, 'r') as f:
+            cfg = yaml.safe_load(f)
+        cfg_s1 = cfg.get('s1', {})
+        sample_dirs_list = cfg_s1.get('sample_dirs', [sample_dir])
+        split_cfg = cfg_s1.get('split', {})
+        split_seed = split_cfg.get('seed', seed)
+        val_ratio = split_cfg.get('val_ratio', 0.1)
+        test_ratio = split_cfg.get('test_ratio', 0.1)
+    else:
+        sample_dirs_list = [sample_dir]
+        split_seed = seed
+        val_ratio = 0.1
+        test_ratio = 0.1
+
+    # randomly select samples to be in train and test set from multiple directories
+    all_events: List[Path] = []
+    for sd in sample_dirs_list:
+        sample_path = SAMPLES_DIR / sd
+        if sample_path.is_dir():
+            all_events.extend([p for p in sample_path.glob('[0-9]*') if p.is_dir()])
+
+    if len(all_events) == 0:
+        logger.info('No events found in provided sample directories. Exiting.')
+        return 0
+
+    # shuffle and split deterministically
+    # First, hold out (val+test)
+    holdout_ratio = val_ratio + test_ratio
+    if holdout_ratio <= 0 or holdout_ratio >= 1:
+        raise ValueError('Sum of val_ratio and test_ratio must be in (0, 1).')
+
+    train_events, val_test_events = train_test_split(all_events, test_size=holdout_ratio, random_state=split_seed)
+    # Split val and test according to proportions within the holdout
+    test_prop_within_holdout = test_ratio / holdout_ratio
+    val_events, test_events = train_test_split(val_test_events, test_size=test_prop_within_holdout, random_state=split_seed + 1222)
 
     # calculate mean and std of train tiles non-binary channels
     logger.info('Calculating mean and std of training tiles...')
-    mean_cont = trainMean(train_events, sample_dir, filter=filter)
-    std_cont = trainStd(train_events, mean, sample_dir, filter=filter)
+    mean_cont = trainMean(train_events, filter=filter)
+    std_cont = trainStd(train_events, mean_cont, filter=filter)
     logger.info('Mean and std of training tiles calculated.')
 
     # set mean and std of binary channels at the end to 0 and 1
@@ -446,9 +481,9 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
 
     if method == 'random':
         rng = Random(seed)
-        random_crop(train_events, size, samples, rng, pre_sample_dir, sample_dir, cloud_threshold, filter=filter, typ="train")
-        random_crop(val_events, size, samples, rng, pre_sample_dir, sample_dir, cloud_threshold, filter=filter, typ="val")
-        random_crop(test_events, size, samples, rng, pre_sample_dir, sample_dir, cloud_threshold, filter=filter, typ="test")
+        random_crop(train_events, size, samples, rng, pre_sample_dir, cloud_threshold, filter=filter, typ="train")
+        random_crop(val_events, size, samples, rng, pre_sample_dir, cloud_threshold, filter=filter, typ="val")
+        random_crop(test_events, size, samples, rng, pre_sample_dir, cloud_threshold, filter=filter, typ="test")
         logger.info('Random samples generated.')
 
     logger.debug('Preprocessing complete.')
@@ -463,6 +498,7 @@ if __name__ == '__main__':
     parser.add_argument('--filter', default='raw', choices=['lee', 'raw'],
                         help=f"filters: enhanced lee, raw (default: raw)")
     parser.add_argument('--sdir', dest='sample_dir', default='samples_200_6_4_10_sar/', help='data directory in the sampling folder (default: samples_200_6_4_10_sar/)')
+    parser.add_argument('--config', dest='config', default=None, help='YAML config file path defining sample directories and split ratios')
 
     args = parser.parse_args()
-    sys.exit(main(args.size, args.samples, args.seed, method=args.method, cloud_threshold=args.cloud_threshold, filter=args.filter, sample_dir=args.sample_dir))
+    sys.exit(main(args.size, args.samples, args.seed, method=args.method, cloud_threshold=args.cloud_threshold, filter=args.filter, sample_dir=args.sample_dir, config=args.config))

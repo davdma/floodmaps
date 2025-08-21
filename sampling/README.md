@@ -42,7 +42,10 @@ The method for data collection is as follows:
 * Waterbody mask
 * NLCD layer
 
-## Setup
+## Setup: From LCRC
+If working on LCRC as an argonne collaborator, you can skip downloading all the data files. Simply link to my data file paths in your sampling configs file at `/lcrc/project/hydrosm/dma/sampling` - you just need to append the absolute file path to my directory to the current paths.
+
+## Setup: From Scratch
 To use the data download scripts and setup the `sampling/` directory in the cloned repo, first download the PRISM precipitation data file and other necessary data files for generating the layers in the sampled dataset. This can be done by running the following python scripts inside your directory.
 
 Scripts for downloading PRISM and supplementary datasets:

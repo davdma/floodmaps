@@ -91,17 +91,15 @@ def random_crop(events, size, num_samples, rng, pre_sample_dir, sample_dir, clou
             dem_file = sample_path / eid / f'dem_{eid}.tif'
             waterbody_file = sample_path / eid / f'waterbody_{eid}.tif'
             roads_file = sample_path / eid / f'roads_{eid}.tif'
+            flowlines_file = sample_path / eid / f'flowlines_{eid}.tif'
             cloud_file = sample_path / eid / f'clouds_{img_dt}_{eid}.tif'
+            nlcd_file = sample_path / eid / f'nlcd_{eid}.tif'
 
             with rasterio.open(tci_file) as src:
                 tci_raster = src.read()
 
             # tci floats
             tci_floats = (tci_raster / 255).astype(np.float32)
-
-            # missing mask
-            missing_raster = np.any(tci_raster == 0, axis = 0).astype(np.float32)
-            missing_raster = np.expand_dims(missing_raster, axis = 0)
 
             with rasterio.open(sar_vv_file) as src:
                 vv_raster = src.read()
@@ -125,47 +123,60 @@ def random_crop(events, size, num_samples, rng, pre_sample_dir, sample_dir, clou
 
             with rasterio.open(roads_file) as src:
                 roads_raster = src.read()
+            
+            with rasterio.open(flowlines_file) as src:
+                flowlines_raster = src.read()
+            
+            with rasterio.open(nlcd_file) as src:
+                nlcd_raster = src.read()
 
             with rasterio.open(cloud_file) as src:
                 cloud_raster = src.read()
 
             stacked_raster = np.vstack((vv_raster, vh_raster, dem_raster,
                                       slope_y_raster, slope_x_raster,
-                                      waterbody_raster, roads_raster, tci_floats, label_binary,
-                                      missing_raster, cloud_raster), dtype=np.float32)
+                                      waterbody_raster, roads_raster, flowlines_raster, 
+                                      label_binary, tci_floats, nlcd_raster), dtype=np.float32)
 
-            tiles.append(stacked_raster)
+            # missing mask and cloud mask
+            missing_raster = np.any(tci_raster == 0, axis = 0).astype(np.uint8)
+            missing_raster = np.expand_dims(missing_raster, axis = 0)
+            missing_clouds_raster = np.vstack((missing_raster, cloud_raster), dtype=np.uint8)
+
+            tiles.append((stacked_raster, missing_clouds_raster))
     logger.info('Tiles loaded.')
 
     # loop over all events to generate samples for each epoch
     logger.info('Sampling random patches...')
-    # want to store 7 channels + label + tci
     total_patches = num_samples * len(tiles)
-    dataset = np.empty((total_patches, 11, size, size), dtype=np.float32)
+    dataset = np.empty((total_patches, 13, size, size), dtype=np.float32)
 
     # sample given number of patches per tile
     for i, tile in enumerate(tiles):
+        tile_data, tile_mask = tile
         patches_sampled = 0
-        _, HEIGHT, WIDTH = tile.shape
+        _, HEIGHT, WIDTH = tile_data.shape
 
         while patches_sampled < num_samples:
             x = int(rng.uniform(0, HEIGHT - size))
             y = int(rng.uniform(0, WIDTH - size))
 
-            patch = tile[:, x : x + size, y : y + size]
-            # if contains missing values, toss out and resample
-            if np.any(patch[11] == 1):
+            patch = tile_data[:, x : x + size, y : y + size]
+            # if tci contains missing values, toss out and resample
+            missing_patch = tile_mask[0, x : x + size, y : y + size]
+            if np.any(missing_patch == 1):
                 continue
 
             # filter out high cloud percentage patches
-            if (patch[12].sum() / patch[12].size) >= cloud_threshold:
+            cloud_patch = tile_mask[1, x : x + size, y : y + size]
+            if (cloud_patch.sum() / cloud_patch.size) >= cloud_threshold:
                 continue
 
             # filter out missing vv or vh tiles
             if np.any(patch[0] == -9999) or np.any(patch[1] == -9999):
                 continue
 
-            dataset[i * num_samples + patches_sampled] = patch[:11]
+            dataset[i * num_samples + patches_sampled] = patch
             patches_sampled += 1
 
     output_file = pre_sample_dir / f'{typ}_patches.npy'
@@ -174,7 +185,7 @@ def random_crop(events, size, num_samples, rng, pre_sample_dir, sample_dir, clou
     logger.info('Sampling complete.')
 
 def trainMean(train_events, sample_dir, filter="raw"):
-    """Calculate mean and std of channels, filtering out cloud pixels and missing sar pixels.
+    """Calculate mean and std of non-binary channels, filtering out cloud pixels and missing sar pixels.
 
     Parameters
     ----------
@@ -196,7 +207,7 @@ def trainMean(train_events, sample_dir, filter="raw"):
     # calculate mean each event tile
     # since we have n > 500 this is good approximation of pop mean
     count = 0
-    means = np.zeros(7)
+    means = np.zeros(5)
 
     p1 = re.compile('\d{8}_\d+_\d+')
     p2 = re.compile('pred_(\d{8})_.+.tif')
@@ -227,8 +238,6 @@ def trainMean(train_events, sample_dir, filter="raw"):
             # skip missing data w tci and sar combined
             sample_path = SAMPLES_DIR / sample_dir
             dem_file = sample_path / eid / f'dem_{eid}.tif'
-            waterbody_file = sample_path / eid / f'waterbody_{eid}.tif'
-            roads_file = sample_path / eid / f'roads_{eid}.tif'
             cloud_file = sample_path / eid / f'clouds_{img_dt}_{eid}.tif'
 
             with rasterio.open(sar_vv_file) as src:
@@ -255,19 +264,12 @@ def trainMean(train_events, sample_dir, filter="raw"):
             slope_y_raster = slope_y_raster.reshape((1, -1))
             slope_x_raster = slope_x_raster.reshape((1, -1))
 
-            with rasterio.open(waterbody_file) as src:
-                waterbody_raster = src.read().reshape((1, -1))
-
-            with rasterio.open(roads_file) as src:
-                roads_raster = src.read().reshape((1, -1))
-
             with rasterio.open(cloud_file) as src:
                 cloud_raster = src.read().reshape((1, -1))
 
             mask = (vv_raster[0] != -9999) & (vh_raster[0] != -9999) & (cloud_raster[0] != 1)
 
-            stack = np.vstack((vv_raster, vh_raster, dem_raster, slope_y_raster,
-                               slope_x_raster, waterbody_raster, roads_raster), dtype=np.float32)
+            stack = np.vstack((vv_raster, vh_raster, dem_raster, slope_y_raster, slope_x_raster), dtype=np.float32)
 
             masked_stack = stack[:, mask]
 
@@ -283,7 +285,7 @@ def trainMean(train_events, sample_dir, filter="raw"):
     return overall_channel_mean
 
 def trainStd(train_events, train_means, sample_dir, filter="raw"):
-    """Calculate mean and std of channels, filtering out cloud pixels and missing sar pixels.
+    """Calculate mean and std of non binary channels, filtering out cloud pixels and missing sar pixels.
 
     Parameters
     ----------
@@ -305,7 +307,7 @@ def trainStd(train_events, train_means, sample_dir, filter="raw"):
     logger = logging.getLogger('preprocessing')
 
     count = 0
-    variances = np.zeros(7)
+    variances = np.zeros(5)
 
     p1 = re.compile('\d{8}_\d+_\d+')
     p2 = re.compile('pred_(\d{8})_.+.tif')
@@ -336,8 +338,6 @@ def trainStd(train_events, train_means, sample_dir, filter="raw"):
             # skip missing data w tci and sar combined
             sample_path = SAMPLES_DIR / sample_dir
             dem_file = sample_path / eid / f'dem_{eid}.tif'
-            waterbody_file = sample_path / eid / f'waterbody_{eid}.tif'
-            roads_file = sample_path / eid / f'roads_{eid}.tif'
             cloud_file = sample_path / eid / f'clouds_{img_dt}_{eid}.tif'
 
             with rasterio.open(sar_vv_file) as src:
@@ -364,19 +364,12 @@ def trainStd(train_events, train_means, sample_dir, filter="raw"):
             slope_y_raster = slope_y_raster.reshape((1, -1))
             slope_x_raster = slope_x_raster.reshape((1, -1))
 
-            with rasterio.open(waterbody_file) as src:
-                waterbody_raster = src.read().reshape((1, -1))
-
-            with rasterio.open(roads_file) as src:
-                roads_raster = src.read().reshape((1, -1))
-
             with rasterio.open(cloud_file) as src:
                 cloud_raster = src.read().reshape((1, -1))
 
             mask = (vv_raster[0] != -9999) & (vh_raster[0] != -9999) & (cloud_raster[0] != 1)
 
-            stack = np.vstack((vv_raster, vh_raster, dem_raster, slope_y_raster,
-                               slope_x_raster, waterbody_raster, roads_raster), dtype=np.float32)
+            stack = np.vstack((vv_raster, vh_raster, dem_raster, slope_y_raster, slope_x_raster), dtype=np.float32)
 
             masked_stack = stack[:, mask]
 
@@ -432,16 +425,18 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
     train_events, val_test_events = train_test_split(all_events, test_size=0.2, random_state=seed - 20)
     val_events, test_events = train_test_split(val_test_events, test_size=0.5, random_state=seed + 1222)
 
-    # calculate mean and std of train tiles
+    # calculate mean and std of train tiles non-binary channels
     logger.info('Calculating mean and std of training tiles...')
-    mean = trainMean(train_events, sample_dir, filter=filter)
-    std = trainStd(train_events, mean, sample_dir, filter=filter)
+    mean_cont = trainMean(train_events, sample_dir, filter=filter)
+    std_cont = trainStd(train_events, mean, sample_dir, filter=filter)
     logger.info('Mean and std of training tiles calculated.')
 
     # set mean and std of binary channels at the end to 0 and 1
-    bchannels = 3 # if flowlines included
-    mean[-bchannels:] = 0
-    std[-bchannels:] = 1
+    bchannels = 3 # waterbody, roads, flowlines
+    mean_bin = np.zeros(bchannels)
+    std_bin = np.ones(bchannels)
+    mean = np.concatenate([mean_cont, mean_bin])
+    std = np.concatenate([std_cont, std_bin])
 
     # also store training mean std statistics in file
     stats_file = pre_sample_dir / f'mean_std_{size}_{samples}_{filter}.pkl'

@@ -154,7 +154,7 @@ def random_crop(label_names, size, num_samples, rng, pre_sample_dir, sample_dir,
     np.save(output_file, dataset)
 
 def loadMaskedStack(img_dt, eid, sample_dir):
-    """Load and mask the stack of channels.
+    """Load and mask the stack of non-binary channels.
 
     Parameters
     ----------
@@ -176,14 +176,7 @@ def loadMaskedStack(img_dt, eid, sample_dir):
     b08_file = sample_path / eid / f'b08_{img_dt}_{eid}.tif'
     ndwi_file = sample_path / eid / f'ndwi_{img_dt}_{eid}.tif'
     dem_file = sample_path / eid / f'dem_{eid}.tif'
-    waterbody_file = sample_path / eid / f'waterbody_{eid}.tif'
-    roads_file = sample_path / eid / f'roads_{eid}.tif'
-    flowlines_file = sample_path / eid / f'flowlines_{eid}.tif'
 
-    # with rasterio.open(tci_file) as src:
-    #     tci_raster = src.read().reshape((3, -1))
-    #     tci_floats = (tci_raster / 255).astype(np.float32) # first scale rgb to 0-1 then normalize
-    
     with rasterio.open(rgb_file) as src:
         rgb_raster = src.read().reshape((3, -1))
     
@@ -203,29 +196,16 @@ def loadMaskedStack(img_dt, eid, sample_dir):
     slope_y_raster = slope_y_raster.reshape((1, -1))
     slope_x_raster = slope_x_raster.reshape((1, -1))
 
-    with rasterio.open(waterbody_file) as src:
-        waterbody_raster = src.read().reshape((1, -1))
-
-    with rasterio.open(roads_file) as src:
-        roads_raster = src.read().reshape((1, -1))
-
-    with rasterio.open(flowlines_file) as src:
-        flowlines_raster = src.read().reshape((1, -1))
-
-    # with rasterio.open(cloud_file) as src:
-    #     cloud_raster = src.read().reshape((1, -1))
-
     mask = (rgb_raster[0] != 0) & (ndwi_raster[0] != -999999)
 
-    stack = np.vstack((rgb_raster, b08_raster, ndwi_raster, dem_raster, slope_y_raster,
-                        slope_x_raster, waterbody_raster, roads_raster, flowlines_raster), dtype=np.float32)
+    stack = np.vstack((rgb_raster, b08_raster, ndwi_raster, dem_raster, slope_y_raster, slope_x_raster), dtype=np.float32)
 
     masked_stack = stack[:, mask]
 
     return masked_stack
 
 def trainMean(train_events, sample_dir):
-    """Calculate mean and std of channels.
+    """Calculate mean and std of non-binary channels.
 
     Parameters
     ----------
@@ -242,7 +222,7 @@ def trainMean(train_events, sample_dir):
     """
     logger = logging.getLogger('preprocessing')
     count = 0
-    total_sum = np.zeros(11, dtype=np.float64) # 11 channels for original s2 data
+    total_sum = np.zeros(8, dtype=np.float64) # 8 non-binary channels for original s2 data
 
     for img_dt, eid in train_events:
         masked_stack = loadMaskedStack(img_dt, eid, sample_dir)
@@ -259,7 +239,7 @@ def trainMean(train_events, sample_dir):
     return overall_channel_mean
 
 def trainStd(train_events, train_means, sample_dir):
-    """Calculate std of channels.
+    """Calculate std of non-binary channels.
 
     Parameters
     ----------
@@ -278,7 +258,7 @@ def trainStd(train_events, train_means, sample_dir):
     """
     logger = logging.getLogger('preprocessing')
     count = 0
-    variances = np.zeros(11, dtype=np.float64) # 11 channels for original s2 data
+    variances = np.zeros(8, dtype=np.float64) # 8 non-binary channels for original s2 data
 
     for img_dt, eid in train_events:
         masked_stack = loadMaskedStack(img_dt, eid, sample_dir)
@@ -335,14 +315,16 @@ def main(size, samples, seed, method='random', sample_dir='samples_200_5_4_35/',
 
     # calculate mean and std of train tiles
     logger.info('Calculating mean and std of training tiles...')
-    mean = trainMean(train_events, sample_dir)
-    std = trainStd(train_events, mean, sample_dir)
+    mean_cont = trainMean(train_events, sample_dir)
+    std_cont = trainStd(train_events, mean, sample_dir)
     logger.info('Mean and std of training tiles calculated.')
 
     # set mean and std of binary channels at the end to 0 and 1
-    bchannels = 3
-    mean[-bchannels:] = 0
-    std[-bchannels:] = 1
+    bchannels = 3 # waterbody, roads, flowlines
+    mean_bin = np.zeros(bchannels)
+    std_bin = np.ones(bchannels)
+    mean = np.concatenate([mean_cont, mean_bin])
+    std = np.concatenate([std_cont, std_bin])
 
     # also store training mean std statistics in file
     stats_file = pre_sample_dir / f'mean_std_{size}_{samples}.pkl'

@@ -389,8 +389,28 @@ def trainStd(train_events: List[Path], train_means, filter="raw"):
     # calculate final statistics
     return overall_channel_std
 
+def build_label_index(label_dirs: list[str]) -> Dict[Tuple[str, str], Path]:
+    """Build a dictionary mapping (img_dt, eid) to the label file path."""
+    idx: Dict[Tuple[str, str], Path] = {}
+    p = re.compile(r'label_(\d{8})_(\d{8}_\d+_\d+)\.tif$')
+    for ld in label_dirs or []:
+        base = SAMPLES_DIR / ld
+        if not base.is_dir():
+            continue
+        for fp in base.glob('label_*.tif'):
+            m = p.search(fp.name)
+            if not m:
+                continue
+            img_dt, eid = m.group(1), m.group(2)
+            idx.setdefault((img_dt, eid), fp)  # keep first occurrence
+    return idx
 
-def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None, sample_dir='samples_200_6_4_10_sar/', config: Optional[str] = None):
+def get_manual_label_path(label_idx: Dict[Tuple[str, str], Path],
+                          img_dt: str, eid: str) -> Optional[Path]:
+    """Get the label file path for a given (img_dt, eid) pair."""
+    return label_idx.get((img_dt, eid))
+
+def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None, sample_dir='samples_200_6_4_10_sar/', label_dir='labels/', config: Optional[str] = None):
     """Preprocesses raw S1 tiles and corresponding labels into smaller patches.
 
     Parameters
@@ -428,17 +448,22 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
             cfg = yaml.safe_load(f)
         cfg_s1 = cfg.get('s1', {})
         sample_dirs_list = cfg_s1.get('sample_dirs', [sample_dir])
+        label_dirs_list = cfg_s1.get('label_dirs', [label_dir]) # manual labels prioritized over machine labels
         split_cfg = cfg_s1.get('split', {})
         split_seed = split_cfg.get('seed', seed)
         val_ratio = split_cfg.get('val_ratio', 0.1)
         test_ratio = split_cfg.get('test_ratio', 0.1)
     else:
         sample_dirs_list = [sample_dir]
+        label_dirs_list = [label_dir]
         split_seed = seed
         val_ratio = 0.1
         test_ratio = 0.1
 
-    # randomly select samples to be in train and test set from multiple directories
+    # Build label index
+    label_idx = build_label_index(label_dirs_list)
+
+    # randomly select events to be in train, val, test set from multiple directories
     # Deduplicate by eid, keeping the first directory where the event has required SAR assets
     selected_events: List[Path] = []
     seen_eids = set()
@@ -515,7 +540,8 @@ if __name__ == '__main__':
     parser.add_argument('--filter', default='raw', choices=['lee', 'raw'],
                         help=f"filters: enhanced lee, raw (default: raw)")
     parser.add_argument('--sdir', dest='sample_dir', default='samples_200_6_4_10_sar/', help='data directory in the sampling folder (default: samples_200_6_4_10_sar/)')
+    parser.add_argument('--ldir', dest='label_dir', default='labels/', help='data directory in the label folder (default: labels/)')
     parser.add_argument('--config', dest='config', default=None, help='YAML config file path defining sample directories and split ratios')
 
     args = parser.parse_args()
-    sys.exit(main(args.size, args.samples, args.seed, method=args.method, cloud_threshold=args.cloud_threshold, filter=args.filter, sample_dir=args.sample_dir, config=args.config))
+    sys.exit(main(args.size, args.samples, args.seed, method=args.method, cloud_threshold=args.cloud_threshold, filter=args.filter, sample_dir=args.sample_dir, label_dir=args.label_dir, config=args.config))

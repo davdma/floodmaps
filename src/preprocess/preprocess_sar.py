@@ -439,11 +439,28 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
         test_ratio = 0.1
 
     # randomly select samples to be in train and test set from multiple directories
-    all_events: List[Path] = []
+    # Deduplicate by eid, keeping the first directory where the event has required SAR assets
+    selected_events: List[Path] = []
+    seen_eids = set()
+    p_eid = re.compile('\n?\d{8}_\d+_\d+$')
     for sd in sample_dirs_list:
         sample_path = SAMPLES_DIR / sd
-        if sample_path.is_dir():
-            all_events.extend([p for p in sample_path.glob('[0-9]*') if p.is_dir()])
+        if not sample_path.is_dir():
+            continue
+        for event_dir in sample_path.glob('[0-9]*'):
+            if not event_dir.is_dir():
+                continue
+            eid = event_dir.name
+            if eid in seen_eids:
+                continue
+            # qualify: must have at least one prediction and at least one sar vv tile
+            has_pred = any(event_dir.glob('pred_*.tif'))
+            has_sar_vv = any(event_dir.glob('sar_*_vv.tif'))
+            if has_pred and has_sar_vv:
+                selected_events.append(event_dir)
+                seen_eids.add(eid)
+
+    all_events: List[Path] = selected_events
 
     if len(all_events) == 0:
         logger.info('No events found in provided sample directories. Exiting.')

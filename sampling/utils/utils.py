@@ -556,7 +556,7 @@ def get_manual_events(prism_data: PRISMData, history: set, manual_file: str, log
         event_date_str = event_date.strftime("%Y%m%d")
 
         # we allow time to be negative here!
-        time = date2num(event_date, units=prism_data.time_info[0], calendar=prism_data.time_info[1])
+        time = int(date2num(event_date, units=prism_data.time_info[0], calendar=prism_data.time_info[1]))
 
         # for manual events we allow events before PRISM start date, will just
         # use a negative time index if before prism start date (relative to prism start date)
@@ -646,7 +646,7 @@ def get_extreme_events(prism_data: PRISMData, history, threshold=300, mask=None,
         event_precip.append(prism_data.get_precip(time, y, x))
         bbox.append(prism_data.get_bounding_box(x, y))
         eid.append(f'{event_date_str}_{y}_{x}')
-        indices.append((time, y, x)) # indices for efficient tracking of completion
+        indices.append((int(time), int(y), int(x))) # indices for efficient tracking of completion
         crs_list.append(None)
         count += 1
 

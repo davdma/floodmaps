@@ -980,7 +980,7 @@ def pipeline_S1(stac_provider, dir_path, save_as, dst_crs, item, bbox):
     with rasterio.open(dir_path + save_as + '_vh_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vh_cmap.shape[-2], width=img_vh_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vh, nodata=None) as dst:
         dst.write(img_vh_cmap)
 
-def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, within_hours, event_date, event_precip, prism_bbox, eid, dir_path):
+def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, within_hours, event_date, event_precip, prism_bbox, eid, dir_path, manual_crs=None):
     """Samples S2 and S1 coincident imagery for a high precipitation event based on parameters and generates accompanying rasters.
 
     Note to developers: the script simplifies normalization onto a consistent grid by finding any common CRS shared by S2 and S1 products.
@@ -1009,6 +1009,14 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
         Bounding box of PRISM data in PRISM CRS.
     eid : str
         Event id.
+    dir_path : str
+        Path to sampling folder of events.
+    manual_crs : str, optional
+        Manual CRS specification for event processing. If provided, this CRS will be used
+        instead of automatically selecting (alphabetically) from available products. The CRS
+        determines the resulting shape of the generated rasters, so specifying the CRS prevents
+        any shape ambiguity. This is especially important for downloading events for previously
+        labeled products.
 
     Returns
     -------
@@ -1076,8 +1084,8 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
         logger.debug(f'No s2 images post event date after filtering...')
         return False
 
-    # choose first CRS in alphabetical order for rasters
-    main_crs = s2_by_date_crs.get_all_crs()[0]
+    # either use specified CRS or choose first CRS in alphabetical order for rasters
+    main_crs = s2_by_date_crs.get_all_crs()[0] if manual_crs is None else manual_crs
     logger.debug(f'Using CRS for raster generation: {main_crs}')
 
     # filter out s1 cloudy/missing tiles and group items by dates in dictionary
@@ -1333,7 +1341,7 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
         rootLogger.info(f"Searching through {num_candidates} candidate indices/events...")
         # get stac provider
         stac_provider = get_stac_provider(source, logger=logger)
-        for event_date, event_precip, prism_bbox, eid, indices in events:
+        for event_date, event_precip, prism_bbox, eid, indices, crs in events:
             if Path(dir_path + eid + '/').is_dir():
                 if event_completed(dir_path + eid + '/', regex_patterns, pattern_dict, logger=rootLogger):
                     rootLogger.debug(f'Event {eid} index {indices} has already been processed before. Moving on to the next event...')
@@ -1348,7 +1356,7 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
                 try:
                     if event_sample(stac_provider, days_before, days_after, 
                                     maxcoverpercentage, within_hours, event_date, event_precip, 
-                                    prism_bbox, eid, dir_path):
+                                    prism_bbox, eid, dir_path, manual_crs=crs):
                         count += 1
                     history.add(indices)
                     break

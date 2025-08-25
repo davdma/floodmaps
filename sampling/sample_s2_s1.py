@@ -1314,7 +1314,9 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
         f"  Max events to sample: {maxevents}\n"
         f"  S1 and S2 coincidence must be within # hours: {within_hours}\n"
         f"  Region: {region}\n"
-        f"  Manual indices: {manual}"
+        f"  Config file: {config_file}\n"
+        f"  Manual indices: {manual}\n"
+        f"  Source: {source}\n"
     )
 
     # history set of tuples

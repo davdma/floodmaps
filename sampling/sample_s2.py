@@ -951,7 +951,7 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, eve
         logger.debug(f'No s2 images left after filtering...')
         return False
     elif not has_date_after_PRISM(s2_by_date_crs.get_dates(), event_date):
-        logger.debug(f'No s2 images post event date after filtering...')
+        logger.debug(f'No s2 images post event date {event_date} after filtering...')
         return False
     
     # either use specified CRS or choose first CRS in alphabetical order for rasters
@@ -1132,7 +1132,9 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
         f"  Max cloud/nodata cover percentage: {maxcoverpercentage}\n"
         f"  Max events to sample: {maxevents}\n"
         f"  Region: {region}\n"
-        f"  Manual indices: {manual}"
+        f"  Config file: {config_file}\n"
+        f"  Manual indices: {manual}\n"
+        f"  Source: {source}\n"
     )
 
     # history set of tuples

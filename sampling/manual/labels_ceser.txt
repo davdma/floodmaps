@@ -1,5 +1,6 @@
 ### Labeled event data for Illinois CESER region (CRS ensures consistent shapes)
 # Note some require sampling with AWS source and are not found on MPC!
+# Recommend sampling args before=7, after=4, maxcover=10, source=aws
 2019-04-08, 204, 815, EPSG:32615
 2018-02-25, 206, 863, EPSG:32616
 2022-08-08, 183, 852, EPSG:32616

@@ -1,4 +1,5 @@
 ### Hand picked flood tiles in Illinois CESER region by Shreya Pandit for manual sampling
+# Recommend sampling args before=7, after=4, maxcover=10, source=aws
 # Martin Park, Loves Park IL 2019-10-8 (within 32-36hrs)
 2019-10-08, 182, 862
 2019-10-08, 183, 862

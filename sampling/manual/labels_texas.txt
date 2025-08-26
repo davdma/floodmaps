@@ -1,4 +1,5 @@
-# Labeled event data for Texas and Florida regions (CRS ensures consistent shapes)
+### Labeled event data for Texas and Florida regions (CRS ensures consistent shapes)
+# Recommend sampling args before=5, after=4, maxcover=35, within=24
 2016-03-11, 452, 845, EPSG:32616
 2016-03-11, 452, 846, EPSG:32616
 2017-08-28, 463, 695, EPSG:32615

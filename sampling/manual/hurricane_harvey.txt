@@ -1,0 +1,26 @@
+# For Hurricane Harvey look through NOAA high flood imagery (I used Woolpert) to identify good areas
+# This is not a comprehensive list, can add to it
+# Recommended to use arg after=8 to capture the events
+# Note: Not all of these events end up sampled, with bef=5, aft=8, cover=25 we get only 4 successful events.
+
+# Suburban floods near Addicks Reservoir
+# See https://www.npr.org/2017/11/09/563016223/exploring-why-hurricane-harvey-caused-houstons-worst-fooding
+# Soonest available S2 is 09-04!
+2017-08-30, 481, 705
+2017-08-30, 482, 704
+2017-08-30, 482, 705
+2017-08-30, 483, 705
+2017-08-30, 483, 706
+2017-08-30, 484, 705
+2017-08-30, 484, 706
+2017-08-30, 484, 707
+
+# Beaumont and Vidor region flooded during Hurricane Harvey
+# Soonest available S2 is 09-06!
+2017-08-30, 473, 743
+2017-08-30, 474, 743
+2017-08-30, 475, 744
+2017-08-30, 475, 745
+
+# Deweyville Flooding
+2017-08-30, 471, 750

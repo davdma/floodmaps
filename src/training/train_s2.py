@@ -22,7 +22,7 @@ import json
 
 from models.model import S2WaterDetector
 from utils.config import Config
-from utils.utils import DATA_DIR, RESULTS_DIR, get_model_params, Metrics, EarlyStopper, ChannelIndexer
+from utils.utils import DATA_DIR, RESULTS_DIR, get_model_params, Metrics, EarlyStopper, ChannelIndexer, nlcd_to_rgb
 from utils.checkpoint import save_checkpoint, load_checkpoint
 
 from training.loss import BCEDiceLoss, TverskyLoss
@@ -295,7 +295,7 @@ def sample_predictions(model, sample_set, mean, std, cfg, seed=24330):
     if cfg.wandb.num_sample_predictions <= 0:
         return None
 
-    columns = ["id", "tci"] # TCI always included
+    columns = ["id", "tci", "nlcd"] # TCI, NLCD always included
     channels = [bool(int(x)) for x in cfg.data.channels]
     my_channels = ChannelIndexer(channels) # ndwi, dem, slope_y, slope_x, waterbody, roads, flowlines
     # initialize wandb table given the channel settings
@@ -352,6 +352,13 @@ def sample_predictions(model, sample_set, mean, std, cfg, seed=24330):
         tci = supplementary[:3, :, :].permute(1, 2, 0).mul(255).clamp(0, 255).byte().numpy()
         tci_img = Image.fromarray(tci, mode="RGB")
         row.append(wandb.Image(tci_img))
+
+        # NLCD land cover visualization
+        nlcd = supplementary[3, :, :].byte().numpy()
+        nlcd_rgb = nlcd_to_rgb(nlcd)
+        nlcd_img = Image.fromarray(nlcd_rgb, mode="RGB")
+        row.append(wandb.Image(nlcd_img))
+
         if my_channels.has_ndwi():
             ndwi = X[:, :, channel_indices[4]]
             ndwi = ndwi_map.to_rgba(ndwi.numpy(), bytes=True)
@@ -433,10 +440,8 @@ def run_experiment_s2(cfg):
     samples = cfg.data.samples
     sample_dir = DATA_DIR / 's2' / f'samples_{size}_{samples}/'
 
-    # n_channels = sum(cfg['channels'])
     # load in mean and std
     channels = [bool(int(x)) for x in cfg.data.channels]
-    # b_channels = sum(channels[-3:])
     with open(sample_dir / f'mean_std_{size}_{samples}.pkl', 'rb') as f:
         train_mean, train_std = pickle.load(f)
 

@@ -10,7 +10,7 @@ from random import Random
 import logging
 import pickle
 from sklearn.model_selection import train_test_split
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 
 try:
     import yaml
@@ -19,7 +19,7 @@ except Exception:
 
 from utils.utils import enhanced_lee_filter, SRC_DIR, DATA_DIR, SAMPLES_DIR
 
-def random_crop(events: List[Path], size, num_samples, rng, pre_sample_dir, cloud_threshold, filter='raw', typ="train"):
+def random_crop(events: List[Path], size, num_samples, rng, pre_sample_dir, cloud_threshold, filter='raw', typ="train", label_idx: Optional[Dict[Tuple[str, str], Path]] = None):
     """Uniformly samples patches of dimension size x size across each dataset tile. The
     patches are saved together with labels into one file for minibatching.
 
@@ -42,6 +42,8 @@ def random_crop(events: List[Path], size, num_samples, rng, pre_sample_dir, clou
         See https://desktop.arcgis.com/en/arcmap/latest/manage-data/raster-and-images/speckle-function.htm.
     typ : str
         Subset assigned to the saved patches: train, val, test.
+    label_idx : dict[tuple[str, str], Path]
+        Dictionary mapping (img_dt, eid) to the manual label file path.
     """
     logger = logging.getLogger('preprocessing')
 
@@ -51,6 +53,7 @@ def random_crop(events: List[Path], size, num_samples, rng, pre_sample_dir, clou
     tiles = []
     p1 = re.compile('\d{8}_\d+_\d+')
     p2 = re.compile('pred_(\d{8})_.+.tif')
+    p3 = re.compile('sar_(\d{8})_(\d+)_(\d+)_vv.tif')
     for event in events:
         # Use Path.name to get just the directory name for regex matching
         m = p1.search(event.name)
@@ -61,7 +64,7 @@ def random_crop(events: List[Path], size, num_samples, rng, pre_sample_dir, clou
             logger.info(f'No matching eid. Skipping {event}...')
             continue
 
-        # search for label file + sar file using Path.glob()
+        # search for machine label file + sar file using Path.glob()
         # look for labels w tci + sar pairings
         for label in event.glob('pred_*.tif'):
             m = p2.search(label.name)
@@ -74,10 +77,16 @@ def random_crop(events: List[Path], size, num_samples, rng, pre_sample_dir, clou
                 continue
 
             sar_vv_file = sar_vv_files[0]
-            sar_vh_file = sar_vv_files[0][:-6] + 'vh.tif'
+            sar_vh_file = sar_vv_file.with_name(sar_vv_file.name.replace("_vv.tif", "_vh.tif"))
+
+            # Label date is the SAR CDT
+            # NEW: check if we can use a manual label instead of machine label first
+            manual_label_path = get_manual_label_path(label_idx, img_dt, eid)
+            if manual_label_path is not None:
+                label = manual_label_path
 
             # get associated label
-            with rasterio.open(label) as src:
+            with rasterio.open(label) as src: 
                 label_raster = src.read([1, 2, 3])
                 # if label has any values != 0 or 255 then print to log!
                 if np.any((label_raster > 0) & (label_raster < 255)):
@@ -210,7 +219,7 @@ def trainMean(train_events: List[Path], filter="raw"):
     # calculate mean each event tile
     # since we have n > 500 this is good approximation of pop mean
     count = 0
-    means = np.zeros(5)
+    means = np.zeros(5) # currently hardcoded to number of non-binary channels
 
     p1 = re.compile('\d{8}_\d+_\d+')
     p2 = re.compile('pred_(\d{8})_.+.tif')
@@ -236,7 +245,7 @@ def trainMean(train_events: List[Path], filter="raw"):
                 continue
 
             sar_vv_file = sar_vv_files[0]
-            sar_vh_file = sar_vv_files[0][:-6] + 'vh.tif'
+            sar_vh_file = sar_vv_file.with_name(sar_vv_file.name.replace("_vv.tif", "_vh.tif"))
 
             # skip missing data w tci and sar combined
             dem_file = event / f'dem_{eid}.tif'
@@ -335,7 +344,7 @@ def trainStd(train_events: List[Path], train_means, filter="raw"):
                 continue
 
             sar_vv_file = sar_vv_files[0]
-            sar_vh_file = sar_vv_files[0][:-6] + 'vh.tif'
+            sar_vh_file = sar_vv_file.with_name(sar_vv_file.name.replace("_vv.tif", "_vh.tif"))
 
             # skip missing data w tci and sar combined
             dem_file = event / f'dem_{eid}.tif'
@@ -422,10 +431,16 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
     seed : int
     method : str
         Sampling method.
+    cloud_threshold : float
+        Cloud percentage threshold for determining if a patch should be kept in dataset.
     filter : str
         Filter to apply to patches: 'raw' (no filter) or 'lee'.
     sample_dir : str
         Directory containing raw S1 tiles for patch sampling.
+    label_dir : str
+        Directory containing labels for patch sampling.
+    config : str
+        YAML config file path defining sample and label directories and split ratios.
     """
     logger = logging.getLogger('preprocessing')
     logger.setLevel(logging.DEBUG)
@@ -460,7 +475,7 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
         val_ratio = 0.1
         test_ratio = 0.1
 
-    # Build label index
+    # Build label index so we can use manual labels if available
     label_idx = build_label_index(label_dirs_list)
 
     # randomly select events to be in train, val, test set from multiple directories
@@ -471,6 +486,7 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
     for sd in sample_dirs_list:
         sample_path = SAMPLES_DIR / sd
         if not sample_path.is_dir():
+            logger.debug(f'Sample directory {sd} is invalid, skipping...')
             continue
         for event_dir in sample_path.glob('[0-9]*'):
             if not event_dir.is_dir():
@@ -523,9 +539,9 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
 
     if method == 'random':
         rng = Random(seed)
-        random_crop(train_events, size, samples, rng, pre_sample_dir, cloud_threshold, filter=filter, typ="train")
-        random_crop(val_events, size, samples, rng, pre_sample_dir, cloud_threshold, filter=filter, typ="val")
-        random_crop(test_events, size, samples, rng, pre_sample_dir, cloud_threshold, filter=filter, typ="test")
+        random_crop(train_events, size, samples, rng, pre_sample_dir, cloud_threshold, filter=filter, typ="train", label_idx=label_idx)
+        random_crop(val_events, size, samples, rng, pre_sample_dir, cloud_threshold, filter=filter, typ="val", label_idx=label_idx)
+        random_crop(test_events, size, samples, rng, pre_sample_dir, cloud_threshold, filter=filter, typ="test", label_idx=label_idx)
         logger.info('Random samples generated.')
 
     logger.debug('Preprocessing complete.')

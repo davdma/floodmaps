@@ -226,7 +226,7 @@ def pipeline_SCL(stac_provider, dir_path, save_as, dst_shape, dst_crs, dst_trans
     item_href = stac_provider.sign_asset_href(item.assets[scl_name].href)
 
     out_image, out_transform = crop_to_bounds(item_href, bbox, dst_crs, nodata=0, resampling=Resampling.nearest)
-    clouds = np.isin(out_image[0], [8, 9, 10]).astype(int)
+    clouds = np.isin(out_image[0], [8, 9, 10]).astype(np.uint8)
 
     # need to resample to grid of tci
     h, w = dst_shape[-2:]

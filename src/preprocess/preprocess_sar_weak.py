@@ -14,6 +14,7 @@ import multiprocessing as mp
 import psutil
 import shutil
 from numpy.lib.format import open_memmap
+from datetime import datetime
 
 try:
     import yaml
@@ -58,8 +59,8 @@ class WelfordAccumulator:
         
         # mean, m2 of batch
         count = valid_data.shape[1]
-        mean = np.mean(valid_data, axis=0)
-        m2 = np.sum((valid_data - mean) ** 2, axis=0)
+        mean = np.mean(valid_data, axis=1)
+        m2 = np.sum((valid_data - mean[:, np.newaxis]) ** 2, axis=1)
 
         # Combine statistics using Chan's parallel algorithm
         new_count = self.count + count
@@ -347,7 +348,7 @@ def compute_statistics_parallel(train_tiles: List[Tuple], filter_type: str, n_wo
     
     mean, std = final_accumulator.finalize()
     logger.info(f'Statistics computed from {total_pixels} pixels across {len(train_tiles)} tiles')
-    logger.info(f'Final statistics - Mean: {mean[:3]}..., Std: {std[:3]}...')
+    logger.info(f'Final statistics - Mean: {mean}, Std: {std}')
     
     return mean, std
 
@@ -432,6 +433,7 @@ def load_tile_for_sampling(tile_info: Tuple, filter_type: str):
     # missing mask and cloud mask
     missing_raster = np.any(tci_raster == 0, axis = 0).astype(np.uint8)
     missing_raster = np.expand_dims(missing_raster, axis = 0)
+    cloud_raster = cloud_raster.astype(np.uint8)
     missing_clouds_raster = np.vstack((missing_raster, cloud_raster), dtype=np.uint8)
     
     return stacked_raster, missing_clouds_raster
@@ -777,10 +779,25 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
     # Set default number of workers
     if n_workers is None:
         n_workers = 1
-    logger.info(f'Using {n_workers} workers for preprocessing.')
+
+    # Create timestamp for logging
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    logger.info(f'''Starting SAR weak labeling preprocessing:
+        Date:            {timestamp}
+        Patch size:      {size}
+        Samples per tile: {samples}
+        Sampling method: {method}
+        Filter:          {filter}
+        Cloud threshold: {cloud_threshold}
+        Random seed:     {seed}
+        Workers:         {n_workers}
+        Sample dir(s):   {sample_dir if config is None else "From config"}
+        Label dir(s):    {label_dir if config is None else "From config"}
+        Config file:     {config if config is not None else "None"}
+    ''')
 
     # Create preprocessing directory
-    pre_sample_dir = DATA_DIR / 'sar' / f'samples_{size}_{samples}_{filter}'
+    pre_sample_dir = DATA_DIR / 's1_weak' / f'samples_{size}_{samples}_{filter}'
     pre_sample_dir.mkdir(parents=True, exist_ok=True)
 
     # Resolve input directories and split ratios

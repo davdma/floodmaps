@@ -130,7 +130,7 @@ s2:  # Sentinel-2 configuration
 ```
 data/
 ├── sar/
-│   └── samples_64_1000_lee/
+│   └── samples_64_1000_raw/
 │       ├── train_patches.npy
 │       ├── val_patches.npy 
 │       ├── test_patches.npy

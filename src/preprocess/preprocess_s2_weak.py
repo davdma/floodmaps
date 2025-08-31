@@ -14,6 +14,7 @@ import multiprocessing as mp
 import psutil
 import shutil
 from numpy.lib.format import open_memmap
+from datetime import datetime
 
 try:
     import yaml
@@ -58,8 +59,8 @@ class WelfordAccumulator:
         
         # mean, m2 of batch
         count = valid_data.shape[1]
-        mean = np.mean(valid_data, axis=0)
-        m2 = np.sum((valid_data - mean) ** 2, axis=0)
+        mean = np.mean(valid_data, axis=1)
+        m2 = np.sum((valid_data - mean[:, np.newaxis]) ** 2, axis=1)
 
         # Combine statistics using Chan's parallel algorithm
         new_count = self.count + count
@@ -329,7 +330,7 @@ def compute_statistics_parallel(train_tiles: List[Tuple], n_workers: int = None)
     
     mean, std = final_accumulator.finalize()
     logger.info(f'Statistics computed from {total_pixels} pixels across {len(train_tiles)} tiles')
-    logger.info(f'Final statistics - Mean: {mean[:3]}..., Std: {std[:3]}...')
+    logger.info(f'Final statistics - Mean: {mean}, Std: {std}')
     
     return mean, std
 
@@ -713,10 +714,22 @@ def main(size, samples, seed, method='random',
     # Set default number of workers
     if n_workers is None:
         n_workers = 1
-    logger.info(f'Using {n_workers} workers for preprocessing.')
+
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    logger.info(f'''Starting S2 weak labeling preprocessing:
+        Date:            {timestamp}
+        Patch size:      {size}
+        Samples per tile: {samples}
+        Sampling method: {method}
+        Random seed:     {seed}
+        Workers:         {n_workers}
+        Sample dir(s):   {sample_dir if config is None else "From config"}
+        Label dir(s):    {label_dir if config is None else "From config"}
+        Config file:     {config if config is not None else "None"}
+    ''')
 
     # Create preprocessing directory
-    pre_sample_dir = DATA_DIR / 's2' / f'samples_{size}_{samples}'
+    pre_sample_dir = DATA_DIR / 's2_weak' / f'samples_{size}_{samples}'
     pre_sample_dir.mkdir(parents=True, exist_ok=True)
 
     # Resolve input directories and split ratios

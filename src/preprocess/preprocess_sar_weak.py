@@ -172,6 +172,7 @@ def discover_all_tiles(events: List[Path], label_idx: Optional[Dict[Tuple[str, s
             if label_idx:
                 manual_label_path = get_manual_label_path(label_idx, img_dt, eid)
                 if manual_label_path:
+                    logger.debug(f'Found manual label for tile {sar_vv_file.name}: {manual_label_path.name}')
                     final_label = manual_label_path
                     required_files.append(manual_label_path)
             else:
@@ -298,12 +299,11 @@ def compute_statistics_parallel(train_tiles: List[Tuple], filter_type: str, n_wo
     
     if n_workers is None:
         n_workers = 1
-    logger.info(f'Using {n_workers} workers for statistics computation.')
     
     # Ensure we don't have more workers than tiles
+    logger.info(f'Specified {n_workers} workers for statistics computation.')
     n_workers = min(n_workers, len(train_tiles))
-    
-    logger.info(f'Computing statistics using {n_workers} workers for {len(train_tiles)} tiles...')
+    logger.info(f'Using {n_workers} workers for {len(train_tiles)} tiles...')
     
     # Split tiles into balanced batches for workers
     tiles_per_worker = len(train_tiles) // n_workers
@@ -440,7 +440,7 @@ def load_tile_for_sampling(tile_info: Tuple, filter_type: str):
 
 
 def sample_patches_in_mem(tiles: List[Tuple], size: int, num_samples: int, cloud_threshold: float,
-                          filter_type: str, seed: int, max_attempts: int = 4000) -> np.ndarray:
+                          filter_type: str, seed: int, max_attempts: int = 10000) -> np.ndarray:
     """Sample patches and stores them in memory.
     
     Parameters
@@ -502,13 +502,13 @@ def sample_patches_in_mem(tiles: List[Tuple], size: int, num_samples: int, cloud
         
         if patches_sampled < num_samples:
             _, _, _, eid, img_dt = tile
-            raise RuntimeError(f"Worker exceeded max retries {max_attempts}, only sampled {patches_sampled}/{num_samples} patches for tile {i} (eid: {eid}, dt: {img_dt})")
+            raise RuntimeError(f"Worker exceeded max sampling attempts {max_attempts}, only sampled {patches_sampled}/{num_samples} patches for tile {i} (eid: {eid}, dt: {img_dt})")
 
     return dataset
 
 
 def sample_patches_in_disk(tiles: List[Tuple], size: int, num_samples: int, cloud_threshold: float,
-                          filter_type: str, seed: int, scratch_dir: Path, worker_id: int, max_attempts: int = 1000) -> Path:
+                          filter_type: str, seed: int, scratch_dir: Path, worker_id: int, max_attempts: int = 10000) -> Path:
     """Sample patches and stores them in memory mapped file on disk.
     
     Parameters
@@ -576,7 +576,7 @@ def sample_patches_in_disk(tiles: List[Tuple], size: int, num_samples: int, clou
 
             if patches_sampled < num_samples:
                 _, _, _, eid, img_dt = tile
-                raise RuntimeError(f"Worker {worker_id} exceeded max retries {max_attempts}, only sampled {patches_sampled}/{num_samples} patches for tile {i} (eid: {eid}, dt: {img_dt})")
+                raise RuntimeError(f"Worker {worker_id} exceeded max sampling attempts {max_attempts}, only sampled {patches_sampled}/{num_samples} patches for tile {i} (eid: {eid}, dt: {img_dt})")
     finally:
         # Ensure cleanup even if an error occurs
         dataset.flush()
@@ -619,8 +619,12 @@ def sample_patches_parallel(tiles: List[Tuple], size: int, num_samples: int,
     
     if n_workers is None:
         n_workers = 1
-    logger.info(f'Using {n_workers} workers for patch sampling.')
     
+    # Ensure we don't have more workers than tiles
+    logger.info(f'Specified {n_workers} workers for patch sampling.')
+    n_workers = min(n_workers, len(tiles))
+    logger.info(f'Using {n_workers} workers for {len(tiles)} tiles...')
+
     total_patches = len(tiles) * num_samples
     array_shape = (total_patches, 13, size, size)
     array_dtype = np.float32
@@ -633,6 +637,7 @@ def sample_patches_parallel(tiles: List[Tuple], size: int, num_samples: int,
     
     # divide up the tiles into n_workers chunks
     worker_tiles = []
+    batch_sizes = []
     start_idx = 0
     tiles_per_worker = len(tiles) // n_workers
     tiles_remainder = len(tiles) % n_workers
@@ -641,7 +646,11 @@ def sample_patches_parallel(tiles: List[Tuple], size: int, num_samples: int,
         end_idx = start_idx + worker_tile_count
         tiles_chunk = tiles[start_idx:end_idx]
         worker_tiles.append(tiles_chunk)
+        batch_sizes.append(worker_tile_count)
         start_idx += worker_tile_count
+
+    # Log batch distribution
+    logger.info(f'Tile distribution per worker: {batch_sizes}')
         
     if total_mem_required < total_mem_available * 0.9:
         # use simple concatenation strategy
@@ -736,6 +745,68 @@ def get_manual_label_path(label_idx: Dict[Tuple[str, str], Path],
                           img_dt: str, eid: str) -> Optional[Path]:
     """Get the label file path for a given (img_dt, eid) pair."""
     return label_idx.get((img_dt, eid))
+
+
+def save_event_splits(train_events: List[Path], val_events: List[Path], test_events: List[Path],
+                      output_dir: Path, split_seed: int, val_ratio: float, test_ratio: float, 
+                      timestamp: str, data_type: str = "sar") -> None:
+    """Save event splits to a YAML file for reproducibility and reference.
+    
+    Parameters
+    ----------
+    train_events : List[Path]
+        List of training event directory paths
+    val_events : List[Path]  
+        List of validation event directory paths
+    test_events : List[Path]
+        List of test event directory paths
+    output_dir : Path
+        Directory to save the splits file
+    split_seed : int
+        Random seed used for splitting
+    val_ratio : float
+        Validation set ratio
+    test_ratio : float
+        Test set ratio
+    timestamp : str
+        Timestamp when preprocessing started
+    data_type : str
+        Type of data being processed (e.g., "sar", "s2")
+    """
+    logger = logging.getLogger('preprocessing')
+    
+    # Create splits file path
+    splits_file = output_dir / f'event_splits_{data_type}_{split_seed}.yaml'
+    
+    # Prepare splits data structure
+    event_splits = {
+        'train': sorted([event.name for event in train_events]),
+        'val': sorted([event.name for event in val_events]), 
+        'test': sorted([event.name for event in test_events]),
+        'metadata': {
+            'data_type': data_type,
+            'split_seed': split_seed,
+            'val_ratio': val_ratio,
+            'test_ratio': test_ratio,
+            'total_events': len(train_events) + len(val_events) + len(test_events),
+            'train_count': len(train_events),
+            'val_count': len(val_events),
+            'test_count': len(test_events),
+            'timestamp': timestamp
+        }
+    }
+    
+    # Save to YAML file if yaml is available
+    try:
+        if yaml is not None:
+            with open(splits_file, 'w') as f:
+                yaml.dump(event_splits, f, default_flow_style=False, sort_keys=False)
+            logger.info(f'Event splits saved to {splits_file}')
+        else:
+            logger.warning('PyYAML not available, skipping event splits save')
+    except Exception as e:
+        logger.error(f'Failed to save event splits: {e}')
+        raise
 
 
 def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None, 
@@ -867,6 +938,10 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
     )
 
     logger.info(f'Split: {len(train_events)} train, {len(val_events)} val, {len(test_events)} test events')
+    
+    # Save the event splits for reproducibility and reference
+    save_event_splits(train_events, val_events, test_events, pre_sample_dir, 
+                      split_seed, val_ratio, test_ratio, timestamp, "sar")
 
     # Get list of tiles for splits as events can have multiple valid tiles
     logger.info('Discovering tiles...')

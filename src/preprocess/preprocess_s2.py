@@ -17,7 +17,7 @@ except Exception:
     yaml = None
 
 from utils.utils import TRAIN_LABELS, VAL_LABELS, TEST_LABELS, SRC_DIR, DATA_DIR, SAMPLES_DIR
-### TO IMPLEMENT: SAMPLING FROM PREDICTED LABEL TILES ALSO INSTEAD OF HUMAN LABELS
+from datetime import datetime
 
 def _find_event_dir(img_dt: str, eid: str, sample_dirs: List[str]) -> Optional[Path]:
     """Find the first dataset directory under sampling/ that contains the
@@ -300,6 +300,99 @@ def trainStd(train_events, train_means, sample_dirs: List[str]):
     # calculate final std statistics
     return overall_channel_std
 
+
+def extract_events_from_labels(label_paths: List[str]) -> List[str]:
+    """Extract event IDs from label file paths.
+    
+    Parameters
+    ----------
+    label_paths : List[str]
+        List of label file paths like 'labels/label_20200318_20200318_12_34.tif'
+        
+    Returns
+    -------
+    List[str]
+        List of event IDs like '20200318_12_34'
+    """
+    p = re.compile(r'label_(\d{8})_(.+)\.tif')
+    events = set()
+    
+    for label_path in label_paths:
+        # Extract filename from path
+        filename = Path(label_path).name
+        m = p.search(filename)
+        if m:
+            img_dt, eid = m.group(1), m.group(2)
+            events.add(eid)
+    
+    return list(sorted(events))
+
+
+def save_event_splits(train_labels: List[str], val_labels: List[str], test_labels: List[str],
+                      output_dir: Path, seed: int, timestamp: str, data_type: str = "s2_manual") -> None:
+    """Save event splits to a YAML file for reproducibility and reference.
+    
+    Parameters
+    ----------
+    train_labels : List[str]
+        List of training label file paths
+    val_labels : List[str]  
+        List of validation label file paths
+    test_labels : List[str]
+        List of test label file paths
+    output_dir : Path
+        Directory to save the splits file
+    seed : int
+        Random seed used (though splits are predefined, not random)
+    timestamp : str
+        Timestamp when preprocessing started
+    data_type : str
+        Type of data being processed (e.g., "s2_manual")
+    """
+    logger = logging.getLogger('preprocessing')
+    
+    # Extract event IDs from label paths
+    train_events = extract_events_from_labels(train_labels)
+    val_events = extract_events_from_labels(val_labels)
+    test_events = extract_events_from_labels(test_labels)
+    
+    # Create splits file path
+    splits_file = output_dir / f'event_splits_{data_type}_{seed}.yaml'
+    
+    # Prepare splits data structure
+    event_splits = {
+        'train': train_events,
+        'val': val_events, 
+        'test': test_events,
+        'metadata': {
+            'data_type': data_type,
+            'seed': seed,
+            'total_events': len(train_events) + len(val_events) + len(test_events),
+            'train_count': len(train_events),
+            'val_count': len(val_events),
+            'test_count': len(test_events),
+            'timestamp': timestamp
+        },
+        'label_files': {
+            'train': sorted([Path(label).name for label in train_labels]),
+            'val': sorted([Path(label).name for label in val_labels]),
+            'test': sorted([Path(label).name for label in test_labels])
+        }
+    }
+    
+    # Save to YAML file if yaml is available
+    try:
+        if yaml is not None:
+            with open(splits_file, 'w') as f:
+                yaml.dump(event_splits, f, default_flow_style=False, sort_keys=False)
+            logger.info(f'Event splits saved to {splits_file}')
+        else:
+            logger.warning('PyYAML not available, skipping event splits save')
+    except Exception as e:
+        logger.error(f'Failed to save event splits: {e}')
+        raise
+
+
 def main(size, samples, seed, method='random', sample_dir='samples_200_5_4_35/', label_dir='labels/', config: Optional[str] = None):
     """Preprocesses raw S2 tiles and corresponding labels into smaller patches. The data will be stored
     as separate npy files for train, val, and test sets, along with a mean_std.pkl file containing the
@@ -330,6 +423,19 @@ def main(size, samples, seed, method='random', sample_dir='samples_200_5_4_35/',
     logger.addHandler(handler)
     logger.propagate = False
 
+    # Create timestamp for logging
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    logger.info(f'''Starting S2 weak labeling preprocessing:
+        Date:            {timestamp}
+        Patch size:      {size}
+        Samples per tile: {samples}
+        Sampling method: {method}
+        Random seed:     {seed}
+        Sample dir(s):   {sample_dir if config is None else "From config"}
+        Label dir(s):    {label_dir if config is None else "From config"}
+        Config file:     {config if config is not None else "None"}
+    ''')
+
     # make our preprocess directory
     pre_sample_dir = DATA_DIR / 's2' / f'samples_{size}_{samples}'
     pre_sample_dir.mkdir(parents=True, exist_ok=True)
@@ -352,6 +458,9 @@ def main(size, samples, seed, method='random', sample_dir='samples_200_5_4_35/',
         val_labels = [str(Path(label_dir) / lf) for lf in VAL_LABELS]
         test_labels = [str(Path(label_dir) / lf) for lf in TEST_LABELS]
         sample_dirs_list = [sample_dir]
+
+    # Save the event splits for reproducibility and reference
+    save_event_splits(train_labels, val_labels, test_labels, pre_sample_dir, seed, timestamp, "s2_manual")
 
     # get event directories from the training labels for mean and std calculation
     p = re.compile('label_(\d{8})_(.+).tif')

@@ -129,12 +129,18 @@ s2:  # Sentinel-2 configuration
 
 ```
 data/
-├── sar/
+├── s1_weak/
 │   └── samples_64_1000_raw/
 │       ├── train_patches.npy
 │       ├── val_patches.npy 
 │       ├── test_patches.npy
 │       └── mean_std_64_1000_raw.pkl
+├── s2_weak/
+│   └── samples_64_1000/
+│       ├── train_patches.npy
+│       ├── val_patches.npy 
+│       ├── test_patches.npy
+│       └── mean_std_64_1000.pkl
 └── s2/
     └── samples_64_1000/
         ├── train_patches.npy

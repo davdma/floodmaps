@@ -393,7 +393,7 @@ def save_event_splits(train_labels: List[str], val_labels: List[str], test_label
         raise
 
 
-def main(size, samples, seed, method='random', sample_dir='samples_200_5_4_35/', label_dir='labels/', config: Optional[str] = None):
+def main(size, samples, seed, method='random', sample_dir='samples_200_5_4_35/', label_dir='labels/', config: Optional[str] = None, suffix: str = ''):
     """Preprocesses raw S2 tiles and corresponding labels into smaller patches. The data will be stored
     as separate npy files for train, val, and test sets, along with a mean_std.pkl file containing the
     mean and std of the training tiles.
@@ -413,6 +413,8 @@ def main(size, samples, seed, method='random', sample_dir='samples_200_5_4_35/',
         Directory containing raw S2 tile labels for patch sampling. Ignored if config is provided.
     config : str, optional
         Path to YAML config file. If provided, overrides sample_dir and label_dir and hardcoded splits.
+    suffix : str
+        Optional suffix to append to output directory name.
     """
     logger = logging.getLogger('preprocessing')
     logger.setLevel(logging.DEBUG)
@@ -437,7 +439,10 @@ def main(size, samples, seed, method='random', sample_dir='samples_200_5_4_35/',
     ''')
 
     # make our preprocess directory
-    pre_sample_dir = DATA_DIR / 's2' / f'samples_{size}_{samples}'
+    if suffix:
+        pre_sample_dir = DATA_DIR / 's2' / f'samples_{size}_{samples}_{suffix}'
+    else:
+        pre_sample_dir = DATA_DIR / 's2' / f'samples_{size}_{samples}'
     pre_sample_dir.mkdir(parents=True, exist_ok=True)
 
     # Resolve splits and sample dirs
@@ -503,6 +508,10 @@ if __name__ == '__main__':
     parser.add_argument('--sdir', dest='sample_dir', default='samples_200_5_4_35', help='data directory in the sampling folder (default: samples_200_5_4_35)')
     parser.add_argument('--ldir', dest='label_dir', default='labels', help='label directory in the sampling folder (default: labels)')
     parser.add_argument('--config', dest='config', default=None, help='YAML config file path defining splits and directories')
+    parser.add_argument('--suffix', dest='suffix', default='',
+                       help=('optional suffix to append to preprocessed folder, ',
+                       'use if you want to preprocess the same size and samples, ',
+                       'but use different splits or tiles.'))
     
     args = parser.parse_args()
-    sys.exit(main(args.size, args.samples, args.seed, method=args.method, sample_dir=args.sample_dir, label_dir=args.label_dir, config=args.config))
+    sys.exit(main(args.size, args.samples, args.seed, method=args.method, sample_dir=args.sample_dir, label_dir=args.label_dir, config=args.config, suffix=args.suffix))

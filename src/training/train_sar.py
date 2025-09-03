@@ -24,7 +24,7 @@ from pathlib import Path
 from models.model import SARWaterDetector
 from utils.config import Config
 from utils.utils import (SRC_DIR, DATA_DIR, RESULTS_DIR, Metrics, EarlyStopper,
-                         SARChannelIndexer, get_model_params)
+                         SARChannelIndexer, get_model_params, nlcd_to_rgb)
 from utils.checkpoint import save_checkpoint, load_checkpoint
 
 from training.loss import LossConfig
@@ -61,7 +61,7 @@ def train_loop(model, dataloader, device, optimizer, minibatches, loss_config,
     all_targets = []
 
     model.train()
-    for batch_i, (X, y) in enumerate(dataloader):
+    for batch_i, (X, y, _) in enumerate(dataloader):
         X = X.to(device)
         y = y.to(device)
 
@@ -177,7 +177,7 @@ def test_loop(model, dataloader, device, loss_config, ad_cfg, c, run, epoch):
 
     model.eval()
     with torch.no_grad():
-        for X, y in dataloader:
+        for X, y, _ in dataloader:
             X = X.to(device)
             y = y.to(device)
 
@@ -281,7 +281,7 @@ def evaluate(model, dataloader, device, loss_config, ad_cfg, c):
 
     model.eval()
     with torch.no_grad():
-        for X, y in dataloader:
+        for X, y, _ in dataloader:
             X = X.to(device)
             y = y.to(device)
 
@@ -461,11 +461,11 @@ def sample_predictions(model, sample_set, mean, std, loss_config, cfg, seed=2433
         return None
 
     loss_config.val_loss_fn.change_device('cpu')
-    columns = ["id"]
+    columns = ["id", "tci", "nlcd"] # TCI, NLCD always included
     channels = [bool(int(x)) for x in cfg.data.channels]
     my_channels = SARChannelIndexer(channels)
     # initialize wandb table given the channel settings
-    columns += my_channels.get_channel_names()
+    columns += my_channels.get_display_channels()
     if model.uses_autodespeckler():
         columns += ['despeckled_vv', 'despeckled_vh']
     columns += ["truth", "prediction", "false positive", "false negative"] # added residual binary map
@@ -485,7 +485,7 @@ def sample_predictions(model, sample_set, mean, std, loss_config, cfg, seed=2433
 
     # get map of each channel to index of resulting tensor
     n = 0
-    channel_indices = [-1] * 7
+    channel_indices = [-1] * 8
     for i, channel in enumerate(channels):
         if channel:
             channel_indices[i] = n
@@ -500,7 +500,7 @@ def sample_predictions(model, sample_set, mean, std, loss_config, cfg, seed=2433
     center_2 = center_1 + cfg.data.window
     for id, k in enumerate(samples):
         # get all images to shape (H, W, C) with C = 1 or 3 (1 for grayscale, 3 for RGB)
-        X, y = sample_set[k]
+        X, y, supplementary = sample_set[k]
 
         X_c = X[:, center_1:center_2, center_1:center_2]
 
@@ -523,6 +523,18 @@ def sample_predictions(model, sample_set, mean, std, loss_config, cfg, seed=2433
         X_c = std * X_c + mean
 
         row = [k]
+
+        # tci reference
+        tci = supplementary[:3, :, :].permute(1, 2, 0).mul(255).clamp(0, 255).byte().numpy()
+        tci_img = Image.fromarray(tci, mode="RGB")
+        row.append(wandb.Image(tci_img))
+
+        # NLCD land cover visualization
+        nlcd = supplementary[3, :, :].byte().numpy()
+        nlcd_rgb = nlcd_to_rgb(nlcd)
+        nlcd_img = Image.fromarray(nlcd_rgb, mode="RGB")
+        row.append(wandb.Image(nlcd_img))
+
         if my_channels.has_vv():
             vv = X_c[:, :, channel_indices[0]].numpy()
             vv_map.set_norm(Normalize(vmin=np.min(vv), vmax=np.max(vv)))
@@ -566,6 +578,11 @@ def sample_predictions(model, sample_set, mean, std, loss_config, cfg, seed=2433
             roads = X_c[:, :, channel_indices[6]].mul(255).clamp(0, 255).byte().numpy()
             roads_img = Image.fromarray(roads, mode="L")
             row.append(wandb.Image(roads_img))
+        if my_channels.has_flowlines():
+            flowlines = X_c[:, :, channel_indices[7]].mul(255).clamp(0, 255).byte().numpy()
+            flowlines_img = Image.fromarray(flowlines, mode="L")
+            row.append(wandb.Image(flowlines_img))
+
         if model.uses_autodespeckler():
             # add reconstruction VV and VH
             recons_vv = despeckler_output[0].numpy()
@@ -638,16 +655,12 @@ def run_experiment_s1(cfg, ad_cfg=None):
 
     # load in mean and std
     channels = [bool(int(x)) for x in cfg.data.channels]
-    b_channels = sum(channels[-2:])
     with open(sample_dir / f'mean_std_{size}_{samples}_{filter}.pkl', 'rb') as f:
         train_mean, train_std = pickle.load(f)
 
         train_mean = torch.from_numpy(train_mean[channels])
         train_std = torch.from_numpy(train_std[channels])
-        # make sure binary channels are 0 mean and 1 std
-        if b_channels > 0:
-            train_mean[-b_channels:] = 0
-            train_std[-b_channels:] = 1
+
     standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
 
     # datasets
@@ -745,7 +758,7 @@ def run_experiment_s1(cfg, ad_cfg=None):
 
 def validate_config(cfg):
     def validate_channels(s):
-        return type(s) == str and len(s) == 7 and all(c in '01' for c in s)
+        return type(s) == str and len(s) == 8 and all(c in '01' for c in s)
 
     # Add checks
     if cfg.train.loss == 'TverskyLoss':
@@ -762,7 +775,7 @@ def validate_config(cfg):
     assert cfg.data.random_flip in [True, False], "Random flip must be a boolean"
     assert cfg.eval.mode in ['val', 'test'], f"Evaluation mode must be one of {['val', 'test']}"
     assert cfg.wandb.project is not None, "Wandb project must be specified"
-    assert validate_channels(cfg.data.channels), "Channels must be a binary string of length 7"
+    assert validate_channels(cfg.data.channels), "Channels must be a binary string of length 8"
 
 def main(cfg, ad_cfg):
     validate_config(cfg) # validate ad_cfg?

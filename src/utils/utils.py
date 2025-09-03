@@ -10,6 +10,7 @@ import random
 import math
 import torch.nn.functional as F
 from pathlib import Path
+from matplotlib.colors import to_rgb
 
 SRC_DIR = Path(__file__).resolve().parents[1]
 SAMPLES_DIR = Path(__file__).resolve().parents[2] / 'sampling'
@@ -256,7 +257,7 @@ class ChannelIndexerDeprecated:
 class SARChannelIndexer:
     """Abstract class for wrapping list of S1 dataset channels used for input.
 
-    The 7 available channels in order:
+    The 8 available channels in order:
 
     1. SAR VV
     2. SAR VH
@@ -265,15 +266,16 @@ class SARChannelIndexer:
     5. Slope X
     6. Waterbody
     7. Roads
+    8. Flowlines
 
     Parameters
     ----------
     channels : list[bool]
-        List of 7 booleans corresponding to the 7 input channels.
+        List of 8 booleans corresponding to the 8 input channels.
     """
     def __init__(self, channels):
         self.channels = channels
-        self.names = names = ["vv", "vh", "dem", "slope_y", "slope_x", "waterbody", "roads"]
+        self.names = names = ["vv", "vh", "dem", "slope_y", "slope_x", "waterbody", "roads", "flowlines"]
 
     def has_vv(self):
         return self.channels[0]
@@ -296,10 +298,13 @@ class SARChannelIndexer:
     def has_roads(self):
         return self.channels[6]
 
+    def has_flowlines(self):
+        return self.channels[7]
+
     def get_channel_names(self):
         return self.names
     
-    def get_map(self):
+    def get_display_channels(self):
         return [name for name, include in zip(self.names, self.channels) if include]
 
 def load_model_weights(model, weight_path, device, model_name="Model"):
@@ -849,3 +854,60 @@ def get_neighbors(y, x, image, height, width, kernel_size, neighbor_pixels):
                 if neighbor_pixels[j][i] != 0:
                     num_samples += 1
     return num_samples
+
+# NLCD Land Cover Visualization
+# Colors match the sampling pipeline for consistency across the workflow
+
+NLCD_COLORS = {
+    11: '#486da2',    # Open Water
+    12: '#e7effc',    # Perennial Ice/Snow
+    21: '#e1cdce',    # Developed, Open Space
+    22: '#dc9881',    # Developed, Low Intensity 
+    23: '#f10100',    # Developed, Medium Intensity
+    24: '#ab0101',    # Developed, High Intensity
+    31: '#b3afa4',    # Barren Land
+    41: '#6ca966',    # Deciduous Forest
+    42: '#1d6533',    # Evergreen Forest
+    43: '#bdcc93',    # Mixed Forest
+    51: '#b19943',    # Dwarf Scrub
+    52: '#d1bb82',    # Shrub/Scrub
+    71: '#edeccd',    # Grassland/Herbaceous
+    72: '#d0d181',    # Sedge/Herbaceous
+    73: '#a4cc51',    # Lichens
+    74: '#82ba9d',    # Moss
+    81: '#ddd83d',    # Pasture/Hay
+    82: '#ae7229',    # Cultivated Crops
+    90: '#bbd7ed',    # Woody Wetlands
+    95: '#71a4c1',     # Emergent Herbaceous Wetlands
+    250: '#000000'     # Missing
+}
+NLCD_CODE_TO_RGB = {
+    code: tuple(int(255 * c) for c in to_rgb(hex_color))
+    for code, hex_color in NLCD_COLORS.items()
+}
+
+def nlcd_to_rgb(nlcd_array):
+    """Convert NLCD classification array to RGB image using NLCD colormap.
+    
+    Optimized version using lookup table for efficient batch processing.
+    
+    Parameters
+    ----------
+    nlcd_array : numpy.ndarray
+        2D array of NLCD land cover class codes (uint8)
+        
+    Returns
+    -------
+    numpy.ndarray
+        3D RGB array with shape (H, W, 3), dtype uint8
+    """
+    # create NLCD colormap
+    H, W = nlcd_array.shape
+    rgb_img = np.zeros((H, W, 3), dtype=np.uint8)
+
+    # vectorized mapping
+    for code, rgb in NLCD_CODE_TO_RGB.items():
+        mask = nlcd_array == code
+        rgb_img[mask] = rgb
+    
+    return rgb_img

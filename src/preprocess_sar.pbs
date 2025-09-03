@@ -1,5 +1,5 @@
 #!/bin/bash
-#PBS -A HYDROSM
+#PBS -A generative_hydrology
 #PBS -l select=1:ncpus=128
 #PBS -l walltime=20:00:00
 #PBS -N preprocess_sar
@@ -11,8 +11,8 @@
 # Set up my environment
 source ~/.bashrc
 cd /lcrc/project/hydrosm/dma/src
-conda activate floodmaps-sampling
+conda activate floodmaps-training
 export PYTHONPATH=/lcrc/project/hydrosm/dma/src:$PYTHONPATH
 
 # Run sampling script
-python preprocess_sar.py --size 68 --samples 1000 --method minibatch --filter lee
+python preprocess/preprocess_sar_weak.py --size 68 --samples 1000 --config configs/preprocess/preprocess_test.yaml --workers 12

@@ -366,39 +366,50 @@ def read_PRISM(prism_file: str) -> PRISMData:
     """Reads the PRISM netCDF file and return the encoded data."""
     return PRISMData.from_file(prism_file)
 
-def read_manual_indices(manual_file: str, prism_data: PRISMData) -> List[Tuple[int, int, int]]:
+def parse_date_string(date_string: str) -> datetime:
+    """Parse date string in YYYYMMDD or YYYY-MM-DD format."""
+    formats = ["%Y-%m-%d", "%Y%m%d"]
+    
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_string, fmt)
+        except ValueError:
+            continue
+
+    raise ValueError(f"Date string '{date_string}' doesn't match expected formats")
+
+def read_manual_indices(manual_file: str, prism_data: PRISMData) -> List[Tuple[datetime, int, int, str]]:
     """
-    Reads in manual time, y, x indices specifying PRISM events from a text file.
+    Reads in manual event date string, y, x indices specifying PRISM events from a text file.
     The function ignores empty lines and lines starting with '#'.
 
-    Also valid to take YYYYMMDD or YYYY-MM-DD format for time. It will do a conversion
-    to time index using the time_info from the PRISMData object.
+    Valid to take YYYYMMDD or YYYY-MM-DD format for time.
+
+    Optional 4th parameter can specify CRS (e.g., EPSG:32617). If not provided, 
+    defaults to None for automatic CRS selection.
 
     Parameters
     ----------
     manual_file : str
-        Path to text file containing manual time, y, x indices.
+        Path to text file containing manual event date string, y, x indices, optionally with CRS.
     prism_data : PRISMData
         PRISM data object.
 
     Returns
     -------
-    List[Tuple[int, int, int]]
-        List of tuples containing time, y, x indices.
+    List[Tuple[datetime, int, int, str]]
+        List of tuples containing datetime obj, y, x indices and optional CRS string.
     """
-    def parse_date_string(date_string: str) -> datetime:
-        """Parse date string in YYYYMMDD or YYYY-MM-DD format."""
-        formats = ["%Y-%m-%d", "%Y%m%d"]
-        
-        for fmt in formats:
-            try:
-                return datetime.strptime(date_string, fmt)
-            except ValueError:
-                continue
-    
-        raise ValueError(f"Date string '{date_string}' doesn't match expected formats")
+    def validate_epsg(code: str) -> bool:
+        """Validate EPSG code."""
+        if not re.fullmatch(r"EPSG:\d+", code):
+            return False
+        try:
+            CRS.from_string(code)
+            return True
+        except Exception:
+            return False
 
-    prism_shape = prism_data.precip_data.shape
     manual_indices = []
     with open(manual_file, 'r') as f:
         for lineno, line in enumerate(f, 1):
@@ -406,29 +417,31 @@ def read_manual_indices(manual_file: str, prism_data: PRISMData) -> List[Tuple[i
             if not stripped or stripped.startswith('#'):  # skip empty lines and comments
                 continue
             parts = [p.strip() for p in stripped.split(',')]
-            if len(parts) != 3:
-                raise ValueError(f"Line {lineno}: Expected 3 comma-separated values, got {parts}")
+            if len(parts) not in [3, 4]:
+                raise ValueError(f"Line {lineno}: Expected 3 or 4 comma-separated values, got {parts}")
 
-            # check if first part is int or str in format YYYYMMDD or YYYY-MM-DD
-            if parts[0].isdigit() and len(parts[0]) != 8:
-                time = int(parts[0])
-            else:
-                # convert YYYYMMDD or YYYY-MM-DD to datetime object
-                date = parse_date_string(parts[0])
-                time = date2num(date, units=prism_data.time_info[0], calendar=prism_data.time_info[1])
-            parts[0] = time
+            # check if first part is in format YYYYMMDD or YYYY-MM-DD and convert to datetime obj
+            if len(parts[0]) != 8 and len(parts[0]) != 10:
+                raise ValueError(f"Line {lineno}: Date string '{parts[0]}' doesn't match expected formats")
+            event_date = parse_date_string(parts[0]) # check if date string is valid
+
+            # Extract CRS if provided (4th parameter)
+            crs = None
+            if len(parts) == 4:
+                if validate_epsg(parts[3]):
+                    crs = parts[3]
+                else:
+                    raise ValueError(f"Line {lineno}: Not a valid CRS: {parts[3]}")
 
             try:
-                values = tuple(map(int, parts))
+                values = tuple(map(int, parts[1:3]))
             except ValueError:
-                raise ValueError(f"Line {lineno}: Invalid integers: {parts}")
+                raise ValueError(f"Line {lineno}: Invalid integers: {parts[1:3]}")
             if any(v < 0 for v in values):
-                raise ValueError(f"Line {lineno}: All values must be non-negative: {values}")
+                raise ValueError(f"Line {lineno}: All y, x coord values must be non-negative ints: {values}")
 
-            time, y, x = values
-            if time >= prism_shape[0] or y >= prism_shape[1] or x >= prism_shape[2]:
-                raise ValueError(f"Index ({time}, {y}, {x}) is out of bounds for PRISM data.")
-            manual_indices.append(values)
+            y, x = values
+            manual_indices.append((event_date, y, x, crs))
 
     return manual_indices
 
@@ -493,8 +506,8 @@ def get_ceser_mask(ceser_boundary_file: str, prism_meshgrid_file: str, shape: Tu
     mask_3d = np.broadcast_to(mask_2d, shape)
     return mask_3d
 
-def get_manual_events(prism_data: PRISMData, history: set, manual_file: str, logger: logging.Logger = None) -> Tuple[int, Iterator[Tuple[str, float, Tuple[float, float, float, float], str, Tuple[int, int, int]]]]:
-    """Compile info for manually specified events via list of PRISM indices.
+def get_manual_events(prism_data: PRISMData, history: set, manual_file: str, logger: logging.Logger = None) -> Tuple[int, Iterator[Tuple[str, float, Tuple[float, float, float, float], str, Tuple[int, int, int], str]]]:
+    """Compile info for manually specified events via list of event date strings, prism cell y, x indices and optional CRS.
     
     Parameters
     ----------
@@ -503,7 +516,8 @@ def get_manual_events(prism_data: PRISMData, history: set, manual_file: str, log
     history : set()
         Set that holds all tuples of indices (from PRISM ndarray) of previously processed events.
     manual_file : str
-        Path to text file containing manually specified events in lines with format: time, y, x.
+        Path to text file containing manually specified events in lines with format: time, y, x, [crs].
+        (crs is optional, must be in format EPSG:32617)
     logger : logging.Logger, optional
         Logger to use for logging. If None, a default logger will be created.
 
@@ -512,7 +526,7 @@ def get_manual_events(prism_data: PRISMData, history: set, manual_file: str, log
     int
         Number of manual events found.
     Iterator
-        Iterator aggregates event data with each tuple containing the date, cumulative day precipitation in mm, latitude longitude bounding box values and a unique event id.
+        Iterator aggregates event data with each tuple containing the date, cumulative day precipitation in mm, latitude longitude bounding box values, unique event id, indices tuple, and optional CRS string.
     """
     if logger is None:
         logger = logging.getLogger(__name__)
@@ -533,28 +547,32 @@ def get_manual_events(prism_data: PRISMData, history: set, manual_file: str, log
     bbox = []
     eid = []
     indices = []
+    crs_list = []
 
     min_date = prism_data.get_reference_date()
     logger.debug(f"PRISM start date: {min_date.strftime('%Y-%m-%d')}")
     count = 0
-    for time, y, x in manual_indices:
-        event_date = prism_data.get_event_cftime(time)
+    for event_date, y, x, crs in manual_indices:
         event_date_str = event_date.strftime("%Y%m%d")
 
-        # must not be earlier than s2 launch, or previously queried in pipeline
-        if event_date < min_date:
-            continue
-        elif (time, y, x) in history:
+        # we allow time to be negative here!
+        time = int(date2num(event_date, units=prism_data.time_info[0], calendar=prism_data.time_info[1]))
+
+        # for manual events we allow events before PRISM start date, will just
+        # use a negative time index if before prism start date (relative to prism start date)
+        if (time, y, x) in history:
             continue
 
         event_dates.append(event_date_str)
-        event_precip.append(prism_data.get_precip(time, y, x))
+        precip = prism_data.get_precip(time, y, x) if time >= 0 else 0 # if time index is negative, set precip to 0
+        event_precip.append(precip)
         bbox.append(prism_data.get_bounding_box(x, y))
         eid.append(f'{event_date_str}_{y}_{x}')
         indices.append((time, y, x)) # indices for efficient tracking of completion
+        crs_list.append(crs)  # append CRS (may be None)
         count += 1
 
-    return count, zip(event_dates, event_precip, bbox, eid, indices)
+    return count, zip(event_dates, event_precip, bbox, eid, indices, crs_list)
 
 def get_extreme_events(prism_data: PRISMData, history, threshold=300, mask=None, n=None, logger=None):
     """
@@ -582,6 +600,7 @@ def get_extreme_events(prism_data: PRISMData, history, threshold=300, mask=None,
         Number of extreme precipitation events found.
     Iterator
         Iterator aggregates extreme event data with each tuple containing the date, cumulative day precipitation in mm, latitude longitude bounding box values and a unique event id.
+        The crs is set to None and defaults to the first CRS in alphabetical order.
     """
     if logger is None:
         logger = logging.getLogger(__name__)
@@ -605,6 +624,7 @@ def get_extreme_events(prism_data: PRISMData, history, threshold=300, mask=None,
     bbox = []
     eid = []
     indices = []
+    crs_list = []
 
     min_date = prism_data.get_reference_date()
     logger.debug(f"PRISM start date: {min_date.strftime('%Y-%m-%d')}")
@@ -626,10 +646,11 @@ def get_extreme_events(prism_data: PRISMData, history, threshold=300, mask=None,
         event_precip.append(prism_data.get_precip(time, y, x))
         bbox.append(prism_data.get_bounding_box(x, y))
         eid.append(f'{event_date_str}_{y}_{x}')
-        indices.append((time, y, x)) # indices for efficient tracking of completion
+        indices.append((int(time), int(y), int(x))) # indices for efficient tracking of completion
+        crs_list.append(None)
         count += 1
 
-    return count, zip(event_dates, event_precip, bbox, eid, indices)
+    return count, zip(event_dates, event_precip, bbox, eid, indices, crs_list)
 
 def event_completed(dir_path: str, regex_patterns: list[str], pattern_dict: dict[str, str], logger: logging.Logger = None) -> bool:
     """Returns whether or not event directory contains all generated rasters by checking files with regex patterns."""

@@ -211,7 +211,7 @@ def pipeline_SCL(stac_provider, dir_path, save_as, dst_shape, dst_crs, dst_trans
     item_href = stac_provider.sign_asset_href(item.assets[scl_name].href)
 
     out_image, out_transform = crop_to_bounds(item_href, bbox, dst_crs, nodata=0, resampling=Resampling.nearest)
-    clouds = np.isin(out_image[0], [8, 9, 10]).astype(int)
+    clouds = np.isin(out_image[0], [8, 9, 10]).astype(np.uint8)
 
     # need to resample to grid of tci
     h, w = dst_shape[-2:]
@@ -860,7 +860,7 @@ def pipeline_NLCD(dir_path, save_as, year, dst_shape, dst_crs, dst_transform):
     with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_img.shape[-2], width=rgb_img.shape[-1], crs=dst_crs, dtype=rgb_img.dtype, transform=dst_transform, nodata=None) as dst:
         dst.write(rgb_img)
 
-def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, event_date, event_precip, prism_bbox, eid, dir_path):
+def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, event_date, event_precip, prism_bbox, eid, dir_path, manual_crs=None):
     """Samples S2 imagery for a high precipitation event based on parameters and generates accompanying rasters.
     
     Note to developers: the script simplifies normalization onto a consistent grid by finding any common CRS shared by S2 and S1 products.
@@ -888,7 +888,13 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, eve
     eid : str
         Event id.
     dir_path : str
-        Path for saving generated raster. 
+        Path for sampling folder of events.
+    manual_crs : str, optional
+        Manual CRS specification for event processing. If provided, this CRS will be used
+        instead of automatically selecting (alphabetically) from available products. The CRS
+        determines the resulting shape of the generated rasters, so specifying the CRS prevents
+        any shape ambiguity. This is especially important for downloading events for previously
+        labeled products.
 
     Returns
     -------
@@ -945,11 +951,11 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, eve
         logger.debug(f'No s2 images left after filtering...')
         return False
     elif not has_date_after_PRISM(s2_by_date_crs.get_dates(), event_date):
-        logger.debug(f'No s2 images post event date after filtering...')
+        logger.debug(f'No s2 images post event date {event_date} after filtering...')
         return False
     
-    # choose first CRS in alphabetical order for rasters
-    main_crs = s2_by_date_crs.get_all_crs()[0]
+    # either use specified CRS or choose first CRS in alphabetical order for rasters
+    main_crs = s2_by_date_crs.get_all_crs()[0] if manual_crs is None else manual_crs
     logger.debug(f'Using CRS for raster generation: {main_crs}')
 
     try:
@@ -1126,7 +1132,9 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
         f"  Max cloud/nodata cover percentage: {maxcoverpercentage}\n"
         f"  Max events to sample: {maxevents}\n"
         f"  Region: {region}\n"
-        f"  Manual indices: {manual}"
+        f"  Config file: {config_file}\n"
+        f"  Manual indices: {manual}\n"
+        f"  Source: {source}\n"
     )
 
     # history set of tuples
@@ -1153,7 +1161,7 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
         rootLogger.info(f"Searching through {num_candidates} candidate indices/events...")
         # get stac provider
         stac_provider = get_stac_provider(source, logger=logger)
-        for event_date, event_precip, prism_bbox, eid, indices in events:
+        for event_date, event_precip, prism_bbox, eid, indices, crs in events:
             if Path(dir_path + eid + '/').is_dir():
                 if event_completed(dir_path + eid + '/', regex_patterns, pattern_dict, logger=rootLogger):
                     rootLogger.debug(f'Event {eid} index {indices} has already been processed before. Moving on to the next event...')
@@ -1168,7 +1176,7 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
                 try:
                     if event_sample(stac_provider, days_before, days_after, 
                                     maxcoverpercentage, event_date, event_precip, 
-                                    prism_bbox, eid, dir_path):
+                                    prism_bbox, eid, dir_path, manual_crs=crs):
                         count += 1
                     history.add(indices)
                     break

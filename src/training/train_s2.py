@@ -438,7 +438,11 @@ def run_experiment_s2(cfg):
     model_name = cfg.model.classifier
     size = cfg.data.size
     samples = cfg.data.samples
-    sample_dir = DATA_DIR / 's2' / f'samples_{size}_{samples}/'
+    suffix = getattr(cfg.data, 'suffix', '')
+    if suffix:
+        sample_dir = DATA_DIR / 's2' / f'samples_{size}_{samples}_{suffix}/'
+    else:
+        sample_dir = DATA_DIR / 's2' / f'samples_{size}_{samples}/'
 
     # load in mean and std
     channels = [bool(int(x)) for x in cfg.data.channels]

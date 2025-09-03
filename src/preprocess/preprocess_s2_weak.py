@@ -749,7 +749,7 @@ def save_event_splits(train_events: List[Path], val_events: List[Path], test_eve
 
 def main(size, samples, seed, method='random',  
          sample_dir='s2_200_5_4_35/', label_dir='labels/', 
-         config: Optional[str] = None, n_workers: Optional[int] = None):
+         config: Optional[str] = None, n_workers: Optional[int] = None, suffix: str = ''):
     """Preprocesses raw S2 tiles and corresponding labels into smaller patches.
 
     Parameters
@@ -770,6 +770,8 @@ def main(size, samples, seed, method='random',
         YAML config file path defining sample and label directories and split ratios.
     n_workers : int
         Number of worker processes for parallel processing.
+    suffix : str
+        Optional suffix to append to output directory name.
     """
     # Setup logging
     logger = logging.getLogger('preprocessing')
@@ -799,7 +801,10 @@ def main(size, samples, seed, method='random',
     ''')
 
     # Create preprocessing directory
-    pre_sample_dir = DATA_DIR / 's2_weak' / f'samples_{size}_{samples}'
+    if suffix:
+        pre_sample_dir = DATA_DIR / 's2_weak' / f'samples_{size}_{samples}_{suffix}'
+    else:
+        pre_sample_dir = DATA_DIR / 's2_weak' / f'samples_{size}_{samples}'
     pre_sample_dir.mkdir(parents=True, exist_ok=True)
 
     # Resolve input directories and split ratios
@@ -944,10 +949,14 @@ if __name__ == '__main__':
                        help='YAML config file path defining sample directories and split ratios')
     parser.add_argument('--workers', dest='n_workers', type=int, default=None,
                        help='number of worker processes (default: 1)')
+    parser.add_argument('--suffix', dest='suffix', default='',
+                       help=('optional suffix to append to preprocessed folder, ',
+                       'use if you want to preprocess the same size and samples, ',
+                       'but use different splits or tiles.'))
 
     args = parser.parse_args()
     sys.exit(main(
         args.size, args.samples, args.seed, method=args.method, 
         sample_dir=args.sample_dir, label_dir=args.label_dir, 
-        config=args.config, n_workers=args.n_workers
+        config=args.config, n_workers=args.n_workers, suffix=args.suffix
     ))

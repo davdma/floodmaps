@@ -651,7 +651,11 @@ def run_experiment_s1(cfg, ad_cfg=None):
     filter = 'lee' if cfg.data.use_lee else 'raw'
     size = cfg.data.size
     samples = cfg.data.samples
-    sample_dir = DATA_DIR / 'sar' / f'samples_{size}_{samples}_{filter}/'
+    suffix = getattr(cfg.data, 'suffix', '')
+    if suffix:
+        sample_dir = DATA_DIR / 'sar' / f'samples_{size}_{samples}_{filter}_{suffix}/'
+    else:
+        sample_dir = DATA_DIR / 'sar' / f'samples_{size}_{samples}_{filter}/'
 
     # load in mean and std
     channels = [bool(int(x)) for x in cfg.data.channels]

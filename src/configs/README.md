@@ -15,6 +15,8 @@ data:
     size: 64 # pixel width of dataset patches
     samples: 1000 # 1000
     channels: "11111011111" # (R, G, B, B08, NDWI, DEM, SlopeY, SlopeX, Water, Roads, Flowlines)
+    use_weak: False # Use s2_weak (machine labels) vs s2 (manual labels)
+    suffix: "" # Optional suffix for preprocessing variant datasets
     random_flip: True
 
 model:
@@ -77,6 +79,7 @@ data:
     kernel_size: 5
     channels: "1101111" # (VV, VH, DEM, SlopeY, SlopeX, Water, Roads)
     use_lee: False
+    suffix: "" # Optional suffix for preprocessing variant datasets
     random_flip: True
 
 model:

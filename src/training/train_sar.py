@@ -653,9 +653,9 @@ def run_experiment_s1(cfg, ad_cfg=None):
     samples = cfg.data.samples
     suffix = getattr(cfg.data, 'suffix', '')
     if suffix:
-        sample_dir = DATA_DIR / 'sar' / f'samples_{size}_{samples}_{filter}_{suffix}/'
+        sample_dir = DATA_DIR / 's1_weak' / f'samples_{size}_{samples}_{filter}_{suffix}/'
     else:
-        sample_dir = DATA_DIR / 'sar' / f'samples_{size}_{samples}_{filter}/'
+        sample_dir = DATA_DIR / 's1_weak' / f'samples_{size}_{samples}_{filter}/'
 
     # load in mean and std
     channels = [bool(int(x)) for x in cfg.data.channels]

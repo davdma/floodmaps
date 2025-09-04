@@ -439,10 +439,13 @@ def run_experiment_s2(cfg):
     size = cfg.data.size
     samples = cfg.data.samples
     suffix = getattr(cfg.data, 'suffix', '')
+    # Use weak labeled dataset if specified, otherwise use manual labeled dataset
+    use_weak = getattr(cfg.data, 'use_weak', False)
+    dataset_type = 's2_weak' if use_weak else 's2'
     if suffix:
-        sample_dir = DATA_DIR / 's2' / f'samples_{size}_{samples}_{suffix}/'
+        sample_dir = DATA_DIR / dataset_type / f'samples_{size}_{samples}_{suffix}/'
     else:
-        sample_dir = DATA_DIR / 's2' / f'samples_{size}_{samples}/'
+        sample_dir = DATA_DIR / dataset_type / f'samples_{size}_{samples}/'
 
     # load in mean and std
     channels = [bool(int(x)) for x in cfg.data.channels]
@@ -595,7 +598,7 @@ if __name__ == '__main__':
 
     # data loading
     parser.add_argument('--num_workers', type=int)
-    
+
     # loss
     parser.add_argument('--loss', choices=LOSS_NAMES,
                         help=f"loss: {', '.join(LOSS_NAMES)}")

@@ -13,8 +13,24 @@ This directory contains scripts for preprocessing satellite imagery and labels i
 
 2. **Weak Label Preprocessing**: `preprocess_s2_weak.py` and `preprocess_sar_weak.py`
    - Processes machine-generated prediction tiles with optional manual label substitution
+   - **Requires `pred_*.tif` files**: Generated using [`../weak_labels.py`](../weak_labels.py) script
    - Find valid tiles in list of sample directories (YAML defined)
    - Handles large-scale datasets (10,000+ tiles) using concurrent workers
+
+### Prerequisites for Weak Label Preprocessing
+
+Before running weak label preprocessing scripts, you must generate machine labels:
+
+```bash
+# Generate machine labels using trained S2 model
+python ../weak_labels.py \
+    --config_file ../configs/s2_trained_model.yaml \
+    --data_dir "s2_200_5_4_35/" \
+    --format tif \
+    --replace
+```
+
+This creates `pred_YYYYMMDD_YYYYMMDD_Y_X.tif` files in each event directory that the preprocessing scripts will use as labels.
 
 ## Data Structure
 
@@ -40,15 +56,13 @@ This directory contains scripts for preprocessing satellite imagery and labels i
 
 ### Command Line Interface
 
-#### SAR Weak Label Preprocessing
+#### S2 Manual Label Preprocessing
 ```bash
-python preprocess_sar_weak.py \
+python preprocess_s2.py \
     --size 64 \
     --samples 1000 \
     --seed 433002 \
-    --filter raw \
-    --workers 8 \
-    --config configs/preprocess/preprocess.yaml
+    --config configs/preprocess/preprocess_manual.yaml
 ```
 
 #### S2 Weak Label Preprocessing
@@ -61,13 +75,15 @@ python preprocess_s2_weak.py \
     --config configs/preprocess/preprocess.yaml
 ```
 
-#### S2 Manual Label Preprocessing
+#### SAR Weak Label Preprocessing
 ```bash
-python preprocess_s2.py \
+python preprocess_sar_weak.py \
     --size 64 \
     --samples 1000 \
     --seed 433002 \
-    --config configs/preprocess/preprocess_manual.yaml
+    --filter raw \
+    --workers 8 \
+    --config configs/preprocess/preprocess.yaml
 ```
 
 ### Configuration Files

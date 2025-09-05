@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from datetime import datetime
 from torchvision import transforms
 from torchmetrics import MetricCollection
-from torchmetrics.classification import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score
+from torchmetrics.classification import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score, BinaryConfusionMatrix
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
 import random
@@ -24,6 +24,7 @@ from models.model import S2WaterDetector
 from utils.config import Config
 from utils.utils import DATA_DIR, RESULTS_DIR, get_model_params, Metrics, EarlyStopper, ChannelIndexer, nlcd_to_rgb
 from utils.checkpoint import save_checkpoint, load_checkpoint
+from utils.metrics import compute_nlcd_metrics
 
 from training.loss import BCEDiceLoss, TverskyLoss
 from training.dataset import FloodSampleS2Dataset
@@ -127,16 +128,19 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
         BinaryAccuracy(threshold=0.5),
         BinaryPrecision(threshold=0.5),
         BinaryRecall(threshold=0.5),
-        BinaryF1Score(threshold=0.5)
+        BinaryF1Score(threshold=0.5),
+        BinaryConfusionMatrix(threshold=0.5)
     ]).to(device)
     all_preds = []
     all_targets = []
+    all_nlcd_classes = []
     
     model.eval()
     with torch.no_grad():
-        for X, y, _ in dataloader:
+        for X, y, supplementary in dataloader:
             X = X.to(device)
             y = y.to(device)
+            nlcd_classes = supplementary[3, :, :].to(device)
 
             logits = model(X)
             loss = loss_fn(logits, y.float())
@@ -145,11 +149,13 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
             target = y.flatten() > 0.5
             all_preds.append(y_pred)
             all_targets.append(target)
+            all_nlcd_classes.append(nlcd_classes)
             running_vloss += loss.detach()
 
     # calculate metrics
     all_preds = torch.cat(all_preds)
     all_targets = torch.cat(all_targets)
+    all_nlcd_classes = torch.cat(all_nlcd_classes)
 
     metric_collection.update(all_preds, all_targets)
     metric_results = metric_collection.compute()
@@ -167,6 +173,17 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
         log_dict = metrics_dict.copy()
         log_dict.update({f'{typ} loss': epoch_vloss})
         run.log(log_dict, step=epoch)
+
+    # calculate confusion matrix + NLCD class metrics
+    confusion_matrix = metric_results['BinaryConfusionMatrix'].tolist()
+    confusion_matrix_dict = {
+        "tn": confusion_matrix[0, 0],
+        "fp": confusion_matrix[0, 1],
+        "fn": confusion_matrix[1, 0],
+        "tp": confusion_matrix[1, 1]
+    }
+    metrics_dict.update({f"{typ} confusion matrix": confusion_matrix_dict})
+    metrics_dict.update("nlcd metrics": compute_nlcd_metrics(all_preds, all_targets, all_nlcd_classes))
 
     metric_collection.reset()
 

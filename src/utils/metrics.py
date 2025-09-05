@@ -5,6 +5,116 @@ import random
 from torch.utils.data import DataLoader, Subset
 import torch.nn.functional as F
 from skimage.metrics import structural_similarity as ssim
+from torcheval.metrics.functional import binary_confusion_matrix
+
+# Define standard NLCD groups for flood mapping
+NLCD_GROUPS = {
+    'water': [11],
+    'urban': [21, 22, 23, 24],
+    'forest': [41, 42, 43],
+    'cultivated': [81, 82],
+    'shrubland': [51, 52],
+    'wetlands': [90, 95],
+    'barren': [31],
+    'herbaceous': [71, 72, 73, 74],
+    'ice/snow': [12]
+}
+NLCD_CLASSES = [11, 12, 21, 22, 23, 24, 31, 41, 42, 43, 51, 52, 71, 72, 73, 74, 81, 82, 90, 95]
+
+def compute_nlcd_metrics(all_preds, all_targets, nlcd_classes, groups=NLCD_GROUPS):
+    """Compute metrics for NLCD classes.
+
+    Parameters
+    ----------
+    all_preds : tensor
+        The predicted labels.
+    all_targets : tensor
+        The true labels.
+    nlcd_classes : tensor
+        The NLCD classes.
+    groups : dict, optional
+        The NLCD groups for computing acc, prec, rec, f1 metrics by group.
+
+    Returns
+    -------
+    output : dict
+    
+    The returned dictionary contains:
+    - the confusion matrix for each NLCD class.
+    - the confusion matrix for each NLCD group.
+    - the acc, prec, rec, f1 for each NLCD grouping (urban, vegetation, water, wetland etc.)
+    
+    The dictionary has the following structure:
+    {
+        'confusion_matrix': {
+            '21': {'tn': 0, 'fp': 0, 'fn': 0, 'tp': 0},
+            '22': {'tn': 0, 'fp': 0, 'fn': 0, 'tp': 0}},
+            '23': {'tn': 0, 'fp': 0, 'fn': 0, 'tp': 0},
+            ...
+        },
+        'group_confusion_matrix': {
+            'urban': {'tn': 0, 'fp': 0, 'fn': 0, 'tp': 0},
+            'vegetation': {'tn': 0, 'fp': 0, 'fn': 0, 'tp': 0},
+            ...
+        },
+        'group_metrics': {
+            'urban': {'acc': 0.52, 'prec': 0.12, 'rec': 0.90, 'f1': 0.53},
+            'vegetation': {'acc': 0.90, 'prec': 0.98, 'rec': 0.82, 'f1': 0.90},
+            ...
+        }
+
+        Note: if metrics are undefined, they are set to None.
+    }
+    """
+    output = {'confusion_matrix': {}, 'group_confusion_matrix': {}, 'group_metrics': {}}
+    for nlcd_class in NLCD_CLASSES:
+        mask = nlcd_classes == nlcd_class
+        pixel_count = int(mask.sum())
+        if pixel_count == 0:
+            output['confusion_matrix'][str(nlcd_class)] = {'tn': 0, 'fp': 0, 'fn': 0, 'tp': 0}
+            continue
+        
+        preds_by_class = all_preds[mask]
+        targets_by_class = all_targets[mask]
+
+        # compute confusion matrix
+        confusion_matrix = binary_confusion_matrix(preds_by_class, targets_by_class).tolist()
+        output['confusion_matrix'][str(nlcd_class)] = {
+            'tn': confusion_matrix[0, 0],
+            'fp': confusion_matrix[0, 1],
+            'fn': confusion_matrix[1, 0],
+            'tp': confusion_matrix[1, 1]
+        }
+
+    # compute group metrics
+    for group, classes in groups.items():
+        # compute confusion matrix for each group
+        mask = torch.isin(nlcd_classes, torch.tensor(classes, device=nlcd_classes.device, dtype=nlcd_classes.dtype))
+        pixel_count = int(mask.sum())
+        if pixel_count == 0:
+            output['group_confusion_matrix'][group] = {'tn': 0, 'fp': 0, 'fn': 0, 'tp': 0}
+            output['group_metrics'][group] = {'acc': None, 'prec': None, 'rec': None, 'f1': None}
+            continue
+        
+        preds_by_group = all_preds[mask]
+        targets_by_group = all_targets[mask]
+        group_confusion_matrix = binary_confusion_matrix(preds_by_group, targets_by_group).tolist()
+        (TN, FP), (FN, TP) = group_confusion_matrix
+        output['group_confusion_matrix'][group] = {
+            'tn': TN,
+            'fp': FP,
+            'fn': FN,
+            'tp': TP
+        }
+        
+        output['group_metrics'][group] = {
+            'acc': (TP + TN) / (TP + TN + FP + FN),
+            'prec': TP / (TP + FP) if (TP + FP) > 0 else None,
+            'rec': TP / (TP + FN) if (TP + FN) > 0 else None,
+            'f1': (2 * TP) / (2 * TP + FP + FN) if (2 * TP + FP + FN) > 0 else None
+        }
+
+    return output
 
 ### Evaluation metrics for SAR despeckling
 def denormalize(tensor, mean, std):

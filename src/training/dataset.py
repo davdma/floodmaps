@@ -206,6 +206,15 @@ class FloodSampleSARDataset(Dataset):
     random_flip : bool
         Randomly flip patches (vertically or horizontally) for augmentation.
     seed : int
+
+    Returns
+    -------
+    image : torch.Tensor
+        The input image (8 channels).
+    label : torch.Tensor
+        The binary label (1 channel).
+    supplementary : torch.Tensor
+        The TCI (3 channels) + NLCD (1 channel).
     """
     def __init__(self, sample_dir, channels=[True] * 8, typ="train", random_flip=False, transform=None, seed=3200):
         self.sample_dir = Path(sample_dir)
@@ -292,6 +301,15 @@ class FloodSampleS2Dataset(Dataset):
         Randomly flip patches (vertically or horizontally) for augmentation.
     seed : int
         Random seed.
+
+    Returns
+    -------
+    image : torch.Tensor
+        The input image (11 channels).
+    label : torch.Tensor
+        The binary label (1 channel).
+    supplementary : torch.Tensor
+        The TCI (3 channels) + NLCD (1 channel).
     """
     def __init__(self, sample_dir, channels=[True] * 11, typ="train", random_flip=False, transform=None, seed=3200):
         self.sample_dir = Path(sample_dir)

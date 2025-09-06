@@ -5,7 +5,6 @@ import random
 from torch.utils.data import DataLoader, Subset
 import torch.nn.functional as F
 from skimage.metrics import structural_similarity as ssim
-from torcheval.metrics.functional import binary_confusion_matrix
 
 # Define standard NLCD groups for flood mapping
 NLCD_GROUPS = {
@@ -20,6 +19,12 @@ NLCD_GROUPS = {
     'ice/snow': [12]
 }
 NLCD_CLASSES = [11, 12, 21, 22, 23, 24, 31, 41, 42, 43, 51, 52, 71, 72, 73, 74, 81, 82, 90, 95]
+
+def fast_binary_confusion_matrix(preds, targets):
+    """Simplifies the implementation of pytorch lightning binary confusion matrix logic."""
+    unique_mapping = (targets * 2 + preds).to(torch.long)
+    bins = torch.bincount(unique_mapping, minlength=4)
+    return bins.reshape(2, 2)
 
 def compute_nlcd_metrics(all_preds, all_targets, nlcd_classes, groups=NLCD_GROUPS):
     """Compute metrics for NLCD classes.
@@ -66,6 +71,11 @@ def compute_nlcd_metrics(all_preds, all_targets, nlcd_classes, groups=NLCD_GROUP
         Note: if metrics are undefined, they are set to None.
     }
     """
+    # convert boolean to integer for the binary confusion matrix computation
+    all_preds = all_preds.long()
+    all_targets = all_targets.long()
+    nlcd_classes = nlcd_classes.long() # originally float32
+    
     output = {'confusion_matrix': {}, 'group_confusion_matrix': {}, 'group_metrics': {}}
     for nlcd_class in NLCD_CLASSES:
         mask = nlcd_classes == nlcd_class
@@ -78,12 +88,12 @@ def compute_nlcd_metrics(all_preds, all_targets, nlcd_classes, groups=NLCD_GROUP
         targets_by_class = all_targets[mask]
 
         # compute confusion matrix
-        confusion_matrix = binary_confusion_matrix(preds_by_class, targets_by_class).tolist()
+        confusion_matrix = fast_binary_confusion_matrix(preds_by_class, targets_by_class).tolist()
         output['confusion_matrix'][str(nlcd_class)] = {
-            'tn': confusion_matrix[0, 0],
-            'fp': confusion_matrix[0, 1],
-            'fn': confusion_matrix[1, 0],
-            'tp': confusion_matrix[1, 1]
+            'tn': confusion_matrix[0][0],
+            'fp': confusion_matrix[0][1],
+            'fn': confusion_matrix[1][0],
+            'tp': confusion_matrix[1][1]
         }
 
     # compute group metrics
@@ -98,7 +108,7 @@ def compute_nlcd_metrics(all_preds, all_targets, nlcd_classes, groups=NLCD_GROUP
         
         preds_by_group = all_preds[mask]
         targets_by_group = all_targets[mask]
-        group_confusion_matrix = binary_confusion_matrix(preds_by_group, targets_by_group).tolist()
+        group_confusion_matrix = fast_binary_confusion_matrix(preds_by_group, targets_by_group).tolist()
         (TN, FP), (FN, TP) = group_confusion_matrix
         output['group_confusion_matrix'][group] = {
             'tn': TN,

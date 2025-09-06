@@ -140,7 +140,7 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
         for X, y, supplementary in dataloader:
             X = X.to(device)
             y = y.to(device)
-            nlcd_classes = supplementary[3, :, :].to(device)
+            nlcd_classes = supplementary[:, 3, :, :].to(device)
 
             logits = model(X)
             loss = loss_fn(logits, y.float())
@@ -149,7 +149,7 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
             target = y.flatten() > 0.5
             all_preds.append(y_pred)
             all_targets.append(target)
-            all_nlcd_classes.append(nlcd_classes)
+            all_nlcd_classes.append(nlcd_classes.flatten())
             running_vloss += loss.detach()
 
     # calculate metrics
@@ -161,7 +161,7 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
     metric_results = metric_collection.compute()
     epoch_vloss = running_vloss.item() / len(dataloader)
 
-    metrics_dict = {
+    core_metrics_dict = {
         f"{typ} accuracy": metric_results['BinaryAccuracy'].item(),
         f"{typ} precision": metric_results['BinaryPrecision'].item(),
         f"{typ} recall": metric_results['BinaryRecall'].item(),
@@ -170,22 +170,28 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
     
     # Only log to wandb for validation (not for test evaluation)
     if typ == 'val' and run is not None:
-        log_dict = metrics_dict.copy()
+        log_dict = core_metrics_dict.copy()
         log_dict.update({f'{typ} loss': epoch_vloss})
         run.log(log_dict, step=epoch)
 
     # calculate confusion matrix + NLCD class metrics
     confusion_matrix = metric_results['BinaryConfusionMatrix'].tolist()
     confusion_matrix_dict = {
-        "tn": confusion_matrix[0, 0],
-        "fp": confusion_matrix[0, 1],
-        "fn": confusion_matrix[1, 0],
-        "tp": confusion_matrix[1, 1]
+        "tn": confusion_matrix[0][0],
+        "fp": confusion_matrix[0][1],
+        "fn": confusion_matrix[1][0],
+        "tp": confusion_matrix[1][1]
     }
-    metrics_dict.update({f"{typ} confusion matrix": confusion_matrix_dict})
-    metrics_dict.update("nlcd metrics": compute_nlcd_metrics(all_preds, all_targets, all_nlcd_classes))
-
+    nlcd_metrics_dict = compute_nlcd_metrics(all_preds, all_targets, all_nlcd_classes)
     metric_collection.reset()
+
+    # separate the core loggable metrics from the nested dictionaries
+    # for easier management downstream
+    metrics_dict = {
+        'core metrics': core_metrics_dict,
+        'confusion matrix': confusion_matrix_dict,
+        'nlcd metrics': nlcd_metrics_dict
+    }
 
     return epoch_vloss, metrics_dict
 
@@ -260,19 +266,19 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
         disc_weights = (model.discriminator.state_dict()
                       if model.uses_discriminator() else None)
         fmetrics.save_metrics('val', loss=early_stopper.get_min_validation_loss(), **best_val_metrics)
-        run.summary.update({f'final model {key}': value for key, value in best_val_metrics.items()})
+        run.summary.update({f'final model {key}': value for key, value in best_val_metrics['core metrics'].items()})
     else:
         cls_weights = model.classifier.state_dict()
         disc_weights = (model.discriminator.state_dict()
                       if model.uses_discriminator() else None)
         fmetrics.save_metrics('val', loss=avg_vloss, **val_set_metrics)
-        run.summary.update({f'final model {key}': value for key, value in val_set_metrics.items()})
+        run.summary.update({f'final model {key}': value for key, value in val_set_metrics['core metrics'].items()})
 
     # for benchmarking purposes
     if cfg.eval.mode == 'test':
         test_loss, test_set_metrics = test_loop(model, test_loader, device, loss_fn, None, None, typ='test')
         fmetrics.save_metrics('test', loss=test_loss, **test_set_metrics)
-        run.summary.update({f'final model {key}': value for key, value in test_set_metrics.items()})
+        run.summary.update({f'final model {key}': value for key, value in test_set_metrics['core metrics'].items()})
 
     return cls_weights, disc_weights, fmetrics
 
@@ -430,7 +436,18 @@ def sample_predictions(model, sample_set, mean, std, cfg, seed=24330):
     return table
 
 def run_experiment_s2(cfg):
-    """Run a single S2 model experiment given the configuration parameters."""
+    """Run a single S2 model experiment given the configuration parameters.
+    
+    Parameters
+    ----------
+    cfg : object
+        Config object for the S2 classifier.
+
+    Returns
+    -------
+    fmetrics : Metrics
+        Metrics object containing the metrics for the experiment.
+    """
     if not wandb.login():
         raise Exception("Failed to login to wandb.")
 

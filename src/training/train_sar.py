@@ -8,7 +8,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchmetrics import MetricCollection
-from torchmetrics.classification import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score
+from torchmetrics.classification import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score, BinaryConfusionMatrix
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
 import random
@@ -26,6 +26,7 @@ from utils.config import Config
 from utils.utils import (SRC_DIR, DATA_DIR, RESULTS_DIR, Metrics, EarlyStopper,
                          SARChannelIndexer, get_model_params, nlcd_to_rgb)
 from utils.checkpoint import save_checkpoint, load_checkpoint
+from utils.metrics import compute_nlcd_metrics
 
 from training.loss import LossConfig
 from training.dataset import FloodSampleSARDataset
@@ -170,16 +171,20 @@ def test_loop(model, dataloader, device, loss_config, ad_cfg, c, run, epoch):
         BinaryAccuracy(threshold=0.5),
         BinaryPrecision(threshold=0.5),
         BinaryRecall(threshold=0.5),
-        BinaryF1Score(threshold=0.5)
+        BinaryF1Score(threshold=0.5),
+        BinaryConfusionMatrix(threshold=0.5)
     ]).to(device)
     all_preds = []
     all_targets = []
+    all_nlcd_classes = []
 
     model.eval()
     with torch.no_grad():
-        for X, y, _ in dataloader:
+        for X, y, supplementary in dataloader:
             X = X.to(device)
             y = y.to(device)
+            # for nlcd data we can safely assume it is properly aligned to the SAR image
+            nlcd_classes = supplementary[:, 3, c[0]:c[1], c[0]:c[1]].to(device)
 
             X_c = X[:, :, c[0]:c[1], c[0]:c[1]]
 
@@ -194,6 +199,7 @@ def test_loop(model, dataloader, device, loss_config, ad_cfg, c, run, epoch):
 
             all_preds.append(y_pred)
             all_targets.append(target)
+            all_nlcd_classes.append(nlcd_classes.flatten())
             running_tot_vloss += loss.detach()
             running_cls_vloss += loss_dict['classifier_loss'].detach()
 
@@ -210,19 +216,21 @@ def test_loop(model, dataloader, device, loss_config, ad_cfg, c, run, epoch):
     # calculate metrics
     all_preds = torch.cat(all_preds)
     all_targets = torch.cat(all_targets)
+    all_nlcd_classes = torch.cat(all_nlcd_classes)
 
     metric_collection.update(all_preds, all_targets)
     metric_results = metric_collection.compute()
     epoch_vloss = running_tot_vloss.item() / num_batches
     epoch_cls_vloss = running_cls_vloss.item() / num_batches
 
-    metrics_dict = {
+    core_metrics_dict = {
         "val accuracy": metric_results['BinaryAccuracy'].item(),
         "val precision": metric_results['BinaryPrecision'].item(),
         "val recall": metric_results['BinaryRecall'].item(),
         "val f1": metric_results['BinaryF1Score'].item()
     }
-    log_dict = metrics_dict.copy()
+    
+    log_dict = core_metrics_dict.copy()
     log_dict.update({
         "val tot loss": epoch_vloss,
         "val cls loss": epoch_cls_vloss
@@ -261,7 +269,22 @@ def test_loop(model, dataloader, device, loss_config, ad_cfg, c, run, epoch):
             })
 
     run.log(log_dict, step=epoch)
+    
+    confusion_matrix = metric_results['BinaryConfusionMatrix'].tolist()
+    confusion_matrix_dict = {
+        "tn": confusion_matrix[0][0],
+        "fp": confusion_matrix[0][1],
+        "fn": confusion_matrix[1][0],
+        "tp": confusion_matrix[1][1]
+    }
+    nlcd_metrics_dict = compute_nlcd_metrics(all_preds, all_targets, all_nlcd_classes)
     metric_collection.reset()
+
+    metrics_dict = {
+        'core metrics': core_metrics_dict,
+        'confusion matrix': confusion_matrix_dict,
+        'nlcd metrics': nlcd_metrics_dict
+    }
 
     return epoch_vloss, epoch_cls_vloss, metrics_dict
 
@@ -274,16 +297,19 @@ def evaluate(model, dataloader, device, loss_config, ad_cfg, c):
         BinaryAccuracy(threshold=0.5),
         BinaryPrecision(threshold=0.5),
         BinaryRecall(threshold=0.5),
-        BinaryF1Score(threshold=0.5)
+        BinaryF1Score(threshold=0.5),
+        BinaryConfusionMatrix(threshold=0.5)
     ]).to(device)
     all_preds = []
     all_targets = []
+    all_nlcd_classes = []
 
     model.eval()
     with torch.no_grad():
-        for X, y, _ in dataloader:
+        for X, y, supplementary in dataloader:
             X = X.to(device)
             y = y.to(device)
+            nlcd_classes = supplementary[:, 3, c[0]:c[1], c[0]:c[1]].to(device)
 
             X_c = X[:, :, c[0]:c[1], c[0]:c[1]]
 
@@ -298,23 +324,40 @@ def evaluate(model, dataloader, device, loss_config, ad_cfg, c):
 
             all_preds.append(y_pred)
             all_targets.append(target)
+            all_nlcd_classes.append(nlcd_classes.flatten())
             running_tot_vloss += loss.detach()
 
     # calculate metrics
     all_preds = torch.cat(all_preds)
     all_targets = torch.cat(all_targets)
+    all_nlcd_classes = torch.cat(all_nlcd_classes)
 
     metric_collection.update(all_preds, all_targets)
     metric_results = metric_collection.compute()
     epoch_vloss = running_tot_vloss.item() / num_batches
 
-    metrics_dict = {
+    core_metrics_dict = {
         "test accuracy": metric_results['BinaryAccuracy'].item(),
         "test precision": metric_results['BinaryPrecision'].item(),
         "test recall": metric_results['BinaryRecall'].item(),
         "test f1": metric_results['BinaryF1Score'].item()
     }
+    
+    confusion_matrix = metric_results['BinaryConfusionMatrix'].tolist()
+    confusion_matrix_dict = {
+        "tn": confusion_matrix[0][0],
+        "fp": confusion_matrix[0][1],
+        "fn": confusion_matrix[1][0],
+        "tp": confusion_matrix[1][1]
+    }
+    nlcd_metrics_dict = compute_nlcd_metrics(all_preds, all_targets, all_nlcd_classes)
     metric_collection.reset()
+
+    metrics_dict = {
+        'core metrics': core_metrics_dict,
+        'confusion matrix': confusion_matrix_dict,
+        'nlcd metrics': nlcd_metrics_dict
+    }
 
     return epoch_vloss, metrics_dict
 
@@ -406,7 +449,7 @@ def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, a
         fmetrics.save_metrics('val', partition=partition,
                               loss=early_stopper.get_min_validation_loss(),
                               **best_val_metrics)
-        run.summary.update({f'final model {key}': value for key, value in best_val_metrics.items()})
+        run.summary.update({f'final model {key}': value for key, value in best_val_metrics['core metrics'].items()})
     else:
         cls_weights = model.classifier.state_dict()
         ad_weights = (model.autodespeckler.state_dict()
@@ -414,13 +457,13 @@ def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, a
         fmetrics.save_metrics('val', partition=partition,
                               loss=avg_vloss,
                               **val_set_metrics)
-        run.summary.update({f'final model {key}': value for key, value in val_set_metrics.items()})
+        run.summary.update({f'final model {key}': value for key, value in val_set_metrics['core metrics'].items()})
 
     # for benchmarking purposes
     if cfg.eval.mode == 'test':
         test_loss, test_set_metrics = evaluate(model, test_loader, device, loss_cfg, ad_cfg, c)
         fmetrics.save_metrics('test', partition=partition, loss=test_loss, **test_set_metrics)
-        run.summary.update({f'final model {key}': value for key, value in test_set_metrics.items()})
+        run.summary.update({f'final model {key}': value for key, value in test_set_metrics['core metrics'].items()})
 
     return cls_weights, ad_weights, fmetrics
 
@@ -621,6 +664,11 @@ def run_experiment_s1(cfg, ad_cfg=None):
         Config object for the SAR classifier.
     ad_cfg : object, optional
         Config object for an optional SAR autodespeckler attachment.
+    
+    Returns
+    -------
+    fmetrics : Metrics
+        Metrics object containing the metrics for the experiment.
     """
     if not wandb.login():
         raise Exception("Failed to login to wandb.")

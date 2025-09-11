@@ -8,7 +8,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchmetrics import MetricCollection
-from torchmetrics.classification import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score, BinaryConfusionMatrix
+from torchmetrics.classification import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score, BinaryConfusionMatrix, BinaryJaccardIndex
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
 import random
@@ -56,7 +56,8 @@ def train_loop(model, dataloader, device, optimizer, minibatches, loss_config,
         BinaryAccuracy(threshold=0.5),
         BinaryPrecision(threshold=0.5),
         BinaryRecall(threshold=0.5),
-        BinaryF1Score(threshold=0.5)
+        BinaryF1Score(threshold=0.5),
+        BinaryJaccardIndex(threshold=0.5)
     ]).to(device)
     all_preds = []
     all_targets = []
@@ -114,6 +115,7 @@ def train_loop(model, dataloader, device, optimizer, minibatches, loss_config,
                 "train precision": metric_results['BinaryPrecision'].item(),
                 "train recall": metric_results['BinaryRecall'].item(),
                 "train f1": metric_results['BinaryF1Score'].item(),
+                "train IoU": metric_results['BinaryJaccardIndex'].item()
                 "train tot loss": epoch_loss,
                 "train cls loss": running_cls_loss.item() / minibatches}
 
@@ -172,7 +174,8 @@ def test_loop(model, dataloader, device, loss_config, ad_cfg, c, run, epoch):
         BinaryPrecision(threshold=0.5),
         BinaryRecall(threshold=0.5),
         BinaryF1Score(threshold=0.5),
-        BinaryConfusionMatrix(threshold=0.5)
+        BinaryConfusionMatrix(threshold=0.5),
+        BinaryJaccardIndex(threshold=0.5)
     ]).to(device)
     all_preds = []
     all_targets = []
@@ -227,7 +230,8 @@ def test_loop(model, dataloader, device, loss_config, ad_cfg, c, run, epoch):
         "val accuracy": metric_results['BinaryAccuracy'].item(),
         "val precision": metric_results['BinaryPrecision'].item(),
         "val recall": metric_results['BinaryRecall'].item(),
-        "val f1": metric_results['BinaryF1Score'].item()
+        "val f1": metric_results['BinaryF1Score'].item(),
+        "val IoU": metric_results['BinaryJaccardIndex'].item()
     }
     
     log_dict = core_metrics_dict.copy()
@@ -298,7 +302,8 @@ def evaluate(model, dataloader, device, loss_config, ad_cfg, c):
         BinaryPrecision(threshold=0.5),
         BinaryRecall(threshold=0.5),
         BinaryF1Score(threshold=0.5),
-        BinaryConfusionMatrix(threshold=0.5)
+        BinaryConfusionMatrix(threshold=0.5),
+        BinaryJaccardIndex(threshold=0.5)
     ]).to(device)
     all_preds = []
     all_targets = []
@@ -340,7 +345,8 @@ def evaluate(model, dataloader, device, loss_config, ad_cfg, c):
         "test accuracy": metric_results['BinaryAccuracy'].item(),
         "test precision": metric_results['BinaryPrecision'].item(),
         "test recall": metric_results['BinaryRecall'].item(),
-        "test f1": metric_results['BinaryF1Score'].item()
+        "test f1": metric_results['BinaryF1Score'].item(),
+        "test IoU": metric_results['BinaryJaccardIndex'].item()
     }
     
     confusion_matrix = metric_results['BinaryConfusionMatrix'].tolist()

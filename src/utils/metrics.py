@@ -38,7 +38,7 @@ def compute_nlcd_metrics(all_preds, all_targets, nlcd_classes, groups=NLCD_GROUP
     nlcd_classes : tensor
         The NLCD classes.
     groups : dict, optional
-        The NLCD groups for computing acc, prec, rec, f1 metrics by group.
+        The NLCD groups for computing acc, prec, rec, f1, IoU metrics by group.
 
     Returns
     -------
@@ -47,7 +47,7 @@ def compute_nlcd_metrics(all_preds, all_targets, nlcd_classes, groups=NLCD_GROUP
     The returned dictionary contains:
     - the confusion matrix for each NLCD class.
     - the confusion matrix for each NLCD group.
-    - the acc, prec, rec, f1 for each NLCD grouping (urban, vegetation, water, wetland etc.)
+    - the acc, prec, rec, f1, IoU for each NLCD grouping (urban, vegetation, water, wetland etc.)
     
     The dictionary has the following structure:
     {
@@ -63,8 +63,8 @@ def compute_nlcd_metrics(all_preds, all_targets, nlcd_classes, groups=NLCD_GROUP
             ...
         },
         'group_metrics': {
-            'urban': {'acc': 0.52, 'prec': 0.12, 'rec': 0.90, 'f1': 0.53},
-            'vegetation': {'acc': 0.90, 'prec': 0.98, 'rec': 0.82, 'f1': 0.90},
+            'urban': {'acc': 0.52, 'prec': 0.12, 'rec': 0.90, 'f1': 0.53, 'iou': 0.50},
+            'vegetation': {'acc': 0.90, 'prec': 0.98, 'rec': 0.82, 'f1': 0.90, 'iou': 0.4},
             ...
         }
 
@@ -103,7 +103,7 @@ def compute_nlcd_metrics(all_preds, all_targets, nlcd_classes, groups=NLCD_GROUP
         pixel_count = int(mask.sum())
         if pixel_count == 0:
             output['group_confusion_matrix'][group] = {'tn': 0, 'fp': 0, 'fn': 0, 'tp': 0}
-            output['group_metrics'][group] = {'acc': None, 'prec': None, 'rec': None, 'f1': None}
+            output['group_metrics'][group] = {'acc': None, 'prec': None, 'rec': None, 'f1': None, 'iou': None}
             continue
         
         preds_by_group = all_preds[mask]
@@ -121,7 +121,8 @@ def compute_nlcd_metrics(all_preds, all_targets, nlcd_classes, groups=NLCD_GROUP
             'acc': (TP + TN) / (TP + TN + FP + FN),
             'prec': TP / (TP + FP) if (TP + FP) > 0 else None,
             'rec': TP / (TP + FN) if (TP + FN) > 0 else None,
-            'f1': (2 * TP) / (2 * TP + FP + FN) if (2 * TP + FP + FN) > 0 else None
+            'f1': (2 * TP) / (2 * TP + FP + FN) if (2 * TP + FP + FN) > 0 else None,
+            'iou': TP / (TP + FP + FN) if (TP + FP + FN) > 0 else None
         }
 
     return output

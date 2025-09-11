@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from datetime import datetime
 from torchvision import transforms
 from torchmetrics import MetricCollection
-from torchmetrics.classification import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score, BinaryConfusionMatrix
+from torchmetrics.classification import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score, BinaryConfusionMatrix, BinaryJaccardIndex
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
 import random
@@ -56,7 +56,8 @@ def train_loop(model, dataloader, device, optimizer, loss_fn, run, epoch):
         BinaryAccuracy(threshold=0.5),
         BinaryPrecision(threshold=0.5),
         BinaryRecall(threshold=0.5),
-        BinaryF1Score(threshold=0.5)
+        BinaryF1Score(threshold=0.5),
+        BinaryJaccardIndex(threshold=0.5)
     ]).to(device)
     all_preds = []
     all_targets = []
@@ -92,6 +93,7 @@ def train_loop(model, dataloader, device, optimizer, loss_fn, run, epoch):
                 "train precision": metric_results['BinaryPrecision'].item(),
                 "train recall": metric_results['BinaryRecall'].item(),
                 "train f1": metric_results['BinaryF1Score'].item(),
+                "train IoU": metric_results['BinaryJaccardIndex'].item(),
                 "train loss": epoch_loss}
     run.log(log_dict, step=epoch)
     metric_collection.reset()
@@ -129,7 +131,8 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
         BinaryPrecision(threshold=0.5),
         BinaryRecall(threshold=0.5),
         BinaryF1Score(threshold=0.5),
-        BinaryConfusionMatrix(threshold=0.5)
+        BinaryConfusionMatrix(threshold=0.5),
+        BinaryJaccardIndex(threshold=0.5)
     ]).to(device)
     all_preds = []
     all_targets = []
@@ -165,7 +168,8 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
         f"{typ} accuracy": metric_results['BinaryAccuracy'].item(),
         f"{typ} precision": metric_results['BinaryPrecision'].item(),
         f"{typ} recall": metric_results['BinaryRecall'].item(),
-        f"{typ} f1": metric_results['BinaryF1Score'].item()
+        f"{typ} f1": metric_results['BinaryF1Score'].item(),
+        f"{typ} IoU": metric_results['BinaryJaccardIndex'].item()
     }
     
     # Only log to wandb for validation (not for test evaluation)
@@ -279,6 +283,9 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
         test_loss, test_set_metrics = test_loop(model, test_loader, device, loss_fn, None, None, typ='test')
         fmetrics.save_metrics('test', loss=test_loss, **test_set_metrics)
         run.summary.update({f'final model {key}': value for key, value in test_set_metrics['core metrics'].items()})
+
+    # final expensive metric computation
+    ### AUPRC, ROC-AUC (Leave PR-Curve, ROC-Curve for final model to benchmarking)
 
     return cls_weights, disc_weights, fmetrics
 

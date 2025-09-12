@@ -254,8 +254,8 @@ def pipeline_RGB(stac_provider, dir_path, save_as, dst_crs, item, bbox):
         Coordinate reference system of output raster.
     item : Item
         PyStac Item object.
-    box : (float, float, float, float)
-        Tuple in the order minx, miny, maxx, maxy, representing bounding box, 
+    bbox : (float, float, float, float)
+        Tuple in the order minx, miny, maxx, maxy, representing bounding box,
         should be in CRS specified by dst_crs.
     """
     b02_name = stac_provider.get_asset_names("s2")["B02"]
@@ -290,8 +290,8 @@ def pipeline_B08(stac_provider, dir_path, save_as, dst_crs, item, bbox):
         Coordinate reference system of output raster.
     item : Item
         PyStac Item object.
-    box : (float, float, float, float)
-        Tuple in the order minx, miny, maxx, maxy, representing bounding box, 
+    bbox : (float, float, float, float)
+        Tuple in the order minx, miny, maxx, maxy, representing bounding box,
         should be in CRS specified by dst_crs.
     """
     b08_name = stac_provider.get_asset_names("s2")["B08"]

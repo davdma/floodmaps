@@ -231,7 +231,7 @@ def get_date_interval(event_date: str, days_before: int, days_after: int) -> str
     Parameters
     ----------
     event_date : str
-        Date string formatted as YYYYMMDD.
+        Date string formatted as YYYYMMDD or YYYY-MM-DD.
     days_before : int
     days_after : int
 
@@ -240,12 +240,14 @@ def get_date_interval(event_date: str, days_before: int, days_after: int) -> str
     str
         Interval with start and end date strings formatted as YYYY-MM-DD/YYYY-MM-DD.
     """
+    # convert event date to datetime object
+    dt = parse_date_string(event_date)
     if days_before + days_after == 0:
-        return f"{event_date[0:4]}-{event_date[4:6]}-{event_date[6:8]}"
+        return f"{dt.strftime('%Y-%m-%d')}"
     delt1 = timedelta(days = days_before)
     delt2 = timedelta(days = days_after)
-    start = datetime(int(event_date[0:4]), int(event_date[4:6]), int(event_date[6:8])) - delt1
-    end = datetime(int(event_date[0:4]), int(event_date[4:6]), int(event_date[6:8])) + delt2
+    start = dt - delt1
+    end = dt + delt2
     return start.strftime("%Y-%m-%d") + '/' + end.strftime("%Y-%m-%d")
 
 def has_date_after_PRISM(dates: List[datetime], event_date_str: datetime) -> bool:

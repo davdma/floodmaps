@@ -4,16 +4,13 @@ from pathlib import Path
 import sys
 import logging
 import numpy as np
-import os
 import re
 import json
-import pickle
-import fiona
-import shutil
 from osgeo import gdal, ogr, osr
+import geopandas as gpd
 from rasterio.transform import array_bounds
 from rasterio.windows import from_bounds, Window
-from rasterio.warp import calculate_default_transform, reproject, Resampling, transform_bounds
+from rasterio.warp import reproject, Resampling, transform_bounds
 import rasterio.merge
 import rasterio
 from fiona.transform import transform
@@ -52,36 +49,6 @@ SEARCH_CRS = "EPSG:4326"
 NLCD_RANGE = None
 ELEVATION_LAT_LONG = None
 CURRENT_DATE = datetime.now().strftime('%Y-%m-%d')
-
-# patterns for checking if an S2 + S1 event has been processed
-regex_patterns = [
-    r'dem_.*\.tif',
-    r'flowlines_.*\.tif',
-    r'roads_.*\.tif',
-    r'waterbody_.*\.tif',
-    r'nlcd_.*\.tif',
-    r'tci_\d{8}.*\.tif',
-    r'rgb_\d{8}.*\.tif',
-    r'ndwi_\d{8}.*\.tif',
-    r'b08_\d{8}.*\.tif',
-    r'sar_\d{8}.*\.tif',
-    r'clouds_\d{8}.*\.tif',
-    'metadata.json'
-]
-pattern_dict = {
-    r'dem_.*\.tif': 'DEM',
-    r'flowlines_.*\.tif': 'FLOWLINES',
-    r'roads_.*\.tif': 'ROADS',
-    r'waterbody_.*\.tif': 'WATERBODY',
-    r'nlcd_.*\.tif': 'NLCD',
-    r'tci_\d{8}.*\.tif': 'S2 IMAGERY',
-    r'rgb_\d{8}.*\.tif': 'RGB',
-    r'ndwi_\d{8}.*\.tif': 'NDWI',
-    r'b08_\d{8}.*\.tif': 'B8 NIR',
-    r'sar_\d{8}.*\.tif': 'SAR',
-    r'clouds_\d{8}.*\.tif': 'CLOUDS',
-    'metadata.json': 'METADATA'
-}
 
 def get_elevation_nw():
     """Extract all elevation file lat long pairs as well as the filepath in tuple."""
@@ -139,27 +106,6 @@ def GetHU4Codes(prism_bbox):
 
     return huc4_codes
 
-def cloud_null_percentage(stac_provider, item, item_crs, bbox):
-    """Calculates the percentage of pixels in the bounding box of the S2 image that are cloud or null."""
-    scl_name = stac_provider.get_asset_names("s2")["SCL"]
-    item_href = stac_provider.sign_asset_href(item.assets[scl_name].href)
-
-    conversion = transform(PRISM_CRS, item_crs, (bbox[0], bbox[2]), (bbox[1], bbox[3]))
-    img_bbox = conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]
-
-    out_image, _ = rasterio.merge.merge([item_href], bounds=img_bbox)
-    return int((np.isin(out_image, [0, 8, 9]).sum() / out_image.size) * 100)
-
-def sar_missing_percentage(stac_provider, item, item_crs, bbox):
-    """Calculates the percentage of pixels in the bounding box of the SAR image that are missing."""
-    vv_name = stac_provider.get_asset_names("s1")["vv"]
-    item_href = stac_provider.sign_asset_href(item.assets[vv_name].href)
-
-    conversion = transform(PRISM_CRS, item_crs, (bbox[0], bbox[2]), (bbox[1], bbox[3]))
-    img_bbox = conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]
-
-    out_image, _ = rasterio.merge.merge([item_href], bounds=img_bbox)
-    return int((np.sum(out_image <= 0) / out_image.size) * 100)
 
 # we will choose a UTM zone CRS already given and stick to it for rest of sample data!
 def pipeline_TCI(stac_provider, dir_path, save_as, dst_crs, item, bbox):
@@ -198,7 +144,7 @@ def pipeline_TCI(stac_provider, dir_path, save_as, dst_crs, item, bbox):
 
     return (out_image.shape[-2], out_image.shape[-1]), out_transform
 
-def pipeline_SCL(stac_provider, dir_path, save_as, dst_shape, dst_crs, dst_transform, item, bbox):
+def pipeline_SCL(stac_provider, dir_path, save_as, dst_shape, dst_crs, dst_transform, item, bbox, include_cmap=False):
     """Generates Scene Classification Layer raster of S2 multispectral file and resamples to 10m resolution.
 
     Parameters
@@ -220,6 +166,8 @@ def pipeline_SCL(stac_provider, dir_path, save_as, dst_shape, dst_crs, dst_trans
     bbox : (float, float, float, float)
         Tuple in the order minx, miny, maxx, maxy, representing bounding box,
         should be in CRS specified by dst_crs.
+    include_cmap : bool
+        Whether to include color maps for the rasters. Default is False to save space.
     """
     scl_name = stac_provider.get_asset_names("s2")["SCL"]
     item_href = stac_provider.sign_asset_href(item.assets[scl_name].href)
@@ -244,14 +192,15 @@ def pipeline_SCL(stac_provider, dir_path, save_as, dst_shape, dst_crs, dst_trans
                         dtype=clouds.dtype, transform=dst_transform) as dst:
         dst.write(dest, 1)
 
-    rgb_clouds = np.zeros((3, h, w), dtype=np.uint8)
-    rgb_clouds[0, :, :] = dest * 255
-    rgb_clouds[1, :, :] = dest * 255
-    rgb_clouds[2, :, :] = dest * 255
+    if include_cmap:
+        rgb_clouds = np.zeros((3, h, w), dtype=np.uint8)
+        rgb_clouds[0, :, :] = dest * 255
+        rgb_clouds[1, :, :] = dest * 255
+        rgb_clouds[2, :, :] = dest * 255
 
-    with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_clouds.shape[-2], width=rgb_clouds.shape[-1],
-                       crs=dst_crs, dtype=rgb_clouds.dtype, transform=dst_transform, nodata=None) as dst:
-        dst.write(rgb_clouds)
+        with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_clouds.shape[-2], width=rgb_clouds.shape[-1],
+                        crs=dst_crs, dtype=rgb_clouds.dtype, transform=dst_transform, nodata=None) as dst:
+            dst.write(rgb_clouds)
 
 def pipeline_RGB(stac_provider, dir_path, save_as, dst_crs, item, bbox):
     """Generates B02 (B), B03 (G), B04 (R) rasters of S2 multispectral file.
@@ -316,7 +265,7 @@ def pipeline_B08(stac_provider, dir_path, save_as, dst_crs, item, bbox):
     with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=1, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=0) as dst:
         dst.write(out_image)
 
-def pipeline_NDWI(stac_provider, dir_path, save_as, dst_crs, item, bbox):
+def pipeline_NDWI(stac_provider, dir_path, save_as, dst_crs, item, bbox, include_cmap=False):
     """Generates NDWI raster from S2 multispectral files.
 
     Parameters
@@ -334,6 +283,8 @@ def pipeline_NDWI(stac_provider, dir_path, save_as, dst_crs, item, bbox):
     bbox : (float, float, float, float)
         Tuple in the order minx, miny, maxx, maxy, representing bounding box,
         should be in CRS specified by dst_crs.
+    include_cmap : bool
+        Whether to include color maps for the rasters. Default is False to save space.
     """
     b03_name = stac_provider.get_asset_names("s2")["B03"]
     b08_name = stac_provider.get_asset_names("s2")["B08"]
@@ -354,14 +305,15 @@ def pipeline_NDWI(stac_provider, dir_path, save_as, dst_crs, item, bbox):
     with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=1, height=ndwi.shape[-2], width=ndwi.shape[-1], crs=dst_crs, dtype=ndwi.dtype, transform=out_transform, nodata=-999999) as dst:
         dst.write(ndwi, 1)
 
-    # before writing to file, we will make matplotlib colormap!
-    ndwi_colored = colormap_to_rgb(ndwi, cmap='seismic_r', r=(-1.0, 1.0), no_data=-999999)
+    if include_cmap:
+        # before writing to file, we will make matplotlib colormap!
+        ndwi_colored = colormap_to_rgb(ndwi, cmap='seismic_r', r=(-1.0, 1.0), no_data=-999999)
 
-    # nodata should not be set for cmap files
-    with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=ndwi_colored.shape[-2], width=ndwi_colored.shape[-1], crs=dst_crs, dtype=ndwi_colored.dtype, transform=out_transform, nodata=None) as dst:
-        dst.write(ndwi_colored)
+        # nodata should not be set for cmap files
+        with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=ndwi_colored.shape[-2], width=ndwi_colored.shape[-1], crs=dst_crs, dtype=ndwi_colored.dtype, transform=out_transform, nodata=None) as dst:
+            dst.write(ndwi_colored)
 
-def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, prism_bbox):
+def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, prism_bbox, include_cmap=False):
     """Generates raster with burned in geometries of roads given destination raster properties.
 
     Parameters
@@ -381,6 +333,8 @@ def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, 
     prism_bbox : (float, float, float, float)
         Tuple in the order minx, miny, maxx, maxy, representing bounding box,
         in PRISM CRS.
+    include_cmap : bool
+        Whether to include color maps for the rasters. Default is False to save space.
     """
     mem_ds = None
     raster_ds = None
@@ -452,16 +406,18 @@ def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, 
             rasterize_roads = band.ReadAsArray()
 
             # Create RGB raster
-            rgb_roads = np.zeros((3, rasterize_roads.shape[0], rasterize_roads.shape[1]), dtype=np.uint8)
+            if include_cmap:
+                rgb_roads = np.zeros((3, rasterize_roads.shape[0], rasterize_roads.shape[1]), dtype=np.uint8)
 
-            # Set values in the 3D array based on the binary_array
-            rgb_roads[0, :, :] = rasterize_roads * 255
-            rgb_roads[1, :, :] = rasterize_roads * 255
-            rgb_roads[2, :, :] = rasterize_roads * 255
+                # Set values in the 3D array based on the binary_array
+                rgb_roads[0, :, :] = rasterize_roads * 255
+                rgb_roads[1, :, :] = rasterize_roads * 255
+                rgb_roads[2, :, :] = rasterize_roads * 255
         else:
             # if no shapes to rasterize
             rasterize_roads = np.zeros(dst_shape, dtype=np.uint8)
-            rgb_roads = np.zeros((3, *dst_shape), dtype=np.uint8)
+            if include_cmap:
+                rgb_roads = np.zeros((3, *dst_shape), dtype=np.uint8)
     except Exception as e:
         raise e
     finally:
@@ -474,11 +430,12 @@ def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, 
                        crs=dst_crs, dtype=rasterize_roads.dtype, transform=dst_transform, nodata=0) as dst:
         dst.write(rasterize_roads, 1)
 
-    with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_roads.shape[-2], width=rgb_roads.shape[-1],
-                       crs=dst_crs, dtype=rgb_roads.dtype, transform=dst_transform, nodata=None) as dst:
-        dst.write(rgb_roads)
+    if include_cmap:
+        with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_roads.shape[-2], width=rgb_roads.shape[-1],
+                        crs=dst_crs, dtype=rgb_roads.dtype, transform=dst_transform, nodata=None) as dst:
+            dst.write(rgb_roads)
 
-def pipeline_dem(dir_path, save_as, dst_shape, dst_crs, dst_transform, bounds):
+def pipeline_dem(dir_path, save_as, dst_shape, dst_crs, dst_transform, bounds, include_cmap=False):
     """Generates Digital Elevation Map raster given destination raster properties and bounding box.
 
     Note to developers: slope raster generation removed in favor of calling np.gradient on dem tile during preprocessing.
@@ -497,6 +454,8 @@ def pipeline_dem(dir_path, save_as, dst_shape, dst_crs, dst_transform, bounds):
         Transformation matrix for mapping pixel coordinates to coordinate system of output raster.
     bounds : (float, float, float, float)
         Tuple in the order minx, miny, maxx, maxy, representing bounding box.
+    include_cmap : bool
+        Whether to include color maps for the rasters. Default is False to save space.
     """
     # buffer here accounts for missing edges after reprojection!
     buffer = 0.02
@@ -544,19 +503,21 @@ def pipeline_dem(dir_path, save_as, dst_shape, dst_crs, dst_transform, bounds):
         dst_crs=dst_crs,
         resampling=Resampling.bilinear)
 
-    # for DEM use grayscale!
-    dem_cmap = colormap_to_rgb(destination, cmap='gray', no_data=no_data)
-
     # save dem raw
     with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=1, height=destination.shape[-2], width=destination.shape[-1], crs=dst_crs, dtype=destination.dtype, transform=dst_transform, nodata=no_data) as dst:
         dst.write(destination, 1)
 
-    # save dem cmap
-    with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=dem_cmap.shape[-2], width=dem_cmap.shape[-1], crs=dst_crs, dtype=dem_cmap.dtype, transform=dst_transform, nodata=None) as dst:
-        dst.write(dem_cmap)
+    if include_cmap:
+        # for DEM use grayscale!
+        dem_cmap = colormap_to_rgb(destination, cmap='gray', no_data=no_data)
+
+        # save dem cmap
+        with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=dem_cmap.shape[-2], width=dem_cmap.shape[-1], crs=dst_crs, dtype=dem_cmap.dtype, transform=dst_transform, nodata=None) as dst:
+            dst.write(dem_cmap)
 
 def pipeline_flowlines(dir_path, save_as, dst_shape, dst_crs, dst_transform, prism_bbox,
-exact_fcodes=['46000', '46003', '46006', '46007', '55800', '33600', '33601', '33603', '33400', '42801', '42802', '42805', '42806', '42809']):
+exact_fcodes=['46000', '46003', '46006', '46007', '55800', '33600', '33601', '33603', '33400', '42801', '42802', '42805', '42806', '42809'],
+include_cmap=False):
     """Generates raster with burned in geometries of flowlines given destination raster properties.
 
     NOTE: FCode for flowlines can be referenced here: https://files.hawaii.gov/dbedt/op/gis/data/NHD%20Complete%20FCode%20Attribute%20Value%20List.pdf
@@ -653,16 +614,18 @@ exact_fcodes=['46000', '46003', '46006', '46007', '55800', '33600', '33601', '33
             flowlines = band.ReadAsArray()
 
             # Create RGB raster
-            rgb_flowlines = np.zeros((3, flowlines.shape[0], flowlines.shape[1]), dtype=np.uint8)
+            if include_cmap:
+                rgb_flowlines = np.zeros((3, flowlines.shape[0], flowlines.shape[1]), dtype=np.uint8)
 
-            # Set values in the 3D array based on the binary_array
-            rgb_flowlines[0, :, :] = flowlines * 255
-            rgb_flowlines[1, :, :] = flowlines * 255
-            rgb_flowlines[2, :, :] = flowlines * 255
+                # Set values in the 3D array based on the binary_array
+                rgb_flowlines[0, :, :] = flowlines * 255
+                rgb_flowlines[1, :, :] = flowlines * 255
+                rgb_flowlines[2, :, :] = flowlines * 255
         else:
             # if no shapes to rasterize
             flowlines = np.zeros(dst_shape, dtype=np.uint8)
-            rgb_flowlines = np.zeros((3, *dst_shape), dtype=np.uint8)
+            if include_cmap:
+                rgb_flowlines = np.zeros((3, *dst_shape), dtype=np.uint8)
     except Exception as e:
         raise e
     finally:
@@ -677,10 +640,11 @@ exact_fcodes=['46000', '46003', '46006', '46007', '55800', '33600', '33601', '33
         dst.write(flowlines, 1)
 
     # flowlines cmap
-    with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_flowlines.shape[-2], width=rgb_flowlines.shape[-1], crs=dst_crs, dtype=rgb_flowlines.dtype, transform=dst_transform, nodata=None) as dst:
-        dst.write(rgb_flowlines)
+    if include_cmap:
+        with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_flowlines.shape[-2], width=rgb_flowlines.shape[-1], crs=dst_crs, dtype=rgb_flowlines.dtype, transform=dst_transform, nodata=None) as dst:
+            dst.write(rgb_flowlines)
 
-def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, prism_bbox):
+def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, prism_bbox, include_cmap=False):
     """Generates raster with burned in geometries of waterbodies given destination raster properties.
 
     Parameters
@@ -772,17 +736,20 @@ def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, pri
             # Read the rasterized data
             waterbody = band.ReadAsArray()
 
-            # Create RGB raster
-            rgb_waterbody = np.zeros((3, waterbody.shape[0], waterbody.shape[1]), dtype=np.uint8)
+            if include_cmap:
+                # Create RGB raster
+                rgb_waterbody = np.zeros((3, waterbody.shape[0], waterbody.shape[1]), dtype=np.uint8)
 
-            # Set values in the 3D array based on the binary_array
-            rgb_waterbody[0, :, :] = waterbody * 255
-            rgb_waterbody[1, :, :] = waterbody * 255
-            rgb_waterbody[2, :, :] = waterbody * 255
+                # Set values in the 3D array based on the binary_array
+                rgb_waterbody[0, :, :] = waterbody * 255
+                rgb_waterbody[1, :, :] = waterbody * 255
+                rgb_waterbody[2, :, :] = waterbody * 255
         else:
             # if no shapes to rasterize
             waterbody = np.zeros(dst_shape, dtype=np.uint8)
-            rgb_waterbody = np.zeros((3, *dst_shape), dtype=np.uint8)
+
+            if include_cmap:
+                rgb_waterbody = np.zeros((3, *dst_shape), dtype=np.uint8)
     except Exception as e:
         raise e
     finally:
@@ -796,10 +763,11 @@ def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, pri
         dst.write(waterbody, 1)
 
     # waterbody cmap
-    with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_waterbody.shape[-2], width=rgb_waterbody.shape[-1], crs=dst_crs, dtype=rgb_waterbody.dtype, transform=dst_transform, nodata=None) as dst:
-        dst.write(rgb_waterbody)
+    if include_cmap:
+        with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_waterbody.shape[-2], width=rgb_waterbody.shape[-1], crs=dst_crs, dtype=rgb_waterbody.dtype, transform=dst_transform, nodata=None) as dst:
+            dst.write(rgb_waterbody)
 
-def pipeline_NLCD(dir_path, save_as, year, dst_shape, dst_crs, dst_transform):
+def pipeline_NLCD(dir_path, save_as, year, dst_shape, dst_crs, dst_transform, include_cmap=False):
     """Generates raster with NLCD land cover classes. Uses windowed reading of NLCD raster
     for speed (NLCD files are large).
 
@@ -817,6 +785,8 @@ def pipeline_NLCD(dir_path, save_as, year, dst_shape, dst_crs, dst_transform):
         Coordinate reference system of output raster.
     dst_transform : rasterio.affine.Affine()
         Transformation matrix for mapping pixel coordinates to coordinate system of output raster.
+    include_cmap : bool
+        Whether to include color maps for the rasters. Default is False to save space.
     """
     # if year is after the most recent year, use the most recent year
     nlcd_range = get_nlcd_range()
@@ -861,73 +831,22 @@ def pipeline_NLCD(dir_path, save_as, year, dst_shape, dst_crs, dst_transform):
         dst.write(nlcd_arr, 1)
 
     # create NLCD colormap
-    H, W = nlcd_arr.shape
-    rgb_img = np.zeros((H, W, 3), dtype=np.uint8)
+    if include_cmap:
+        H, W = nlcd_arr.shape
+        rgb_img = np.zeros((H, W, 3), dtype=np.uint8)
 
-    # vectorized mapping
-    for code, rgb in NLCD_CODE_TO_RGB.items():
-        mask = nlcd_arr == code
-        rgb_img[mask] = rgb
+        # vectorized mapping
+        for code, rgb in NLCD_CODE_TO_RGB.items():
+            mask = nlcd_arr == code
+            rgb_img[mask] = rgb
 
-    rgb_img = np.transpose(rgb_img, (2, 0, 1))
+        rgb_img = np.transpose(rgb_img, (2, 0, 1))
 
-    with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_img.shape[-2], width=rgb_img.shape[-1], crs=dst_crs, dtype=rgb_img.dtype, transform=dst_transform, nodata=None) as dst:
-        dst.write(rgb_img)
+        with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_img.shape[-2], width=rgb_img.shape[-1], crs=dst_crs, dtype=rgb_img.dtype, transform=dst_transform, nodata=None) as dst:
+            dst.write(rgb_img)
 
-def coincident_items(items_s2, items_s1, hours):
-    """Checks if any S2 captures are within given number of hours of S1 captures.
 
-    Parameters
-    ----------
-    items_s2 : list[Item]
-        List of S2 Item objects.
-    items_s1 : list[Item]
-        List of S1 Item objects.
-
-    Returns
-    -------
-    bool
-        True if any S2 captures are within given number of hours of S1 captures, False otherwise.
-    """
-    for item_s2 in items_s2:
-        dt_s2 = item_s2.datetime
-        for item_s1 in items_s1:
-            dt_s1 = item_s1.datetime
-            time_difference = abs(dt_s2 - dt_s1)
-            hours_difference = time_difference.total_seconds() / 3600
-            if hours_difference < hours:
-                return True
-    return False
-
-def coincident_with(items_s2, item_s1, hours):
-    """Returns the datetime object of the S2 item that the S1 item is coincident with
-    otherwise returns None.
-
-    Parameters
-    ----------
-    items_s2 : list[Item]
-        List of S2 Item objects.
-    item_s1 : Item
-        S1 Item object.
-
-    Returns
-    -------
-    datetime
-        The datetime object of the S2 item that the S1 item is coincident with,
-        otherwise returns None.
-    """
-    coincident_dt = None
-    dt_sar = item_s1.datetime
-    for s2 in items_s2:
-        dt_s2 = s2.datetime
-        time_difference = abs(dt_sar - dt_s2)
-        hours_difference = time_difference.total_seconds() / 3600
-        if hours_difference < hours:
-            coincident_dt = dt_s2
-            break
-    return coincident_dt
-
-def pipeline_S1(stac_provider, dir_path, save_as, dst_crs, item, bbox):
+def pipeline_S1(stac_provider, dir_path, save_as, dst_crs, item, bbox, include_cmap=False):
     """Generates dB scale raster of SAR data in VV and VH polarizations.
 
     Parameters
@@ -945,6 +864,8 @@ def pipeline_S1(stac_provider, dir_path, save_as, dst_crs, item, bbox):
     bbox : (float, float, float, float)
         Tuple in the order minx, miny, maxx, maxy, representing bounding box,
         should be in CRS specified by dst_crs.
+    include_cmap : bool
+        Whether to include color maps for the rasters. Default is False to save space.
 
     Returns
     -------
@@ -970,152 +891,67 @@ def pipeline_S1(stac_provider, dir_path, save_as, dst_crs, item, bbox):
         dst.write(db_vh, 1)
 
     # color maps
-    img_vv_cmap = colormap_to_rgb(db_vv, cmap='gray', no_data=-9999)
-    with rasterio.open(dir_path + save_as + '_vv_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vv_cmap.shape[-2], width=img_vv_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vv, nodata=None) as dst:
-        # get color map
-        dst.write(img_vv_cmap)
+    if include_cmap:
+        img_vv_cmap = colormap_to_rgb(db_vv, cmap='gray', no_data=-9999)
+        with rasterio.open(dir_path + save_as + '_vv_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vv_cmap.shape[-2], width=img_vv_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vv, nodata=None) as dst:
+            # get color map
+            dst.write(img_vv_cmap)
 
-    img_vh_cmap = colormap_to_rgb(db_vh, cmap='gray', no_data=-9999)
-    with rasterio.open(dir_path + save_as + '_vh_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vh_cmap.shape[-2], width=img_vh_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vh, nodata=None) as dst:
-        dst.write(img_vh_cmap)
+        img_vh_cmap = colormap_to_rgb(db_vh, cmap='gray', no_data=-9999)
+        with rasterio.open(dir_path + save_as + '_vh_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vh_cmap.shape[-2], width=img_vh_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vh, nodata=None) as dst:
+            dst.write(img_vh_cmap)
 
-def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, within_hours, event_date, event_precip, prism_bbox, eid, dir_path, manual_crs=None):
-    """Samples S2 and S1 coincident imagery for a high precipitation event based on parameters and generates accompanying rasters.
+def download_area(stac_provider, bbox, event_date, days_before, days_after, product_id, dir_path, crs, include_cmap=False):
+    """Downloads S2 and S1 imagery for a specific study area based on parameters and generates accompanying rasters.
 
-    Note to developers: the script simplifies normalization onto a consistent grid by finding any common CRS shared by S2 and S1 products.
-    Once it finds a CRS in common, all products that do not share that CRS are thrown out. The first S2 product is cropped using the bounding box
-    and its dimensions (width and height) and affine transform are then used as reference for all subsequent normalization.
-    A smarter approach (that doesn't throw out products arbitrarily) would be to choose a S2 CRS as reference and normalize everything using
-    rasterio WarpedVRT, though this is not currently implemented.
+    If a specific product ID is provided - it is assumed that the user only wants to download that specific product.
+    Regardless of the size of the interval and the results, only that specific product will be downloaded.
+    If no match found then the program exits.
+
+    If no product ID is provided - it is assumed that the user wants to download all products within the
+    specific interval, both S2 and S1 if available.
 
     Parameters
     ----------
     stac_provider : STACProvider
         STAC provider object.
+    bbox : tuple
+        Bounding box in PRISM CRS EPSG:4269.
+    event_date : str
+        Date of flood event in format YYYY-MM-DD.
     days_before : int
         Number of days before high precipitation event allowed for sampling S2 imagery.
     days_after : int
         Number of days after high precipitation event allowed for sampling S2 imagery.
-    maxcoverpercentage : int
-        Maximum percentage of combined null data and cloud cover permitted for each sampled cell.
-    within_hours : int
-        Download S1 and S2 data that are within a given number of hours from each other
-    event_date : str
-        Date of high precipitation event in format YYYYMMDD.
-    event_precip: float
-        Cumulative daily precipitation in mm on event date.
-    prism_bbox : (float, float, float, float)
-        Bounding box of PRISM data in PRISM CRS.
-    eid : str
-        Event id.
+    product_id : str
+        Product id to match, can just be a prefix.
     dir_path : str
-        Path to sampling folder of events.
-    manual_crs : str, optional
-        Manual CRS specification for event processing. If provided, this CRS will be used
-        instead of automatically selecting (alphabetically) from available products. The CRS
-        determines the resulting shape of the generated rasters, so specifying the CRS prevents
-        any shape ambiguity. This is especially important for downloading events for previously
-        labeled products.
+        Path to directory where downloaded imagery will be saved.
+    crs : str
+        CRS string in form EPSG:XXXX to force the imagery to.
+    include_cmap : bool
+        Whether to include color maps for the rasters. Default is False to save space.
 
     Returns
     -------
     bool
         Return True if successful, False if unsuccessful event download and processing.
     """
-    logger = logging.getLogger('events')
-    logger.info('**********************************')
-    logger.info('START OF EVENT TASK LOG:')
-    logger.info(f'Beginning event {eid} download...')
-
-    minx, miny, maxx, maxy = prism_bbox
-    logger.info(f'Event on {event_date} with precipitation {event_precip}mm at bounds: {minx}, {miny}, {maxx}, {maxy}')
-
+    minx, miny, maxx, maxy = bbox # assume bbox is in EPSG:4269
     # need to transform box from EPSG 4269 to EPSG 4326 for query
     conversion = transform(PRISM_CRS, SEARCH_CRS, (minx, maxx), (miny, maxy))
-    bbox = (conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1])
-    dir_path = dir_path + eid + '/'
+    search_bbox = (conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1])
     time_of_interest = get_date_interval(event_date, days_before, days_after)
-    time_of_interest_sar = get_date_interval(event_date, 0, days_after + 1)
+    eid = datetime.strptime(event_date, '%Y-%m-%d').strftime('%Y%m%d')
 
     # STAC catalog search
     logger.info('Beginning catalog search...')
-    items_s2 = stac_provider.search_s2(bbox, time_of_interest, query={"eo:cloud_cover": {"lt": 95}})
-    items_s1 = stac_provider.search_s1(bbox, time_of_interest_sar, query={"sar:instrument_mode": {"eq": "IW"}})
+    items_s2 = stac_provider.search_s2(search_bbox, time_of_interest, query={"eo:cloud_cover": {"lt": 95}})
+    items_s1 = stac_provider.search_s1(search_bbox, time_of_interest, query={"sar:instrument_mode": {"eq": "IW"}})
 
     logger.info('Filtering catalog search results...')
-    if len(items_s2) == 0 or len(items_s1) == 0:
-        if len(items_s2) == 0:
-            logger.info(f'No S2 products found for date interval {time_of_interest}.')
-        if len(items_s1) == 0:
-            logger.info(f'No S1 products found for date interval {time_of_interest}.')
-        return False
-    elif not has_date_after_PRISM([item.datetime for item in items_s2], event_date):
-        logger.info(f'Products found but only before precipitation event date {event_date}.')
-        return False
-    elif not coincident_items(items_s2, items_s1, within_hours):
-        logger.info(f'No coincident S1 and S2 products found within {within_hours} hours of each other.')
-        return False
-
-    # filter out s2 cloudy/missing tiles and group items by dates in dictionary
-    logger.info(f'Checking s2 cloud null percentage...')
-    s2_by_date_crs = DateCRSOrganizer()
-    for item in items_s2:
-        # filter out those w/ cloud null via cloud null percentage checks
-        item_crs = pe.ext(item).crs_string
-        try:
-            coverpercentage = cloud_null_percentage(stac_provider, item, item_crs, prism_bbox)
-        except Exception as err:
-            logger.exception(f'Cloud null percentage calculation error for item {item.id}.')
-            raise err
-
-        if coverpercentage > maxcoverpercentage:
-            logger.debug(f'Sample {item.id} near event {event_date}, at {minx}, {miny}, {maxx}, {maxy} rejected due to {coverpercentage}% cloud or null cover.')
-            continue
-
-        s2_by_date_crs.add_item(item, item.datetime, item_crs)
-
-    # ensure one CRS still has post-event image after filters
-    s2_dates = s2_by_date_crs.get_dates()
-    if s2_by_date_crs.is_empty():
-        logger.debug(f'No s2 images left after filtering...')
-        return False
-    elif not has_date_after_PRISM(s2_dates, event_date):
-        logger.debug(f'No s2 images post event date after filtering...')
-        return False
-
-    # either use specified CRS or choose first CRS in alphabetical order for rasters
-    main_crs = s2_by_date_crs.get_all_crs()[0] if manual_crs is None else manual_crs
-    logger.debug(f'Using CRS for raster generation: {main_crs}')
-
-    # filter out s1 cloudy/missing tiles and group items by dates in dictionary
-    logger.info(f'Checking s1 null percentage...')
-    s1_by_date_crs = DateCRSOrganizer()
-    # peak ahead at the s2 items that will be selected with our crs
-    s2_items_used = s2_by_date_crs.get_all_primary_items(preferred_crs=main_crs)
-    for item in items_s1:
-        item_crs = pe.ext(item).crs_string
-
-        # filter out non coincident sar products with s2 products we've selected
-        coincident_dt = coincident_with(s2_items_used, item, within_hours)
-        if coincident_dt is None:
-            logger.debug(f'S1 product {item.id} not coincident with any of the selected S2 products.')
-            continue
-
-        try:
-            coverpercentage = sar_missing_percentage(stac_provider, item, item_crs, prism_bbox)
-        except Exception as err:
-            logger.exception(f'Missing percentage calculation error for item {item.id}.')
-            raise err
-
-        if coverpercentage > maxcoverpercentage:
-            logger.debug(f'SAR sample {item.id} near event {event_date}, at {minx}, {miny}, {maxx}, {maxy} rejected due to {coverpercentage}% missing data.')
-            continue
-
-        # should organize by the s2 item date that the s1 item is coincident with
-        s1_by_date_crs.add_item(item, coincident_dt, item_crs)
-
-    if s1_by_date_crs.is_empty():
-        logger.debug(f'No s1 images left after filtering...')
+    if len(items_s2) == 0 and len(items_s1) == 0:
+        logger.info(f'No S2 and S1 products found for date interval {time_of_interest}.')
         return False
 
     try:
@@ -1123,34 +959,86 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
         if state is None:
             raise Exception(f'State not found for {event_date}, at {minx}, {miny}, {maxx}, {maxy}')
     except Exception as err:
-        logger.exception(f'Error fetching state. Id: {eid}.')
+        logger.exception(f'Error fetching state. Eid: {eid}.')
         return False
 
-    # raster generation with chosen CRS
-    logger.info('Beginning raster generation...')
-    Path(dir_path).mkdir(parents=True, exist_ok=True)
+    # if product ID provided, look for match
+    logger.info('Beginning download...')
     file_to_product = dict()
-    try:
+    if product_id:
+        product_id_item = None
+        matched = None
+        for item in items_s2:
+            if product_id in item.id:
+                logger.info('Matched S2 product: ', item.id)
+                product_id_item = item
+                matched = 's2'
+                break
+        for item in items_s1:
+            if product_id in item.id:
+                logger.info('Matched S1 product: ', item.id)
+                product_id_item = item
+                matched = 's1'
+                break
+
+        if not product_id_item:
+            logger.exception(f'No product found with ID that matches {product_id}.')
+            return False
+
+        main_crs = pe.ext(product_id_item).crs_string if crs is None else crs
         conversion = transform(PRISM_CRS, main_crs, (minx, maxx), (miny, maxy))
         cbbox = conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]
 
-        for date in s2_dates:
-            logger.debug(f'Processing S2 date: {date}')
-            dt = date.strftime('%Y%m%d')
+        if matched == 's2':
+            dt = product_id_item.datetime.strftime('%Y%m%d')
+            dst_shape, dst_transform = pipeline_TCI(stac_provider, dir_path, f'tci_{dt}_{eid}', main_crs, product_id_item, cbbox)
+            logger.debug(f'TCI raster completed for {product_id_item.id} on {dt}.')
+            pipeline_RGB(stac_provider, dir_path, f'rgb_{dt}_{eid}', main_crs, product_id_item, cbbox)
+            logger.debug(f'RGB raster completed for {product_id_item.id} on {dt}.')
+            pipeline_B08(stac_provider, dir_path, f'b08_{dt}_{eid}', main_crs, product_id_item, cbbox)
+            logger.debug(f'B08 raster completed for {product_id_item.id} on {dt}.')
+            pipeline_NDWI(stac_provider, dir_path, f'ndwi_{dt}_{eid}', main_crs, product_id_item, cbbox, include_cmap=include_cmap)
+            logger.debug(f'NDWI raster completed for {product_id_item.id} on {dt}.')
+            pipeline_SCL(stac_provider, dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, product_id_item, cbbox,
+                        include_cmap=include_cmap)
+            logger.debug(f'SCL raster completed for {product_id_item.id} on {dt}.')
 
-            # use one item for date in preferred CRS
-            item = s2_by_date_crs.get_primary_item_for_date(date, preferred_crs=main_crs)
+            # record product used to generate rasters
+            file_to_product[f'tci_{dt}_{eid}'] = product_id_item.id
+            file_to_product[f'rgb_{dt}_{eid}'] = product_id_item.id
+            file_to_product[f'b08_{dt}_{eid}'] = product_id_item.id
+            file_to_product[f'ndwi_{dt}_{eid}'] = product_id_item.id
+            file_to_product[f'clouds_{dt}_{eid}'] = product_id_item.id
+        else:
+            dt = product_id_item.datetime.strftime('%Y%m%d')
+            pipeline_S1(stac_provider, dir_path, f'sar_{dt}_{eid}', main_crs, product_id_item, cbbox, include_cmap=include_cmap)
+            logger.debug(f'S1 raster completed for {product_id_item.id} on {dt}.')
 
+            # record product used to generate rasters
+            file_to_product[f'sar_{dt}_{eid}'] = product_id_item.id
+    else:
+        logger.info('Downloading all products in interval...',
+                    f'{len(items_s2)} S2 products and {len(items_s1)} S1 products.')
+        # try to download all in the interval
+        all_items = items_s2 + items_s1
+        main_crs = pe.ext(all_items[0]).crs_string if crs is None else crs
+
+        conversion = transform(PRISM_CRS, main_crs, (minx, maxx), (miny, maxy))
+        cbbox = conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]
+
+        for item in items_s2:
+            dt = item.datetime.strftime('%Y%m%d')
             dst_shape, dst_transform = pipeline_TCI(stac_provider, dir_path, f'tci_{dt}_{eid}', main_crs, item, cbbox)
-            logger.debug(f'TCI raster completed for {dt}.')
+            logger.debug(f'TCI raster completed for {item.id} on {dt}.')
             pipeline_RGB(stac_provider, dir_path, f'rgb_{dt}_{eid}', main_crs, item, cbbox)
-            logger.debug(f'RGB raster completed for {dt}.')
+            logger.debug(f'RGB raster completed for {item.id} on {dt}.')
             pipeline_B08(stac_provider, dir_path, f'b08_{dt}_{eid}', main_crs, item, cbbox)
-            logger.debug(f'B08 raster completed for {dt}.')
-            pipeline_NDWI(stac_provider, dir_path, f'ndwi_{dt}_{eid}', main_crs, item, cbbox)
-            logger.debug(f'NDWI raster completed for {dt}.')
-            pipeline_SCL(stac_provider, dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox)
-            logger.debug(f'SCL raster completed for {dt}.')
+            logger.debug(f'B08 raster completed for {item.id} on {dt}.')
+            pipeline_NDWI(stac_provider, dir_path, f'ndwi_{dt}_{eid}', main_crs, item, cbbox, include_cmap=include_cmap)
+            logger.debug(f'NDWI raster completed for {item.id} on {dt}.')
+            pipeline_SCL(stac_provider, dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox,
+                        include_cmap=include_cmap)
+            logger.debug(f'SCL raster completed for {item.id} on {dt}.')
 
             # record product used to generate rasters
             file_to_product[f'tci_{dt}_{eid}'] = item.id
@@ -1159,42 +1047,26 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
             file_to_product[f'ndwi_{dt}_{eid}'] = item.id
             file_to_product[f'clouds_{dt}_{eid}'] = item.id
 
-        logger.debug(f'All S2, B08, NDWI, SCL rasters completed successfully.')
-
-        logger.debug(f'Downloading S1 rasters...')
-        for date in s1_by_date_crs.get_dates():
-            # coincident date
-            cdt = date.strftime('%Y%m%d')
-
-            # item date
-            item = s1_by_date_crs.get_primary_item_for_date(date, preferred_crs=main_crs)
+        for item in items_s1:
             dt = item.datetime.strftime('%Y%m%d')
-
-            pipeline_S1(stac_provider, dir_path, f'sar_{cdt}_{dt}_{eid}', main_crs, item, cbbox)
-            logger.debug(f'S1 raster completed for {dt} coincident with S2 product at {cdt}.')
+            pipeline_S1(stac_provider, dir_path, f'sar_{dt}_{eid}', main_crs, item, cbbox, include_cmap=include_cmap)
+            logger.debug(f'S1 raster completed for {item.id} on {dt}.')
 
             # record product used to generate rasters
-            file_to_product[f'sar_{cdt}_{dt}_{eid}'] = item.id
+            file_to_product[f'sar_{dt}_{eid}'] = item.id
 
-        logger.debug(f'All coincident S1 rasters completed successfully.')
-
-        # save all supplementary rasters in raw and rgb colormap
-        logger.info('Processing supplementary rasters...')
-        pipeline_roads(dir_path, f'roads_{eid}', dst_shape, main_crs, dst_transform, state, prism_bbox)
-        logger.debug(f'Roads raster completed successfully.')
-        pipeline_dem(dir_path, f'dem_{eid}', dst_shape, main_crs, dst_transform, prism_bbox)
-        logger.debug(f'DEM raster completed successfully.')
-        pipeline_flowlines(dir_path, f'flowlines_{eid}', dst_shape, main_crs, dst_transform, prism_bbox)
-        logger.debug(f'Flowlines raster completed successfully.')
-        pipeline_waterbody(dir_path, f'waterbody_{eid}', dst_shape, main_crs, dst_transform, prism_bbox)
-        logger.debug(f'Waterbody raster completed successfully.')
-        pipeline_NLCD(dir_path, f'nlcd_{eid}', int(eid[:4]), dst_shape, main_crs, dst_transform)
-        logger.debug(f'NLCD raster completed successfully.')
-    except Exception as err:
-        logger.error(f'Raster generation error: {err}, {type(err)}')
-        logger.error(f'Raster generation failed for {event_date}, at {minx}, {miny}, {maxx}, {maxy}. Id: {eid}. Removing directory and contents.')
-        shutil.rmtree(dir_path)
-        raise err
+    # save all supplementary rasters in raw and rgb colormap
+    logger.info('Processing supplementary rasters...')
+    pipeline_roads(dir_path, f'roads_{eid}', dst_shape, main_crs, dst_transform, state, bbox, include_cmap=include_cmap)
+    logger.debug(f'Roads raster completed successfully.')
+    pipeline_dem(dir_path, f'dem_{eid}', dst_shape, main_crs, dst_transform, bbox, include_cmap=include_cmap)
+    logger.debug(f'DEM raster completed successfully.')
+    pipeline_flowlines(dir_path, f'flowlines_{eid}', dst_shape, main_crs, dst_transform, bbox, include_cmap=include_cmap)
+    logger.debug(f'Flowlines raster completed successfully.')
+    pipeline_waterbody(dir_path, f'waterbody_{eid}', dst_shape, main_crs, dst_transform, bbox, include_cmap=include_cmap)
+    logger.debug(f'Waterbody raster completed successfully.')
+    pipeline_NLCD(dir_path, f'nlcd_{eid}', int(eid[:4]), dst_shape, main_crs, dst_transform, include_cmap=include_cmap)
+    logger.debug(f'NLCD raster completed successfully.')
 
     # validate raster shapes, CRS, transforms
     result = validate_event_rasters(dir_path, logger=logger)
@@ -1207,10 +1079,7 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
     logger.info(f'Generating metadata file...')
     metadata = {
         "metadata": {
-            "Download Date": CURRENT_DATE,
-            "Sample ID": eid,
-            "Precipitation Event Date": event_date,
-            "Cumulative Daily Precipitation (mm)": float(event_precip),
+            "Download Date": event_date,
             "CRS": main_crs,
             "State": state,
             "Bounding Box": {
@@ -1219,11 +1088,16 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
                 "maxx": maxx,
                 "maxy": maxy
             },
-            "Item IDs": file_to_product,
-            "S2, S1 Coincident Within (hours)": within_hours,
-            "Max Cloud/Nodata Cover Percentage (%)": maxcoverpercentage
+            "Item IDs": file_to_product
         }
     }
+
+    if Path(dir_path + 'metadata.json').exists():
+        # if metadata file already exists, update the item IDs
+        with open(dir_path + 'metadata.json', "r") as json_file:
+            existing_metadata = json.load(json_file)
+            existing_metadata['metadata']['Item IDs'].update(metadata['metadata']['Item IDs'])
+            metadata = existing_metadata
 
     with open(dir_path + 'metadata.json', "w") as json_file:
         json.dump(metadata, json_file, indent=4)
@@ -1231,46 +1105,71 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
     logger.info('Metadata and raster generation completed. Event finished.')
     return True
 
-def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_path=None, within_hours=12, region=None, config_file=None, manual=None, source='mpc'):
-    """
-    Samples imagery of events queried from PRISM using a given minimum precipitation threshold.
-    Downloaded samples will contain multispectral data and sar data from within specified interval of event date,
-    their respective NDWI rasters. Samples will also have a raster of roads from TIGER roads dataset, DEM raster from USGS,
-    flowlines and waterbody rasters from NHDPlus dataset. All rasters will be approximately 4km x 4km at 10m resolution.
-
-    Manual file
-    -----------
-    Sometimes flood events are located outside high precipitation tiles. Use manual file to circumvent precipitation
-    filter and sample from specific PRISM indices.
-
-    Regions
-    -------
-    Regions mask the PRISM cell grid to only sample from specific regions.
-
-    Note: In the future if more L2A data become available, some previously processed and skipped events become viable.
-    In that case do not use history object during run.
+def get_bbox_from_shapefile(shapefile, crs='EPSG:4269'):
+    """Get the bounding box in CRS from shapefile. Will add a 20% buffer to
+    the height and width of the shape for the bbox
 
     Parameters
     ----------
-    threshold : int
+    shapefile : str
+        Path to shapefile.
+    crs : str
+        CRS string in form EPSG:XXXX.
+
+    Returns
+    -------
+    bbox : tuple
+        Bounding box in CRS.
+    """
+    # Read the shapefile
+    gdf = gpd.read_file(shapefile)
+    gdf_proj = gdf.to_crs(crs)
+
+    # Get the total bounding box (minx, miny, maxx, maxy)
+    minx, miny, maxx, maxy = gdf_proj.total_bounds
+
+    # Compute width and height
+    width = maxx - minx
+    height = maxy - miny
+
+    # Add 20% buffer on each side
+    buffer_x = 0.2 * width
+    buffer_y = 0.2 * height
+
+    expanded_bounds = (
+        minx - buffer_x,
+        miny - buffer_y,
+        maxx + buffer_x,
+        maxy + buffer_y,
+    )
+    return expanded_bounds
+
+def main(shapefile, event_date, days_before, days_after, product_id, dir_path=None, crs=None, include_cmap=False, config_file=None, source='mpc'):
+    """
+    Downloads S2 or S1 imagery + accompanying rasters for a specific study area delineated by
+    a shapefile. Best used with a specific S2 or S1 product ID in mind.
+
+    Parameters
+    ----------
+    shapefile : str
+    event_date : str
+        Date of flood event in format YYYY-MM-DD.
     days_before : int
         Number of days of interest before precipitation event.
     days_after : int
         Number of days of interest following precipitation event.
-    cloudcoverpercentage : (int, int)
-        Desired cloud cover percentage range for querying Copernicus Sentinel-2.
-    maxevents: int or None
-        Specify a limit to the number of extreme precipitation events to process.
+    product_id : str
+        Product id to match, can just be a prefix.
     dir_path : str, optional
-        Path to directory where samples will be saved.
-    within_hours : int, optional
-        S1 and S2 coincidence must be within this many hours.
-    region : str, optional
-        Region to sample from.
+        Path to directory where downloaded imagery will be saved.
+    crs : str
+        CRS string in form EPSG:XXXX to force the imagery to.
+    include_cmap : bool
+        Whether to include color maps for the rasters. Default is False to save space.
     config_file : str, optional
         Path to custom configuration file.
-    manual : str, optional
-        Path to text file containing manual event indices in lines with format: time, y, x.
+    source : str
+        Source of the data, can be 'mpc' or 'aws'.
 
     Returns
     -------
@@ -1283,125 +1182,73 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
 
     # make directory
     if dir_path is None:
-        dir_path = get_default_dir_path(threshold, days_before, days_after, maxcoverpercentage, region)
-        Path(dir_path).mkdir(parents=True, exist_ok=True)
-    else:
-        # Create directory if it doesn't exist
-        try:
-            Path(dir_path).mkdir(parents=True, exist_ok=True)
-        except (OSError, ValueError) as e:
-            print(f"Invalid directory path '{dir_path}'. Using default.", file=sys.stderr)
-            dir_path = get_default_dir_path(threshold, days_before, days_after, maxcoverpercentage, region)
-            Path(dir_path).mkdir(parents=True, exist_ok=True)
+        dir_path = './download_area/'
 
-        # Ensure trailing slash
-        dir_path = os.path.join(dir_path, '')
+    # Create directory if it doesn't exist
+    Path(dir_path).mkdir(parents=True, exist_ok=True)
 
     # root logger
     rootLogger = setup_logging(dir_path, logger_name='main', log_level=logging.DEBUG, mode='w', include_console=False)
 
-    # event logger
-    logger = setup_logging(dir_path, logger_name='events', log_level=logging.DEBUG, mode='a', include_console=False)
-
     # log sampling parameters used
     rootLogger.info(
-        "S2 + S1 sampling parameters used:\n"
-        f"  Threshold: {threshold}\n"
-        f"  Days before precipitation event: {days_before}\n"
-        f"  Days after precipitation event: {days_after}\n"
-        f"  Max cloud/nodata cover percentage: {maxcoverpercentage}\n"
-        f"  Max events to sample: {maxevents}\n"
-        f"  S1 and S2 coincidence must be within # hours: {within_hours}\n"
-        f"  Region: {region}\n"
-        f"  Config file: {config_file}\n"
-        f"  Manual indices: {manual}\n"
+        "Download area parameters used:\n"
+        f"  Event date: {event_date}\n"
+        f"  Days before flood event: {days_before}\n"
+        f"  Days after flood event: {days_after}\n"
+        f"  Product ID: {product_id}\n"
+        f"  CRS: {crs}\n"
+        f"  Include color maps: {include_cmap}\n"
         f"  Source: {source}\n"
+        f"  Config file: {config_file}\n"
     )
 
-    # history set of tuples
-    history = get_history(dir_path + 'history.pickle')
-
-    # load PRISM data object
-    prism_data = PRISMData.from_file(config.prism_file)
-
-    # get PRISM event indices and event data
-    if manual:
-        rootLogger.info("Using manual indices...")
-        num_candidates, events = get_manual_events(prism_data, history, manual, logger=rootLogger)
-        rootLogger.info(f"Found {num_candidates} events from {manual}.")
-    else:
-        mask = get_mask(region, config, prism_data.shape)
-        rootLogger.info("Finding candidate extreme precipitation events...")
-        num_candidates, events = get_extreme_events(prism_data, history, threshold=threshold, mask=mask, logger=rootLogger)
-        rootLogger.info(f"Found {num_candidates} candidate extreme precipitation events.")
-
-    rootLogger.info("Initializing event sampling...")
-    count = 0
-    alr_completed = 0
+    rootLogger.info("Initializing area download...")
     try:
-        rootLogger.info(f"Searching through {num_candidates} candidate indices/events...")
+        # get bbox from shapefile - use PRISM CRS for easy use of pipeline functions
+        bbox = get_bbox_from_shapefile(shapefile, crs=PRISM_CRS)
+
         # get stac provider
-        stac_provider = get_stac_provider(source, logger=logger)
-        for event_date, event_precip, prism_bbox, eid, indices, crs in events:
-            if Path(dir_path + eid + '/').is_dir():
-                if event_completed(dir_path + eid + '/', regex_patterns, pattern_dict, logger=rootLogger):
-                    rootLogger.debug(f'Event {eid} index {indices} has already been processed before. Moving on to the next event...')
-                    alr_completed += 1
-                    history.add(indices)
-                    continue
-                else:
-                    rootLogger.debug(f'Event {eid} index {indices} has already been processed before but unsuccessfully. Reprocessing...')
+        stac_provider = get_stac_provider(source, logger=rootLogger)
 
-            max_attempts = 3
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    if event_sample(stac_provider, days_before, days_after,
-                                    maxcoverpercentage, within_hours, event_date, event_precip,
-                                    prism_bbox, eid, dir_path, manual_crs=crs):
-                        count += 1
-                    history.add(indices)
-                    break
-                except (rasterio.errors.WarpOperationError, rasterio.errors.RasterioIOError, pystac_client.exceptions.APIError) as err:
-                    rootLogger.error(f"Connection error: {type(err)}")
-                    if attempt == max_attempts:
-                        rootLogger.error(f'Maximum number of attempts reached, skipping event...')
-                    else:
-                        rootLogger.info(f'Retrying ({attempt}/{max_attempts})...')
-                except NoElevationError as err:
-                    rootLogger.error(f'Elevation file missing, skipping event...')
-                    history.add(indices)
-                    break
-                except Exception as err:
-                    raise err
-
-            # once sampled maxevents, stop pipeline
-            if count >= maxevents:
-                rootLogger.info(f"Maximum number of events = {maxevents} reached. Stopping event sampling...")
+        # download imagery
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                download_area(stac_provider, bbox, event_date, days_before, days_after,
+                            product_id, dir_path, crs, include_cmap=include_cmap)
                 break
+            except (rasterio.errors.WarpOperationError, rasterio.errors.RasterioIOError, pystac_client.exceptions.APIError) as err:
+                rootLogger.error(f"Connection error: {type(err)}")
+                if attempt == max_attempts:
+                    rootLogger.error(f'Maximum number of attempts reached, skipping event...')
+                else:
+                    rootLogger.info(f'Retrying ({attempt}/{max_attempts})...')
+            except NoElevationError as err:
+                rootLogger.error(f'Elevation file missing, skipping event...')
+                break
+            except Exception as err:
+                raise err
     except Exception as err:
-        rootLogger.exception("Unexpected error during event sampling")
-    finally:
-        # store all previously processed events
-        with open(dir_path + 'history.pickle', 'wb') as f:
-            pickle.dump(history, f)
+        rootLogger.exception("Unexpected error during area download")
 
-    rootLogger.debug(f"Number of events already completed: {alr_completed}")
-    rootLogger.debug(f"Number of successful events sampled from this run: {count}")
     return 0
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(prog='sampleS2andS1', description='Samples imagery from Copernicus SENTINEL-2 and SENTINEL-1 (through a provider API) for top precipitation events and generates additional accompanying rasters for each event.')
-    parser.add_argument('threshold', type=int, help='minimum daily cumulative precipitation (mm) threshold for search')
-    parser.add_argument('-b', '--before', dest='days_before', default=2, type=int, help='number of days allowed for download before precipitation event (default: 2)')
-    parser.add_argument('-a', '--after', dest='days_after', default=4, type=int, help='number of days allowed for download following precipitation event (default: 4)')
-    parser.add_argument('-c', '--maxcover', dest='maxcoverpercentage', default=30, type=int, help='maximum cloud and no data cover percentage (default: 30)')
-    parser.add_argument('-s', '--maxevents', dest='maxevents', default=100, type=int, help='maximum number of extreme precipitation events to attempt downloading (default: 100)')
+    """The script downloads imagery given a shapefile of ROI. It is agnostic of event tiles.
+
+    To ensure shape consistency across different dates/images, use the same CRS."""
+    parser = argparse.ArgumentParser(prog='downloadArea', description='Downloads imagery from Copernicus SENTINEL-2 and SENTINEL-1 (through a provider API) + accompanying rasters for a specific study area')
+    parser.add_argument('-s', '--shapefile', dest='shapefile', required=True, help='path to shapefile of study area')
+    parser.add_argument('-e', '--event_date', dest='event_date', required=True, help='date of flood event in format YYYY-MM-DD')
+    parser.add_argument('-b', '--before', dest='days_before', default=2, type=int, help='number of days allowed for download before flood event date (default: 2)')
+    parser.add_argument('-a', '--after', dest='days_after', default=4, type=int, help='number of days allowed for download following flood event date (default: 4)')
+    parser.add_argument('-p', '--product_id', dest='product_id', default=None, help='if specified will try to match the start of the product id (default: None)')
     parser.add_argument('-d', '--dir', dest='dir_path', help='specify a directory name for downloaded samples, format should end with backslash (default: None)')
-    parser.add_argument('-w', '--within_hours', dest='within_hours', default=12, type=int, help='Floods event must have S1 and S2 data within this many hours. (default: 12)')
-    parser.add_argument('-r', '--region', default=None, choices=['ceser'], help='filter precipitation only from supported regions: ["ceser"]. (default: None)')
-    parser.add_argument('-m', '--manual', default=None, help='text file for parsing manual event indices with format: time, y, x (default: None)')
+    parser.add_argument('-c', '--crs', dest='crs', default=None, type=int, help='Force CRS to conform to this CRS (default: None)')
+    parser.add_argument('--cmap', dest='include_cmap', action='store_true', help='include color maps for the rasters (default: False)')
     parser.add_argument('-f', '--config', dest='config_file', help='specify a custom configuration file path')
     parser.add_argument('--source', choices=['mpc', 'aws'], default='mpc', help='Specify a provider (Microsoft Planetary Computer, AWS) for the ESA data (default: mpc)')
     args = parser.parse_args()
 
-    sys.exit(main(args.threshold, args.days_before, args.days_after, args.maxcoverpercentage, args.maxevents, dir_path=args.dir_path, within_hours=args.within_hours, region=args.region, config_file=args.config_file, manual=args.manual, source=args.source))
+    sys.exit(main(args.shapefile, args.event_date, args.days_before, args.days_after, args.product_id, args.dir_path, args.crs, args.include_cmap, args.config_file, args.source))

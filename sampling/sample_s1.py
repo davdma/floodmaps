@@ -14,7 +14,7 @@ import rasterio
 import os
 import sys
 from utils.utils import db_scale, setup_logging, colormap_to_rgb, crop_to_bounds, DateCRSOrganizer
-from utils.stac_provider import get_stac_provider
+from utils.stac_providers import get_stac_provider
 from utils.validate import validate_event_rasters
 
 PRISM_CRS = "EPSG:4269"
@@ -91,7 +91,7 @@ def pipeline_S1(stac_provider, dir_path, save_as, dst_crs, item, bbox):
         Path for saving generated raster. 
     save_as : str
         Name of file to be saved (do not include extension!)
-    dst_crs : obj
+    dst_crs : str
         Coordinate reference system of output raster.
     items : list[Item]
         List of PyStac Item objects

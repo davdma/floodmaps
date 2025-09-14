@@ -937,6 +937,7 @@ def download_area(stac_provider, bbox, event_date, days_before, days_after, prod
     bool
         Return True if successful, False if unsuccessful event download and processing.
     """
+    logger = logging.getLogger('main')
     minx, miny, maxx, maxy = bbox # assume bbox is in EPSG:4269
     # need to transform box from EPSG 4269 to EPSG 4326 for query
     conversion = transform(PRISM_CRS, SEARCH_CRS, (minx, maxx), (miny, maxy))
@@ -953,6 +954,7 @@ def download_area(stac_provider, bbox, event_date, days_before, days_after, prod
     if len(items_s2) == 0 and len(items_s1) == 0:
         logger.info(f'No S2 and S1 products found for date interval {time_of_interest}.')
         return False
+    logger.info(f'Found {len(items_s2)} S2 products and {len(items_s1)} S1 products for date interval {time_of_interest}.')
 
     try:
         state = get_state(minx, miny, maxx, maxy)
@@ -966,17 +968,20 @@ def download_area(stac_provider, bbox, event_date, days_before, days_after, prod
     logger.info('Beginning download...')
     file_to_product = dict()
     if product_id:
+        logger.info(f'Checking for product ID: {product_id}')
         product_id_item = None
         matched = None
         for item in items_s2:
+            logger.info(f'Checking S2 product: {item.id}')
             if product_id in item.id:
-                logger.info('Matched S2 product: ', item.id)
+                logger.info(f'Matched S2 product: {item.id}')
                 product_id_item = item
                 matched = 's2'
                 break
         for item in items_s1:
+            logger.info(f'Checking S1 product: {item.id}')
             if product_id in item.id:
-                logger.info('Matched S1 product: ', item.id)
+                logger.info(f'Matched S1 product: {item.id}')
                 product_id_item = item
                 matched = 's1'
                 break
@@ -1017,8 +1022,7 @@ def download_area(stac_provider, bbox, event_date, days_before, days_after, prod
             # record product used to generate rasters
             file_to_product[f'sar_{dt}_{eid}'] = product_id_item.id
     else:
-        logger.info('Downloading all products in interval...',
-                    f'{len(items_s2)} S2 products and {len(items_s1)} S1 products.')
+        logger.info(f'Downloading {len(items_s2)} S2 products and {len(items_s1)} S1 products.')
         # try to download all in the interval
         all_items = items_s2 + items_s1
         main_crs = pe.ext(all_items[0]).crs_string if crs is None else crs
@@ -1186,6 +1190,10 @@ def main(shapefile, event_date, days_before, days_after, product_id, dir_path=No
 
     # Create directory if it doesn't exist
     Path(dir_path).mkdir(parents=True, exist_ok=True)
+
+    # ensure dir_path ends with a slash
+    if not dir_path.endswith('/'):
+        dir_path += '/'
 
     # root logger
     rootLogger = setup_logging(dir_path, logger_name='main', log_level=logging.DEBUG, mode='w', include_console=False)

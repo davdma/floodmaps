@@ -148,7 +148,7 @@ def discover_all_tiles(events: List[Path], label_idx: Optional[Dict[Tuple[str, s
             # Find corresponding RGB file
             rgb_file = event / f'rgb_{img_dt}_{eid}.tif'
             if not rgb_file.exists():
-                logger.debug(f'RGB file not found for {label.name} in {event.name}')
+                logger.debug(f'RGB file not found for {label.name} in {event.name} (event in folder {event.parent})')
                 continue
             
             # Validate that all required files exist
@@ -169,7 +169,7 @@ def discover_all_tiles(events: List[Path], label_idx: Optional[Dict[Tuple[str, s
             if label_idx:
                 manual_label_path = get_manual_label_path(label_idx, img_dt, eid)
                 if manual_label_path:
-                    logger.debug(f'Found manual label for tile {rgb_file.name}: {manual_label_path.name}')
+                    logger.debug(f'Found manual label for tile {rgb_file.name}: {manual_label_path.name} (label in folder {manual_label_path.parent})')
                     final_label = manual_label_path
                     required_files.append(manual_label_path)
             else:
@@ -178,7 +178,7 @@ def discover_all_tiles(events: List[Path], label_idx: Optional[Dict[Tuple[str, s
             # Validate all files exist
             missing_files = [f for f in required_files if not f.exists()]
             if missing_files:
-                logger.warning(f'Missing files for tile {rgb_file.name}: {[f.name for f in missing_files]}')
+                logger.warning(f'Missing files for tile {rgb_file.name} in {event.name}: {[f.name for f in missing_files]} (event in folder {event.parent})')
                 continue
             
             tiles.append((event, rgb_file, final_label, eid, img_dt))

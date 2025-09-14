@@ -115,7 +115,7 @@ def train_loop(model, dataloader, device, optimizer, minibatches, loss_config,
                 "train precision": metric_results['BinaryPrecision'].item(),
                 "train recall": metric_results['BinaryRecall'].item(),
                 "train f1": metric_results['BinaryF1Score'].item(),
-                "train IoU": metric_results['BinaryJaccardIndex'].item()
+                "train IoU": metric_results['BinaryJaccardIndex'].item(),
                 "train tot loss": epoch_loss,
                 "train cls loss": running_cls_loss.item() / minibatches}
 

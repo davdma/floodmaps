@@ -114,15 +114,22 @@ class WelfordAccumulator:
         return self.mean.astype(np.float32), std.astype(np.float32)
 
 
-def discover_all_tiles(events: List[Path], label_idx: Optional[Dict[Tuple[str, str], Path]] = None) -> List[Tuple]:
+def discover_all_tiles(events: List[Path], label_idx: Optional[Dict[Tuple[str, str], Path]] = None, tile_cloud_threshold: float = 0.25) -> List[Tuple]:
     """Discover all individual tiles across a list of events.
     
-    Args:
-        events: List of event directory paths
-        label_idx: Optional dictionary mapping (img_dt, eid) to manual label paths
-        
-    Returns:
-        List of tuples: (event_path, sar_vv_file, label_file, eid, img_dt)
+    Parameters
+    ----------
+    events: List[Path]
+        List of event directory paths
+    label_idx: Optional[Dict[Tuple[str, str], Path]]
+        Optional dictionary mapping (img_dt, eid) to manual label paths
+    tile_cloud_threshold: float
+        Threshold for filtering out cloudy tiles (default: 0.25)
+
+    Returns
+    -------
+    tiles: List[Tuple]
+        List of tuples in form (event_path, sar_vv_file, label_file, eid, img_dt)
     """
     logger = logging.getLogger('preprocessing')
     tiles = []
@@ -148,7 +155,7 @@ def discover_all_tiles(events: List[Path], label_idx: Optional[Dict[Tuple[str, s
             # Find corresponding SAR VV file
             sar_vv_files = list(event.glob(f'sar_{img_dt}_*_vv.tif'))
             if len(sar_vv_files) == 0:
-                logger.debug(f'SAR VV file not found for {label.name} in {event.name}')
+                logger.debug(f'SAR VV file not found for {label.name} in {event.name} (event in folder {event.parent})')
                 continue
             
             sar_vv_file = sar_vv_files[0]
@@ -172,7 +179,7 @@ def discover_all_tiles(events: List[Path], label_idx: Optional[Dict[Tuple[str, s
             if label_idx:
                 manual_label_path = get_manual_label_path(label_idx, img_dt, eid)
                 if manual_label_path:
-                    logger.debug(f'Found manual label for tile {sar_vv_file.name}: {manual_label_path.name}')
+                    logger.debug(f'Found manual label for tile {sar_vv_file.name}: {manual_label_path.name} (label in folder {manual_label_path.parent})')
                     final_label = manual_label_path
                     required_files.append(manual_label_path)
             else:
@@ -181,7 +188,17 @@ def discover_all_tiles(events: List[Path], label_idx: Optional[Dict[Tuple[str, s
             # Validate all files exist
             missing_files = [f for f in required_files if not f.exists()]
             if missing_files:
-                logger.warning(f'Missing files for tile {sar_vv_file.name}: {[f.name for f in missing_files]}')
+                logger.warning(f'Missing files for tile {sar_vv_file.name} in {event.name}: {[f.name for f in missing_files]} (event in folder {event.parent})')
+                continue
+
+            # check if tile is under cloud threshold
+            cloud_file = event / f'clouds_{img_dt}_{eid}.tif'
+            if not cloud_file.exists():
+                logger.warning(f'Cloud file not found for tile {sar_vv_file.name} in {event.name}: {cloud_file.name} (event in folder {event.parent})')
+                continue
+            tile_cloud_percent = tile_cloud_percentage(cloud_file)
+            if tile_cloud_percent > tile_cloud_threshold:
+                logger.debug(f'Tile {sar_vv_file.name} in {event.name} is over cloud threshold: {tile_cloud_percent} > {tile_cloud_threshold} (event in folder {event.parent})')
                 continue
             
             tiles.append((event, sar_vv_file, final_label, eid, img_dt))
@@ -440,7 +457,7 @@ def load_tile_for_sampling(tile_info: Tuple, filter_type: str):
 
 
 def sample_patches_in_mem(tiles: List[Tuple], size: int, num_samples: int, cloud_threshold: float,
-                          filter_type: str, seed: int, max_attempts: int = 10000) -> np.ndarray:
+                          filter_type: str, seed: int, max_attempts: int = 20000) -> np.ndarray:
     """Sample patches and stores them in memory.
     
     Parameters
@@ -508,7 +525,7 @@ def sample_patches_in_mem(tiles: List[Tuple], size: int, num_samples: int, cloud
 
 
 def sample_patches_in_disk(tiles: List[Tuple], size: int, num_samples: int, cloud_threshold: float,
-                          filter_type: str, seed: int, scratch_dir: Path, worker_id: int, max_attempts: int = 10000) -> Path:
+                          filter_type: str, seed: int, scratch_dir: Path, worker_id: int, max_attempts: int = 20000) -> Path:
     """Sample patches and stores them in memory mapped file on disk.
     
     Parameters
@@ -809,9 +826,53 @@ def save_event_splits(train_events: List[Path], val_events: List[Path], test_eve
         raise
 
 
+def tile_cloud_percentage(scl_path):
+    """Calculates the percentage of pixels in SCL tile that is cloudy or null.
+    
+    Parameters
+    ----------
+    scl_path : Path
+        Path to the SCL tile
+
+    Returns
+    -------
+    cloud_percentage : float
+        Percentage of pixels in SCL tile that is cloudy or null
+    """
+    with rasterio.open(scl_path) as src:
+        cloud = src.read()
+    return cloud.sum() / cloud.size
+
+def has_tile_under_threshold(event: Path, tile_cloud_threshold: float):
+    for scl_file in event.glob('clouds_*[0-9].tif'):
+        if tile_cloud_percentage(scl_file) <= tile_cloud_threshold:
+            return True
+    return False
+
+def filter_cloud_tiles_parallel(events: List[Path], tile_cloud_threshold: float, n_workers: int = None):
+    """Filter out cloudy tiles in parallel.
+
+    Parameters
+    ----------
+    events : List[Path]
+        List of event paths
+    tile_cloud_threshold : float
+        Threshold for filtering out cloudy tiles
+    n_workers : int
+        Number of workers for parallel processing
+    """
+    if n_workers is None:
+        n_workers = 1
+    
+    with mp.Pool(n_workers) as pool:
+        mask = pool.starmap(has_tile_under_threshold, [(e, tile_cloud_threshold) for e in events])
+
+    return [s for s, m in zip(events, mask) if m]
+
 def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None, 
          sample_dir='samples_200_6_4_10_sar/', label_dir='labels/', 
-         config: Optional[str] = None, n_workers: Optional[int] = None, suffix: str = ''):
+         config: Optional[str] = None, n_workers: Optional[int] = None, suffix: str = '',
+         tile_cloud_threshold: float = 0.25):
     """Preprocesses raw S1 tiles and corresponding labels into smaller patches.
 
     Parameters
@@ -838,6 +899,8 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
         Number of worker processes for parallel processing.
     suffix : str
         Optional suffix to append to output directory name.
+    tile_cloud_threshold : float
+        Filter out tiles with cloud percentage greater than this threshold to prevent patch sampling issues (default: 0.1)
     """
     # Setup logging
     logger = logging.getLogger('preprocessing')
@@ -861,7 +924,8 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
         Samples per tile: {samples}
         Sampling method: {method}
         Filter:          {filter}
-        Cloud threshold: {cloud_threshold}
+        Patch cloud threshold: {cloud_threshold}
+        Tile cloud threshold: {tile_cloud_threshold}
         Random seed:     {seed}
         Workers:         {n_workers}
         Sample dir(s):   {sample_dir if config is None else "From config"}
@@ -919,15 +983,22 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
             # Qualify: must have at least one prediction and at least one sar vv tile
             has_pred = any(event_dir.glob('pred_*.tif'))
             has_sar_vv = any(event_dir.glob('sar_*_vv.tif'))
+
             if has_pred and has_sar_vv:
                 selected_events.append(event_dir)
                 seen_eids.add(eid)
+            else:
+                logger.debug(f'Event {eid} in folder {event_dir.parent} did not meet reqs: pred={has_pred}, sar vv={has_sar_vv}')
 
-    if len(selected_events) == 0:
+    # filter cloudy tiles in parallel:
+    filtered_events = filter_cloud_tiles_parallel(selected_events, tile_cloud_threshold, n_workers)
+    logger.info(f'# passed tile cloud threshold (<={tile_cloud_threshold}): {len(filtered_events)}/{len(selected_events)}')
+
+    if len(filtered_events) == 0:
         logger.error('No events found in provided sample directories. Exiting.')
         return 1
 
-    logger.info(f'Found {len(selected_events)} events for processing')
+    logger.info(f'Found {len(filtered_events)} events for processing')
 
     # Split events into train/val/test
     holdout_ratio = val_ratio + test_ratio
@@ -935,7 +1006,7 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
         raise ValueError('Sum of val_ratio and test_ratio must be in (0, 1).')
 
     train_events, val_test_events = train_test_split(
-        selected_events, test_size=holdout_ratio, random_state=split_seed
+        filtered_events, test_size=holdout_ratio, random_state=split_seed
     )
     test_prop_within_holdout = test_ratio / holdout_ratio
     val_events, test_events = train_test_split(
@@ -950,9 +1021,9 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
 
     # Get list of tiles for splits as events can have multiple valid tiles
     logger.info('Discovering tiles...')
-    train_tiles = discover_all_tiles(train_events, label_idx)
-    val_tiles = discover_all_tiles(val_events, label_idx)
-    test_tiles = discover_all_tiles(test_events, label_idx)
+    train_tiles = discover_all_tiles(train_events, label_idx, tile_cloud_threshold)
+    val_tiles = discover_all_tiles(val_events, label_idx, tile_cloud_threshold)
+    test_tiles = discover_all_tiles(test_events, label_idx, tile_cloud_threshold)
     
     logger.info(f'Tiles: {len(train_tiles)} train, {len(val_tiles)} val, {len(test_tiles)} test')
 
@@ -1026,11 +1097,14 @@ if __name__ == '__main__':
                        help=('optional suffix to append to preprocessed folder, ',
                        'use if you want to preprocess the same size and samples, ',
                        'but use different splits or tiles.'))
+    parser.add_argument('--tile_cloud_threshold', dest='tile_cloud_threshold', type=float, default=0.25,
+                       help='filter out tiles with cloud percentage greater than this threshold to prevent patch sampling issues (default: 0.25)')
 
     args = parser.parse_args()
     sys.exit(main(
         args.size, args.samples, args.seed, method=args.method, 
         cloud_threshold=args.cloud_threshold, filter=args.filter, 
         sample_dir=args.sample_dir, label_dir=args.label_dir, 
-        config=args.config, n_workers=args.n_workers, suffix=args.suffix
+        config=args.config, n_workers=args.n_workers, suffix=args.suffix, 
+        tile_cloud_threshold=args.tile_cloud_threshold
     ))

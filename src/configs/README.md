@@ -76,8 +76,7 @@ data:
     size: 68 # pixel width of dataset patches
     window: 64 # pixel width of model input/output
     samples: 1000 # [250, 500, 1000]
-    kernel_size: 5
-    channels: "1101111" # (VV, VH, DEM, SlopeY, SlopeX, Water, Roads)
+    channels: "11011111" # (VV, VH, DEM, SlopeY, SlopeX, Water, Roads, Flowlines)
     use_lee: False
     suffix: "" # Optional suffix for preprocessing variant datasets
     random_flip: True

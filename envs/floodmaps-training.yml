@@ -19,6 +19,6 @@ dependencies:
   - pip
   - pip:
     - rasterio
-    - wandb
     - torcheval
     - Pillow
+    - -e .

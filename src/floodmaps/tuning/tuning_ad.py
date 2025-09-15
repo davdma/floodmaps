@@ -2,16 +2,17 @@ from deephyper.hpo import HpProblem
 from deephyper.hpo import CBO
 from deephyper.evaluator import Evaluator
 from deephyper.evaluator.callback import SearchEarlyStopping
-from training.train_sar import run_experiment_s1
-from training.train_ad_head import run_experiment_ad
-from utils.config import Config
 from datetime import datetime
-from tuning.tuning_utils import load_stopper_info, save_stopper_info, print_save_best_params, save_problem
 import pandas as pd
 import argparse
 import os
 import sys
 import socket
+
+from floodmaps.training.train_sar import run_experiment_s1
+from floodmaps.training.train_ad_head import run_experiment_ad
+from floodmaps.utils.config import Config
+from floodmaps.utils.tuning_utils import load_stopper_info, save_stopper_info, print_save_best_params, save_problem
 
 # tuning autodespeckler + unet architecture
 # need to fill in need fields for loading, freezing, watching weights

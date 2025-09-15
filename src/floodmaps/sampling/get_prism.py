@@ -13,6 +13,7 @@ from pathlib import Path
 import argparse
 import sys
 
+# DEAL WITH THIS PATH
 PATH_PRISM_DIR = Path('../sampling/PRISM/')
 
 def download_prism_zips(start_date=date(2024, 7, 31), end_date=date(2024, 11, 30)):

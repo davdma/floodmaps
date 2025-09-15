@@ -19,7 +19,8 @@ import rasterio
 from fiona.transform import transform
 from pystac.extensions.projection import ProjectionExtension as pe
 import pystac_client
-from utils.utils import (
+
+from floodmaps.utils.sampling_utils import (
     NLCD_CODE_TO_RGB,
     PRISMData,
     DateCRSOrganizer,
@@ -37,11 +38,11 @@ from utils.utils import (
     NoElevationError,
     crop_to_bounds
 )
-from utils.stac_providers import get_stac_provider
-from utils.validate import validate_event_rasters
+from floodmaps.utils.stac_providers import get_stac_provider
+from floodmaps.utils.validate import validate_event_rasters
 
 # Import configuration
-from utils.config import DataConfig
+# from floodmaps.utils.config import DataConfig
 
 # Initialize configuration with filepaths
 config = DataConfig()

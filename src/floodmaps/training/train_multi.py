@@ -20,15 +20,15 @@ from torch import nn
 from torch.utils.data import DataLoader
 from torchvision import transforms
 
-from models.model import build_autodespeckler
-from training.dataset import ConditionalSARDataset
-from training.optim import get_optimizer
-from training.scheduler import get_scheduler
-from training.loss import get_ad_loss
-from utils.config import Config
-from utils.utils import (DATA_DIR, ADEarlyStopper, Metrics, BetaScheduler, get_gradient_norm,
+from floodmaps.models.model import build_autodespeckler
+from floodmaps.training.dataset import ConditionalSARDataset
+from floodmaps.training.optim import get_optimizer
+from floodmaps.training.scheduler import get_scheduler
+from floodmaps.training.loss import get_ad_loss
+from floodmaps.utils.config import Config
+from floodmaps.utils.utils import (DATA_DIR, ADEarlyStopper, Metrics, BetaScheduler, get_gradient_norm,
                    get_model_params, print_model_params_and_grads)
-from utils.metrics import (denormalize, TV_loss, var_laplacian, ssi, get_random_batch,
+from floodmaps.utils.metrics import (denormalize, TV_loss, var_laplacian, ssi, get_random_batch,
                     enl, RIS, quality_m, psnr, compute_ssim)
 
 AUTODESPECKLER_NAMES = ['CNN1', 'CNN2', 'DAE', 'VAE']

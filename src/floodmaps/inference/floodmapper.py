@@ -1,9 +1,10 @@
 import torch
 from torchvision import transforms
-from models.model import S2WaterDetector, SARWaterDetector
-from utils.config import Config
-from utils.utils import SRC_DIR, DATA_DIR
 import pickle
+
+from floodmaps.models.model import S2WaterDetector, SARWaterDetector
+from floodmaps.utils.config import Config
+from floodmaps.utils.utils import SRC_DIR, DATA_DIR
 
 def get_standardize_s2(cfg):
     """Get standardization transform for S2 data."""

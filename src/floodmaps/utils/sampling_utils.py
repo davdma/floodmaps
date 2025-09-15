@@ -15,7 +15,6 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import geopandas as gpd
 from matplotlib.colors import to_rgb
-from utils.config import DataConfig
 from pystac.item_collection import ItemCollection
 from geopy.geocoders import Nominatim
 import pickle
@@ -25,6 +24,9 @@ from rasterio.transform import Affine
 from rasterio import windows
 from rasterio.vrt import WarpedVRT
 import rasterio
+
+# FIX THESE CONFIGS WITH HYDRA
+# from floodmaps.utils.config import DataConfig
 
 # NLCD color mapping dictionary
 NLCD_COLORS = {

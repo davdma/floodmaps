@@ -13,9 +13,10 @@ import rasterio.merge
 import rasterio
 import os
 import sys
-from utils.utils import db_scale, setup_logging, colormap_to_rgb, crop_to_bounds, DateCRSOrganizer
-from utils.stac_providers import get_stac_provider
-from utils.validate import validate_event_rasters
+
+from floodmaps.utils.sampling_utils import db_scale, setup_logging, colormap_to_rgb, crop_to_bounds, DateCRSOrganizer
+from floodmaps.utils.stac_providers import get_stac_provider
+from floodmaps.utils.validate import validate_event_rasters
 
 PRISM_CRS = "EPSG:4269"
 SEARCH_CRS = "EPSG:4326"

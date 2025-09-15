@@ -1,4 +1,3 @@
-from training.train_s2 import run_experiment_s2
 from random import Random
 import pandas as pd
 import numpy as np
@@ -6,7 +5,9 @@ import argparse
 import os
 import sys
 import pickle
-from utils.config import Config
+
+from floodmaps.utils.config import Config
+from floodmaps.training.train_s2 import run_experiment_s2
 
 def load_metrics(save_chkpt_path):
     """Initialize or load in metrics list from prior benchmarking runs.

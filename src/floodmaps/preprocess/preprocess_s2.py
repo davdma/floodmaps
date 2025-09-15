@@ -16,7 +16,7 @@ try:
 except Exception:
     yaml = None
 
-from utils.utils import TRAIN_LABELS, VAL_LABELS, TEST_LABELS, SRC_DIR, DATA_DIR, SAMPLES_DIR
+from floodmaps.utils.utils import TRAIN_LABELS, VAL_LABELS, TEST_LABELS, SRC_DIR, DATA_DIR, SAMPLES_DIR
 from datetime import datetime
 
 def _find_event_dir(img_dt: str, eid: str, sample_dirs: List[str]) -> Optional[Path]:

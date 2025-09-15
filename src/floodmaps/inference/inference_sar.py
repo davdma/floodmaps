@@ -1,7 +1,6 @@
 import torch
 from torch import nn
 from torchvision import transforms
-from models.model import S2WaterDetector, SARWaterDetector
 from datetime import datetime, timezone, timedelta
 import numpy as np
 import argparse
@@ -9,8 +8,10 @@ import re
 import rasterio
 import sys
 import pickle
-from utils.utils import SAMPLES_DIR, DATA_DIR, ChannelIndexerDeprecated, SARChannelIndexer
-from utils.config import Config
+
+from floodmaps.utils.utils import SAMPLES_DIR, DATA_DIR, ChannelIndexerDeprecated, SARChannelIndexer
+from floodmaps.utils.config import Config
+from floodmaps.models.model import S2WaterDetector, SARWaterDetector
 
 def single_prediction_s2(cfg, dt, eid, format="tif", data_dir=""):
     """Predict one S2 sample for quality control purposes.

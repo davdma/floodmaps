@@ -20,16 +20,16 @@ import pickle
 from pathlib import Path
 import json
 
-from models.model import S2WaterDetector
-from utils.config import Config
-from utils.utils import DATA_DIR, RESULTS_DIR, get_model_params, Metrics, EarlyStopper, ChannelIndexer, nlcd_to_rgb
-from utils.checkpoint import save_checkpoint, load_checkpoint
-from utils.metrics import compute_nlcd_metrics
+from floodmaps.models.model import S2WaterDetector
+from floodmaps.utils.config import Config
+from floodmaps.utils.utils import DATA_DIR, RESULTS_DIR, get_model_params, Metrics, EarlyStopper, ChannelIndexer, nlcd_to_rgb
+from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
+from floodmaps.utils.metrics import compute_nlcd_metrics
 
-from training.loss import BCEDiceLoss, TverskyLoss
-from training.dataset import FloodSampleS2Dataset
-from training.optim import get_optimizer
-from training.scheduler import get_scheduler
+from floodmaps.training.loss import BCEDiceLoss, TverskyLoss
+from floodmaps.training.dataset import FloodSampleS2Dataset
+from floodmaps.training.optim import get_optimizer
+from floodmaps.training.scheduler import get_scheduler
 
 # TO IMPLEMENT: WITH DISCRIMINATOR, ADDITIONAL TRACKING OF DISCRIMINATOR OUTPUTS
 # COULD ALSO CONSIDER REMOVING DISCRIMINATOR, ONLY ATTACHING FOR TEST SET EVALUATION

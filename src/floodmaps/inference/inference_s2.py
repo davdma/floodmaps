@@ -1,15 +1,16 @@
 import torch
 from torchvision import transforms
-from models.model import S2WaterDetector
 import numpy as np
 import argparse
 import re
 import rasterio
 import sys
 import pickle
-from utils.utils import SAMPLES_DIR, DATA_DIR, ChannelIndexer
-from utils.config import Config
 from pathlib import Path
+
+from floodmaps.utils.utils import SAMPLES_DIR, DATA_DIR, ChannelIndexer
+from floodmaps.utils.config import Config
+from floodmaps.models.model import S2WaterDetector
 
 
 def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_path, dt, eid):

@@ -11,7 +11,7 @@ import logging
 import pickle
 from sklearn.model_selection import train_test_split
 
-from utils.utils import SRC_DIR, SAMPLES_DIR, enhanced_lee_filter
+from floodmaps.utils.utils import SRC_DIR, SAMPLES_DIR, enhanced_lee_filter
 ### TO IMPLEMENT: PATHS WITH SRC_DIR, SAMPLES_DIR
 
 def generate_patches(events, size, num_samples, rng, pre_sample_dir, sample_dir, kernel_size=5, typ="train"):

@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader, Subset
 import rasterio
 import numpy as np
-from training.dataset import FloodSampleMeanStd
+from floodmaps.training.dataset import FloodSampleMeanStd
 from math import exp
 import json
 import copy

@@ -1,4 +1,3 @@
-from training.train_sar import run_experiment_s1
 from random import Random
 import pandas as pd
 import numpy as np
@@ -6,7 +5,8 @@ import argparse
 import os
 import sys
 import pickle
-import wandb
+
+from floodmaps.training.train_sar import run_experiment_s1
 
 MODEL_NAMES = ['unet', 'unet++']
 AUTODESPECKLER_NAMES = ['CNN1', 'CNN2', 'DAE', 'VAE']

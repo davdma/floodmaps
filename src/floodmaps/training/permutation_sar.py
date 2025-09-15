@@ -20,11 +20,11 @@ import pickle
 import json
 from pathlib import Path
 
-from models.model import SARWaterDetector
-from utils.config import Config
-from utils.utils import (SRC_DIR, RESULTS_DIR, SARChannelIndexer)
-from training.loss import LossConfig
-from training.dataset import FloodSampleSARDataset
+from floodmaps.models.model import SARWaterDetector
+from floodmaps.utils.config import Config
+from floodmaps.utils.utils import (SRC_DIR, RESULTS_DIR, SARChannelIndexer)
+from floodmaps.training.loss import LossConfig
+from floodmaps.training.dataset import FloodSampleSARDataset
 
 LOSS_NAMES = ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
 

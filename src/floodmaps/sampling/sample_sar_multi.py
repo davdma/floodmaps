@@ -17,7 +17,8 @@ from glob import glob
 from pathlib import Path
 from typing import List, Tuple, Dict
 from fiona.transform import transform
-from utils.utils import setup_logging
+
+from floodmaps.utils.sampling_utils import setup_logging
 
 # Set Planetary Computer API key
 os.environ['PC_SDK_SUBSCRIPTION_KEY'] = 'a613baefa08445269838bc3bc0dfe2d9'

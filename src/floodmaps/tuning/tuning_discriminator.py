@@ -2,11 +2,12 @@ from deephyper.problem import HpProblem
 from deephyper.search.hps import CBO
 from deephyper.evaluator import Evaluator
 from deephyper.evaluator.callback import SearchEarlyStopping
-from training.train_discriminator import run_experiment
 import pandas as pd
 import argparse
 import os
 import math
+
+from floodmaps.training.train_discriminator import run_experiment
 
 def run(job):
     # channels = [bool(int(x)) for x in str(int(job.parameters['channels']))]

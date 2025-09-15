@@ -21,7 +21,7 @@ try:
 except Exception:
     yaml = None
 
-from utils.utils import enhanced_lee_filter, SRC_DIR, DATA_DIR, SAMPLES_DIR
+from floodmaps.utils.utils import enhanced_lee_filter, SRC_DIR, DATA_DIR, SAMPLES_DIR
 
 class WelfordAccumulator:
     """Online algorithm for computing mean and variance using Welford's method."""

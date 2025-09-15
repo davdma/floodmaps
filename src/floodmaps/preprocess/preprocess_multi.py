@@ -11,7 +11,7 @@ import logging
 import pickle
 from sklearn.model_selection import train_test_split
 
-from utils.utils import SRC_DIR, DATA_DIR, SAMPLES_DIR
+from floodmaps.utils.utils import SRC_DIR, DATA_DIR, SAMPLES_DIR
 ### ADD DEMS IN THE FUTURE - CURRENTLY NOT THE SAME SHAPE
 
 def find_vv_vh_tifs(directory):

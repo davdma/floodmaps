@@ -1,9 +1,10 @@
 import torch
 from torch import nn
-from models.unet import UNet
-from models.unet_plus import NestedUNet
-from models.discriminator import Classifier1, Classifier2, Classifier3
-from models.autodespeckler import (
+
+from floodmaps.models.unet import UNet
+from floodmaps.models.unet_plus import NestedUNet
+from floodmaps.models.discriminator import Classifier1, Classifier2, Classifier3
+from floodmaps.models.autodespeckler import (
     ConvAutoencoder1, 
     ConvAutoencoder2, 
     DenoiseAutoencoder, 
@@ -11,7 +12,7 @@ from models.autodespeckler import (
     CVAE,
     CVAE_no_cond
 )
-from utils.utils import load_model_weights
+from floodmaps.utils.utils import load_model_weights
 
 def build_autodespeckler(cfg):
     """Factory function for SAR autodespeckler model construction.

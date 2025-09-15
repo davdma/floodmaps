@@ -7,20 +7,20 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 from datetime import datetime
-from dataset import FloodSampleDataset
-from utils import trainMeanStd, wet_label, EarlyStopper, ChannelIndexer
 from torchvision import transforms
 from torcheval.metrics import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score
-from architectures.discriminator import Classifier1, Classifier2, Classifier3
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
 from random import Random
 from PIL import Image
 from glob import glob
-import loss
-from loss import BCEDiceLoss, TverskyLoss
 import numpy as np
 import sys
+
+from floodmaps.training.loss import BCEDiceLoss, TverskyLoss
+from floodmaps.models.discriminator import Classifier1, Classifier2, Classifier3
+from floodmaps.training.dataset import FloodSampleDataset
+from floodmaps.utils.utils import trainMeanStd, wet_label, EarlyStopper, ChannelIndexer
 
 MODEL_NAMES = ['c1', 'c2', 'c3']
 LOSS_NAMES = ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']

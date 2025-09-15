@@ -21,17 +21,17 @@ import pickle
 import json
 from pathlib import Path
 
-from models.model import SARWaterDetector
-from utils.config import Config
-from utils.utils import (SRC_DIR, DATA_DIR, RESULTS_DIR, Metrics, EarlyStopper,
+from floodmaps.models.model import SARWaterDetector
+from floodmaps.utils.config import Config
+from floodmaps.utils.utils import (SRC_DIR, DATA_DIR, RESULTS_DIR, Metrics, EarlyStopper,
                          SARChannelIndexer, get_model_params, nlcd_to_rgb)
-from utils.checkpoint import save_checkpoint, load_checkpoint
-from utils.metrics import compute_nlcd_metrics
+from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
+from floodmaps.utils.metrics import compute_nlcd_metrics
 
-from training.loss import LossConfig
-from training.dataset import FloodSampleSARDataset
-from training.optim import get_optimizer
-from training.scheduler import get_scheduler
+from floodmaps.training.loss import LossConfig
+from floodmaps.training.dataset import FloodSampleSARDataset
+from floodmaps.training.optim import get_optimizer
+from floodmaps.training.scheduler import get_scheduler
 
 MODEL_NAMES = ['unet', 'unet++']
 AUTODESPECKLER_NAMES = ['CNN1', 'CNN2', 'DAE', 'VAE']

@@ -89,10 +89,58 @@ Each model is tuned using Bayesian optimization with the deephyper package, and 
 
 The autodespeckler attachement was added to tackle the speckle noise present in SAR input data that degrades its quality and interpretability for the SAR flood mapping models. Using a Conditional-VAE architecture, we trained the model on multitemporal composites of SAR images. The result was a decoder that was able to generate synthetic "clean" SAR images from noisy SAR input.
 
-# Using the Model(s)
+# Usage
 
-The dataset and trained model will be shared in the future.
+Dependencies are installed via the conda environments in `envs/`. First, clone the repository locally:
 
+```bash
+git clone https://github.com/davdma/floodmaps.git
+```
+
+Then install each of the conda environments:
+```bash
+conda env create -f envs/floodmaps-sampling.yml
+conda env create -f envs/floodmaps-training.yml
+conda env create -f envs/floodmaps-tuning.yml
+```
+
+The project uses `hydra` to handle configurations. The `configs` folder contains the configuration groups and files for running the scripts. Scripts will first parse the input config from `configs/config.yaml`, so it is necessary to setup `config.yaml` correctly before running any script (note: there are some scripts that require additional `argparse` params). To setup configs correctly, set the directory paths first in `configs/paths/default.yaml`, then use interpolation of those paths across the config:
+
+```yaml
+# Setup base_dir to point to root of your cloned repo
+base_dir: /lcrc/project/hydrosm/dma
+data_dir: ${.base_dir}/data
+output_dir: ${.base_dir}/outputs
+
+# ... (additional configuration paths and settings)
+```
+
+```yaml
+# In other config files use the interpolation syntax ${...} for paths
+model:
+    weights: "${paths.output_dir}/experiments/2025-07-24_unet_tv5yhqnb/unet_cls.pth"
+```
+
+On the cluster, make sure the right conda environment is active in the job submission script:
+
+```bash
+#!/bin/bash
+#PBS -A hydrosm
+#PBS -l select=1:ngpus=1:ncpus=16
+#PBS -l walltime=2:00:00
+#PBS -N inference_s2
+#PBS -m bea
+#PBS -o /lcrc/project/hydrosm/dma/outputs/logs/inference_s2.out
+#PBS -e /lcrc/project/hydrosm/dma/outputs/logs/inference_s2.err
+
+# Set up my environment
+source ~/.bashrc
+cd /lcrc/project/hydrosm/dma
+conda activate floodmaps-training
+
+# Run sampling script
+python -m floodmaps.inference.inference_s2
+```
 
 
 

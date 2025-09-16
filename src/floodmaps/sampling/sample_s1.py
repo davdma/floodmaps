@@ -13,13 +13,12 @@ import rasterio.merge
 import rasterio
 import os
 import sys
+import hydra
+from omegaconf import DictConfig
 
-from floodmaps.utils.sampling_utils import db_scale, setup_logging, colormap_to_rgb, crop_to_bounds, DateCRSOrganizer
+from floodmaps.utils.sampling_utils import PRISM_CRS, SEARCH_CRS, db_scale, setup_logging, colormap_to_rgb, crop_to_bounds, DateCRSOrganizer
 from floodmaps.utils.stac_providers import get_stac_provider
 from floodmaps.utils.validate import validate_event_rasters
-
-PRISM_CRS = "EPSG:4269"
-SEARCH_CRS = "EPSG:4326"
 
 def get_metadata(sample):
     """Returns event folder metadata.
@@ -161,7 +160,7 @@ def coincident_days(s2_dts, s1_dt, within_days):
             break
     return coincident_dt
 
-def downloadS1(stac_provider, sample, within_days, maxcoverpercentage, replace=True):
+def downloadS1(stac_provider, sample, cfg):
     """Downloads S1 imagery for a given event.
     
     Parameters
@@ -169,11 +168,9 @@ def downloadS1(stac_provider, sample, within_days, maxcoverpercentage, replace=T
     stac_provider : STACProvider
         STAC provider object.
     sample : str
-        Path to event folder.
-    within_days : int
-        Number of days surrounding S2 dates allowed for S1 download.
-    replace : bool
-        Whether to overwrite existing SAR files found in the S2 sample folder.
+        Path string to event folder.
+    cfg : DictConfig
+        Configuration object.
     """
     # first need to check that the dates are close enough
     # extract event date and the dates of POST EVENT TCI tiles
@@ -200,7 +197,7 @@ def downloadS1(stac_provider, sample, within_days, maxcoverpercentage, replace=T
                     latest = tci_dt
 
     # time of interest is event_date to last tci date + within_days
-    time_of_interest = get_date_interval(dt, latest, within_days)
+    time_of_interest = get_date_interval(dt, latest, cfg.sampling.within_days)
     
     # get bbox
     minx, miny, maxx, maxy = prism_bbox
@@ -226,7 +223,7 @@ def downloadS1(stac_provider, sample, within_days, maxcoverpercentage, replace=T
 
         # filter out non coincident sar products with s2 products we've selected
         item_dt = datetime(item.datetime.year, item.datetime.month, item.datetime.day)
-        coincident_dt = coincident_days(tci_dates, item_dt, within_days)
+        coincident_dt = coincident_days(tci_dates, item_dt, cfg.sampling.within_days)
         if coincident_dt is None:
             logger.debug(f'S1 product {item.id} not coincident with any of the selected S2 products.')
             continue
@@ -237,7 +234,7 @@ def downloadS1(stac_provider, sample, within_days, maxcoverpercentage, replace=T
             logger.error(f'Missing percentage calculation error for item {item.id}: {err}, {type(err)}')
             raise err
 
-        if coverpercentage > maxcoverpercentage:
+        if coverpercentage > cfg.sampling.maxcoverpercentage:
             logger.debug(f'SAR sample {item.id} near event {event_date}, at {minx}, {miny}, {maxx}, {maxy} rejected due to {coverpercentage}% missing data.')
             continue
 
@@ -250,7 +247,7 @@ def downloadS1(stac_provider, sample, within_days, maxcoverpercentage, replace=T
         # coincident date
         cdt = date.strftime('%Y%m%d')
 
-        if not replace and any(Path(sample).glob(f'sar_{cdt}_*_{eid}_vv.tif')):
+        if not cfg.sampling.replace and any(Path(sample).glob(f'sar_{cdt}_*_{eid}_vv.tif')):
             logger.debug(f'S1 raster sar_{cdt}_*_{eid}_vv.tif already exists, skipping due to replace=False.')
             continue
 
@@ -273,7 +270,8 @@ def downloadS1(stac_provider, sample, within_days, maxcoverpercentage, replace=T
 
     return True
 
-def main(within_days, maxcoverpercentage, dir_path=None, replace=True, source='mpc'):
+@hydra.main(version_base=None, config_paths="configs", config_name="config.yaml")
+def main(cfg: DictConfig) -> None:
     """Samples S1 imagery on top of pre-existing S2 sample folder.
     Can run this on a S2 only directory downloaded using sample_s2.py, or to
     augment products in directory downloaded using sample_s2_s1.py.
@@ -286,43 +284,31 @@ def main(within_days, maxcoverpercentage, dir_path=None, replace=True, source='m
     
     Parameters
     ----------
-    within_days : int
-        Number of days surrounding S2 dates allowed for S1 download.
-    dir_path : str
-        Path to S2 sample folder.
-    replace : bool
-        Whether to overwrite existing SAR files found in the S2 sample folder.
+    cfg : DictConfig
+        Configuration object.
     """
-    assert dir_path is not None, 'Need to specify a directory'
-    assert Path(dir_path).is_dir(), 'Directory invalid'
+    assert cfg.sampling.dir_path is not None, 'Need to specify a directory'
+    assert Path(cfg.sampling.dir_path).is_dir(), 'Directory invalid'
     
     # Ensure trailing slash
-    dir_path = os.path.join(dir_path, '')
+    cfg.sampling.dir_path = os.path.join(cfg.sampling.dir_path, '')
 
     # setup loggers
-    rootLogger = setup_logging(dir_path, logger_name='main', log_level=logging.DEBUG, mode='w', include_console=False)
-    logger = setup_logging(dir_path, logger_name='events', log_level=logging.DEBUG, mode='a', include_console=False)
+    rootLogger = setup_logging(cfg.sampling.dir_path, logger_name='main', log_level=logging.DEBUG, mode='w', include_console=False)
+    logger = setup_logging(cfg.sampling.dir_path, logger_name='events', log_level=logging.DEBUG, mode='a', include_console=False)
     
     rootLogger.info(
         "S1 sampling parameters used:\n"
-        f"  Within days of S2 dates: {within_days}\n"
-        f"  Replace existing SAR files: {replace}"
+        f"  Within days of S2 dates: {cfg.sampling.within_days}\n"
+        f"  Replace existing SAR files: {cfg.sampling.replace}"
     )
 
     # loop over samples in directory
     rootLogger.info("Initializing SAR event sampling...")
-    samples = glob(dir_path + '*_*_*/')
-    stac_provider = get_stac_provider(source, logger=logger)
+    samples = glob(cfg.sampling.dir_path + '*_*_*/')
+    stac_provider = get_stac_provider(cfg.sampling.source, logger=logger)
     for sample in samples:
-        downloadS1(stac_provider, sample, within_days, maxcoverpercentage, replace=replace)
+        downloadS1(stac_provider, sample, cfg)
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(prog='sampleS1', description='Samples imagery from Copernicus SENTINEL-1 (through a provider API) on top of pre-existing S2 sample folder.')
-    parser.add_argument('-w', '--within_days', dest='within_days', default=2, type=int, help='number of days surrounding S2 dates allowed for download')
-    parser.add_argument('-d', '--dir', dest='dir_path', help='specify a directory name for downloaded samples, format should end with backslash (default: None)')
-    parser.add_argument('--replace', action='store_true', help='overwrite existing SAR files (default: False)')
-    parser.add_argument('--source', choices=['mpc', 'aws'], default='mpc', help='Specify a provider (Microsoft Planetary Computer, AWS) for the ESA data (default: mpc)')
-    parser.add_argument('--maxcover', dest='maxcoverpercentage', default=30, type=int, help='maximum SAR no data percentage (default: 30)')
-    args = parser.parse_args()
-    
-    sys.exit(main(args.within_days, args.maxcoverpercentage, dir_path=args.dir_path, replace=args.replace, source=args.source))
+    main()

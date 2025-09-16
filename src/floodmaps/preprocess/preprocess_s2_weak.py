@@ -4,7 +4,6 @@ import numpy as np
 from pathlib import Path
 import re
 import sys
-import argparse
 from random import Random
 import logging
 import pickle
@@ -15,13 +14,9 @@ import psutil
 import shutil
 from numpy.lib.format import open_memmap
 from datetime import datetime
-
-try:
-    import yaml
-except Exception:
-    yaml = None
-
-from floodmaps.utils.utils import SRC_DIR, DATA_DIR, SAMPLES_DIR
+import yaml
+import hydra
+from omegaconf import DictConfig
 
 class WelfordAccumulator:
     """Online algorithm for computing mean and variance using Welford's method."""
@@ -662,12 +657,12 @@ def sample_patches_parallel(tiles: List[Tuple], size: int, num_samples: int,
                     logger.warning(f"Failed to clean up scratch directory: {cleanup_e}")
 
 
-def build_label_index(label_dirs: list[str]) -> Dict[Tuple[str, str], Path]:
+def build_label_index(label_dirs: list[str], cfg: DictConfig) -> Dict[Tuple[str, str], Path]:
     """Build a dictionary mapping (img_dt, eid) to the label file path."""
     idx: Dict[Tuple[str, str], Path] = {}
     p = re.compile(r'label_(\d{8})_(\d{8}_\d+_\d+)\.tif$')
     for ld in label_dirs or []:
-        base = SAMPLES_DIR / ld
+        base = cfg.paths.labels_dir / ld
         if not base.is_dir():
             continue
         for fp in base.glob('label_*.tif'):
@@ -747,31 +742,14 @@ def save_event_splits(train_events: List[Path], val_events: List[Path], test_eve
         raise
 
 
-def main(size, samples, seed, method='random',  
-         sample_dir='s2_200_5_4_35/', label_dir='labels/', 
-         config: Optional[str] = None, n_workers: Optional[int] = None, suffix: str = ''):
+@hydra.main(version_base=None, config_path='configs', config_name='config.yaml')
+def main(cfg: DictConfig) -> None:
     """Preprocesses raw S2 tiles and corresponding labels into smaller patches.
 
     Parameters
     ----------
-    size : int
-        Size of the sampled patches.
-    samples : int
-        Number of patches to sample per raw S2 tile.
-    seed : int
-        Random seed for reproducibility.
-    method : str
-        Sampling method.
-    sample_dir : str
-        Directory containing raw S2 tiles for patch sampling.
-    label_dir : str
-        Directory containing labels for patch sampling.
-    config : str
-        YAML config file path defining sample and label directories and split ratios.
-    n_workers : int
-        Number of worker processes for parallel processing.
-    suffix : str
-        Optional suffix to append to output directory name.
+    cfg : DictConfig
+        Hydra configuration object containing all preprocessing parameters.
     """
     # Setup logging
     logger = logging.getLogger('preprocessing')
@@ -784,58 +762,48 @@ def main(size, samples, seed, method='random',
     logger.propagate = False
 
     # Set default number of workers
-    if n_workers is None:
-        n_workers = 1
+    if not hasattr(cfg.preprocess, 'n_workers'):
+        cfg.preprocess.n_workers = 1
 
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     logger.info(f'''Starting S2 weak labeling preprocessing:
         Date:            {timestamp}
-        Patch size:      {size}
-        Samples per tile: {samples}
-        Sampling method: {method}
-        Random seed:     {seed}
-        Workers:         {n_workers}
-        Sample dir(s):   {sample_dir if config is None else "From config"}
-        Label dir(s):    {label_dir if config is None else "From config"}
-        Config file:     {config if config is not None else "None"}
+        Patch size:      {cfg.preprocess.size}
+        Samples per tile: {cfg.preprocess.samples}
+        Sampling method: {cfg.preprocess.method}
+        Random seed:     {cfg.preprocess.seed}
+        Workers:         {cfg.preprocess.n_workers}
+        Sample dir(s):   {cfg.preprocess.s2.sample_dirs}
+        Label dir(s):    {cfg.preprocess.s2.label_dirs}
     ''')
 
     # Create preprocessing directory
-    if suffix:
-        pre_sample_dir = DATA_DIR / 's2_weak' / f'samples_{size}_{samples}_{suffix}'
+    if getattr(cfg.preprocess, 'suffix', None):
+        pre_sample_dir = Path(cfg.paths.preprocess_dir) / 's2_weak' / f'samples_{cfg.preprocess.size}_{cfg.preprocess.samples}_{cfg.preprocess.suffix}'
     else:
-        pre_sample_dir = DATA_DIR / 's2_weak' / f'samples_{size}_{samples}'
+        pre_sample_dir = Path(cfg.paths.preprocess_dir) / 's2_weak' / f'samples_{cfg.preprocess.size}_{cfg.preprocess.samples}'
     pre_sample_dir.mkdir(parents=True, exist_ok=True)
 
-    # Resolve input directories and split ratios
-    if config is not None:
-        if yaml is None:
-            raise ImportError("PyYAML is required to use --config. Please install with `pip install pyyaml`.")
-        with open(config, 'r') as f:
-            cfg = yaml.safe_load(f)
-        cfg_s2 = cfg.get('s2', {})
-        sample_dirs_list = cfg_s2.get('sample_dirs', [sample_dir])
-        label_dirs_list = cfg_s2.get('label_dirs', [label_dir])
-        split_cfg = cfg_s2.get('split', {})
-        split_seed = split_cfg.get('seed', seed)
-        val_ratio = split_cfg.get('val_ratio', 0.1)
-        test_ratio = split_cfg.get('test_ratio', 0.1)
-    else:
-        sample_dirs_list = [sample_dir]
-        label_dirs_list = [label_dir]
-        split_seed = seed
-        val_ratio = 0.1
-        test_ratio = 0.1
+    # Get directories and split ratios from config
+    cfg_s2 = cfg.get('s2', {})
+    sample_dirs_list = cfg_s2.get('sample_dirs', [])
+    label_dirs_list = cfg_s2.get('label_dirs', [])
+    split_cfg = cfg_s2.get('split', {})
+    val_ratio = split_cfg.get('val_ratio', 0.1)
+    test_ratio = split_cfg.get('test_ratio', 0.1)
+
+    if len(sample_dirs_list) == 0 or len(label_dirs_list) == 0:
+        raise ValueError('Sample directories and label directories must be non empty.')
 
     # Build label index for manual labels
-    label_idx = build_label_index(label_dirs_list)
+    label_idx = build_label_index(label_dirs_list, cfg)
 
     # Discover events with required S2 assets
     selected_events: List[Path] = []
     seen_eids = set()
     
     for sd in sample_dirs_list:
-        sample_path = SAMPLES_DIR / sd
+        sample_path = Path(cfg.paths.imagery_dir) / sd
         if not sample_path.is_dir():
             logger.debug(f'Sample directory {sd} is invalid, skipping...')
             continue
@@ -866,18 +834,18 @@ def main(size, samples, seed, method='random',
         raise ValueError('Sum of val_ratio and test_ratio must be in (0, 1).')
 
     train_events, val_test_events = train_test_split(
-        selected_events, test_size=holdout_ratio, random_state=split_seed
+        selected_events, test_size=holdout_ratio, random_state=cfg.preprocess.seed
     )
     test_prop_within_holdout = test_ratio / holdout_ratio
     val_events, test_events = train_test_split(
-        val_test_events, test_size=test_prop_within_holdout, random_state=split_seed + 1222
+        val_test_events, test_size=test_prop_within_holdout, random_state=cfg.preprocess.seed + 1222
     )
 
     logger.info(f'Split: {len(train_events)} train, {len(val_events)} val, {len(test_events)} test events')
 
     # Save the event splits for reproducibility and reference
     save_event_splits(train_events, val_events, test_events, pre_sample_dir, 
-                      split_seed, val_ratio, test_ratio, timestamp, "s2")
+                      cfg.preprocess.seed, val_ratio, test_ratio, timestamp, "s2")
 
     # Get list of tiles for splits as events can have multiple valid tiles
     logger.info('Discovering tiles...')
@@ -889,7 +857,7 @@ def main(size, samples, seed, method='random',
 
     # Compute statistics using parallel Welford's algorithm
     logger.info('Computing training statistics...')
-    mean_cont, std_cont = compute_statistics_parallel(train_tiles, n_workers)
+    mean_cont, std_cont = compute_statistics_parallel(train_tiles, cfg.preprocess.n_workers)
     
     # Add binary channel statistics (mean=0, std=1)
     bchannels = 3  # waterbody, roads, flowlines
@@ -899,13 +867,13 @@ def main(size, samples, seed, method='random',
     std = np.concatenate([std_cont, std_bin])
     
     # Save statistics
-    stats_file = pre_sample_dir / f'mean_std_{size}_{samples}.pkl'
+    stats_file = pre_sample_dir / f'mean_std_{cfg.preprocess.size}_{cfg.preprocess.samples}.pkl'
     with open(stats_file, 'wb') as f:
         pickle.dump((mean, std), f)
     logger.info(f'Statistics saved to {stats_file}')
 
     # Sample patches in parallel
-    if method == 'random':
+    if cfg.preprocess.method == 'random':
         # Process each split
         for split_name, tiles in [('train', train_tiles), ('val', val_tiles), ('test', test_tiles)]:
             if len(tiles) == 0:
@@ -916,47 +884,17 @@ def main(size, samples, seed, method='random',
             logger.info(f'Processing {split_name} split with {len(tiles)} tiles...')
             
             sample_patches_parallel(
-                tiles, size, samples, output_file, 
-                seed, n_workers
+                tiles, cfg.preprocess.size, cfg.preprocess.samples, output_file, 
+                cfg.preprocess.seed, cfg.preprocess.n_workers
             )
         
         logger.info('Parallel patch sampling complete.')
     else:
-        raise ValueError(f"Unsupported sampling method: {method}")
+        raise ValueError(f"Unsupported sampling method: {cfg.preprocess.method}")
 
     logger.info('Preprocessing complete.')
     return 0
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
-        prog='preprocess_s2_weak', 
-        description='Preprocesses 4km x 4km machine labeled S2 tiles into smaller patches via parallel random patch sampling.'
-    )
-    parser.add_argument('-x', '--size', dest='size', type=int, default=68, 
-                       help='pixel width of patch (default: 68)')
-    parser.add_argument('-n', '--samples', dest='samples', type=int, default=1000, 
-                       help='number of samples per image (default: 1000)')
-    parser.add_argument('-s', '--seed', dest='seed', type=int, default=433002, 
-                       help='random number generator seed (default: 433002)')
-    parser.add_argument('-m', '--method', dest='method', default='random', choices=['random'], 
-                       help='sampling method (default: random)')
-    parser.add_argument('--sdir', dest='sample_dir', default='s2_200_5_4_35/', 
-                       help='data directory in the sampling folder (default: s2_200_5_4_35/)')
-    parser.add_argument('--ldir', dest='label_dir', default='labels/', 
-                       help='data directory in the label folder (default: labels/)')
-    parser.add_argument('--config', dest='config', default=None, 
-                       help='YAML config file path defining sample directories and split ratios')
-    parser.add_argument('--workers', dest='n_workers', type=int, default=None,
-                       help='number of worker processes (default: 1)')
-    parser.add_argument('--suffix', dest='suffix', default='',
-                       help=('optional suffix to append to preprocessed folder, ',
-                       'use if you want to preprocess the same size and samples, ',
-                       'but use different splits or tiles.'))
-
-    args = parser.parse_args()
-    sys.exit(main(
-        args.size, args.samples, args.seed, method=args.method, 
-        sample_dir=args.sample_dir, label_dir=args.label_dir, 
-        config=args.config, n_workers=args.n_workers, suffix=args.suffix
-    ))
+    main()

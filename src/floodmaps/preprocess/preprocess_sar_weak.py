@@ -4,7 +4,6 @@ import numpy as np
 from pathlib import Path
 import re
 import sys
-import argparse
 from random import Random
 import logging
 import pickle
@@ -15,13 +14,15 @@ import psutil
 import shutil
 from numpy.lib.format import open_memmap
 from datetime import datetime
+import hydra
+from omegaconf import DictConfig
 
 try:
     import yaml
 except Exception:
     yaml = None
 
-from floodmaps.utils.utils import enhanced_lee_filter, SRC_DIR, DATA_DIR, SAMPLES_DIR
+from floodmaps.utils.utils import enhanced_lee_filter
 
 class WelfordAccumulator:
     """Online algorithm for computing mean and variance using Welford's method."""
@@ -741,12 +742,12 @@ def sample_patches_parallel(tiles: List[Tuple], size: int, num_samples: int,
                     logger.warning(f"Failed to clean up scratch directory: {cleanup_e}")
 
 
-def build_label_index(label_dirs: list[str]) -> Dict[Tuple[str, str], Path]:
+def build_label_index(label_dirs: list[str], cfg: DictConfig) -> Dict[Tuple[str, str], Path]:
     """Build a dictionary mapping (img_dt, eid) to the label file path."""
     idx: Dict[Tuple[str, str], Path] = {}
     p = re.compile(r'label_(\d{8})_(\d{8}_\d+_\d+)\.tif$')
     for ld in label_dirs or []:
-        base = SAMPLES_DIR / ld
+        base = Path(cfg.paths.labels_dir) / ld
         if not base.is_dir():
             continue
         for fp in base.glob('label_*.tif'):
@@ -869,38 +870,14 @@ def filter_cloud_tiles_parallel(events: List[Path], tile_cloud_threshold: float,
 
     return [s for s, m in zip(events, mask) if m]
 
-def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None, 
-         sample_dir='samples_200_6_4_10_sar/', label_dir='labels/', 
-         config: Optional[str] = None, n_workers: Optional[int] = None, suffix: str = '',
-         tile_cloud_threshold: float = 0.25):
+@hydra.main(version_base=None, config_path='configs', config_name='config.yaml')
+def main(cfg: DictConfig) -> None:
     """Preprocesses raw S1 tiles and corresponding labels into smaller patches.
 
     Parameters
     ----------
-    size : int
-        Size of the sampled patches.
-    samples : int
-        Number of patches to sample per raw S2 tile.
-    seed : int
-        Random seed for reproducibility.
-    method : str
-        Sampling method.
-    cloud_threshold : float
-        Cloud percentage threshold for determining if a patch should be kept in dataset.
-    filter : str
-        Filter to apply to patches: 'raw' (no filter) or 'lee'.
-    sample_dir : str
-        Directory containing raw S1 tiles for patch sampling.
-    label_dir : str
-        Directory containing labels for patch sampling.
-    config : str
-        YAML config file path defining sample and label directories and split ratios.
-    n_workers : int
-        Number of worker processes for parallel processing.
-    suffix : str
-        Optional suffix to append to output directory name.
-    tile_cloud_threshold : float
-        Filter out tiles with cloud percentage greater than this threshold to prevent patch sampling issues (default: 0.1)
+    cfg : DictConfig
+        Hydra configuration object containing all preprocessing parameters.
     """
     # Setup logging
     logger = logging.getLogger('preprocessing')
@@ -913,62 +890,53 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
     logger.propagate = False
 
     # Set default number of workers
-    if n_workers is None:
-        n_workers = 1
+    if not hasattr(cfg.preprocess, 'n_workers'):
+        cfg.preprocess.n_workers = 1
 
     # Create timestamp for logging
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     logger.info(f'''Starting SAR weak labeling preprocessing:
         Date:            {timestamp}
-        Patch size:      {size}
-        Samples per tile: {samples}
-        Sampling method: {method}
-        Filter:          {filter}
-        Patch cloud threshold: {cloud_threshold}
-        Tile cloud threshold: {tile_cloud_threshold}
-        Random seed:     {seed}
-        Workers:         {n_workers}
-        Sample dir(s):   {sample_dir if config is None else "From config"}
-        Label dir(s):    {label_dir if config is None else "From config"}
-        Config file:     {config if config is not None else "None"}
+        Patch size:      {cfg.preprocess.size}
+        Samples per tile: {cfg.preprocess.samples}
+        Sampling method: {cfg.preprocess.method}
+        Filter:          {getattr(cfg.preprocess, 'filter', 'raw')}
+        Patch cloud threshold: {cfg.preprocess.cloud_threshold}
+        Tile cloud threshold: {getattr(cfg.preprocess, 'tile_cloud_threshold', 0.25)}
+        Random seed:     {cfg.preprocess.seed}
+        Workers:         {cfg.preprocess.n_workers}
+        Sample dir(s):   {cfg.preprocess.s1.sample_dirs}
+        Label dir(s):    {cfg.preprocess.s1.label_dirs}
     ''')
 
     # Create preprocessing directory
-    if suffix:
-        pre_sample_dir = DATA_DIR / 's1_weak' / f'samples_{size}_{samples}_{filter}_{suffix}'
+    filter_str = getattr(cfg.preprocess, 'filter', 'raw')
+    if getattr(cfg.preprocess, 'suffix', None):
+        pre_sample_dir = Path(cfg.paths.preprocess_dir) / 's1_weak' / f'samples_{cfg.preprocess.size}_{cfg.preprocess.samples}_{filter_str}_{cfg.preprocess.suffix}'
     else:
-        pre_sample_dir = DATA_DIR / 's1_weak' / f'samples_{size}_{samples}_{filter}'
+        pre_sample_dir = Path(cfg.paths.preprocess_dir) / 's1_weak' / f'samples_{cfg.preprocess.size}_{cfg.preprocess.samples}_{filter_str}'
     pre_sample_dir.mkdir(parents=True, exist_ok=True)
 
-    # Resolve input directories and split ratios
-    if config is not None:
-        if yaml is None:
-            raise ImportError("PyYAML is required to use --config. Please install with `pip install pyyaml`.")
-        with open(config, 'r') as f:
-            cfg = yaml.safe_load(f)
-        cfg_s1 = cfg.get('s1', {})
-        sample_dirs_list = cfg_s1.get('sample_dirs', [sample_dir])
-        label_dirs_list = cfg_s1.get('label_dirs', [label_dir])
-        split_cfg = cfg_s1.get('split', {})
-        split_seed = split_cfg.get('seed', seed)
-        val_ratio = split_cfg.get('val_ratio', 0.1)
-        test_ratio = split_cfg.get('test_ratio', 0.1)
-    else:
-        sample_dirs_list = [sample_dir]
-        label_dirs_list = [label_dir]
-        split_seed = seed
-        val_ratio = 0.1
-        test_ratio = 0.1
+    # Get directories and split ratios from config
+    cfg_s1 = cfg.get('s1', {})
+    sample_dirs_list = cfg_s1.get('sample_dirs', [])
+    label_dirs_list = cfg_s1.get('label_dirs', [])
+    split_cfg = cfg_s1.get('split', {})
+    val_ratio = split_cfg.get('val_ratio', 0.1)
+    test_ratio = split_cfg.get('test_ratio', 0.1)
+
+    if len(sample_dirs_list) == 0 or len(label_dirs_list) == 0:
+        raise ValueError('Sample directories and label directories must be non empty.')
 
     # Build label index for manual labels
-    label_idx = build_label_index(label_dirs_list)
+    label_idx = build_label_index(label_dirs_list, cfg)
 
     # Discover events with required SAR assets
     selected_events: List[Path] = []
     seen_eids = set()
     
     for sd in sample_dirs_list:
-        sample_path = SAMPLES_DIR / sd
+        sample_path = Path(cfg.paths.imagery_dir) / sd
         if not sample_path.is_dir():
             logger.debug(f'Sample directory {sd} is invalid, skipping...')
             continue
@@ -991,7 +959,8 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
                 logger.debug(f'Event {eid} in folder {event_dir.parent} did not meet reqs: pred={has_pred}, sar vv={has_sar_vv}')
 
     # filter cloudy tiles in parallel:
-    filtered_events = filter_cloud_tiles_parallel(selected_events, tile_cloud_threshold, n_workers)
+    tile_cloud_threshold = getattr(cfg.preprocess, 'tile_cloud_threshold', 0.25)
+    filtered_events = filter_cloud_tiles_parallel(selected_events, tile_cloud_threshold, cfg.preprocess.n_workers)
     logger.info(f'# passed tile cloud threshold (<={tile_cloud_threshold}): {len(filtered_events)}/{len(selected_events)}')
 
     if len(filtered_events) == 0:
@@ -1006,18 +975,18 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
         raise ValueError('Sum of val_ratio and test_ratio must be in (0, 1).')
 
     train_events, val_test_events = train_test_split(
-        filtered_events, test_size=holdout_ratio, random_state=split_seed
+        filtered_events, test_size=holdout_ratio, random_state=cfg.preprocess.seed
     )
     test_prop_within_holdout = test_ratio / holdout_ratio
     val_events, test_events = train_test_split(
-        val_test_events, test_size=test_prop_within_holdout, random_state=split_seed + 1222
+        val_test_events, test_size=test_prop_within_holdout, random_state=cfg.preprocess.seed + 1222
     )
 
     logger.info(f'Split: {len(train_events)} train, {len(val_events)} val, {len(test_events)} test events')
     
     # Save the event splits for reproducibility and reference
     save_event_splits(train_events, val_events, test_events, pre_sample_dir, 
-                      split_seed, val_ratio, test_ratio, timestamp, "sar")
+                      cfg.preprocess.seed, val_ratio, test_ratio, timestamp, "sar")
 
     # Get list of tiles for splits as events can have multiple valid tiles
     logger.info('Discovering tiles...')
@@ -1029,7 +998,7 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
 
     # Compute statistics using parallel Welford's algorithm
     logger.info('Computing training statistics...')
-    mean_cont, std_cont = compute_statistics_parallel(train_tiles, filter, n_workers)
+    mean_cont, std_cont = compute_statistics_parallel(train_tiles, filter_str, cfg.preprocess.n_workers)
     
     # Add binary channel statistics (mean=0, std=1)
     bchannels = 3  # waterbody, roads, flowlines
@@ -1039,13 +1008,13 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
     std = np.concatenate([std_cont, std_bin])
     
     # Save statistics
-    stats_file = pre_sample_dir / f'mean_std_{size}_{samples}_{filter}.pkl'
+    stats_file = pre_sample_dir / f'mean_std_{cfg.preprocess.size}_{cfg.preprocess.samples}_{filter_str}.pkl'
     with open(stats_file, 'wb') as f:
         pickle.dump((mean, std), f)
     logger.info(f'Statistics saved to {stats_file}')
 
     # Sample patches in parallel
-    if method == 'random':
+    if cfg.preprocess.method == 'random':
         # Process each split
         for split_name, tiles in [('train', train_tiles), ('val', val_tiles), ('test', test_tiles)]:
             if len(tiles) == 0:
@@ -1056,55 +1025,17 @@ def main(size, samples, seed, method='random', cloud_threshold=0.1, filter=None,
             logger.info(f'Processing {split_name} split with {len(tiles)} tiles...')
             
             sample_patches_parallel(
-                tiles, size, samples, output_file, cloud_threshold, 
-                filter, seed, n_workers
+                tiles, cfg.preprocess.size, cfg.preprocess.samples, output_file, cfg.preprocess.cloud_threshold, 
+                filter_str, cfg.preprocess.seed, cfg.preprocess.n_workers
             )
         
         logger.info('Parallel patch sampling complete.')
     else:
-        raise ValueError(f"Unsupported sampling method: {method}")
+        raise ValueError(f"Unsupported sampling method: {cfg.preprocess.method}")
 
     logger.info('Preprocessing complete.')
     return 0
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
-        prog='preprocess_sar_weak', 
-        description='Preprocesses 4km x 4km machine labeled SAR tiles into smaller patches via parallel random patch sampling.'
-    )
-    parser.add_argument('-x', '--size', dest='size', type=int, default=68, 
-                       help='pixel width of patch (default: 68)')
-    parser.add_argument('-n', '--samples', dest='samples', type=int, default=1000, 
-                       help='number of samples per image (default: 1000)')
-    parser.add_argument('-s', '--seed', dest='seed', type=int, default=433002, 
-                       help='random number generator seed (default: 433002)')
-    parser.add_argument('-m', '--method', dest='method', default='random', choices=['random'], 
-                       help='sampling method (default: random)')
-    parser.add_argument('-c', '--cloud_threshold', type=float, default=0.1, 
-                       help='cloud percentage threshold for patch sampling (default: 0.1)')
-    parser.add_argument('--filter', default='raw', choices=['lee', 'raw'],
-                       help=f"filters: enhanced lee, raw (default: raw)")
-    parser.add_argument('--sdir', dest='sample_dir', default='samples_200_6_4_10_sar/', 
-                       help='data directory in the sampling folder (default: samples_200_6_4_10_sar/)')
-    parser.add_argument('--ldir', dest='label_dir', default='labels/', 
-                       help='data directory in the label folder (default: labels/)')
-    parser.add_argument('--config', dest='config', default=None, 
-                       help='YAML config file path defining sample directories and split ratios')
-    parser.add_argument('--workers', dest='n_workers', type=int, default=None,
-                       help='number of worker processes (default: 1)')
-    parser.add_argument('--suffix', dest='suffix', default='',
-                       help=('optional suffix to append to preprocessed folder, ',
-                       'use if you want to preprocess the same size and samples, ',
-                       'but use different splits or tiles.'))
-    parser.add_argument('--tile_cloud_threshold', dest='tile_cloud_threshold', type=float, default=0.25,
-                       help='filter out tiles with cloud percentage greater than this threshold to prevent patch sampling issues (default: 0.25)')
-
-    args = parser.parse_args()
-    sys.exit(main(
-        args.size, args.samples, args.seed, method=args.method, 
-        cloud_threshold=args.cloud_threshold, filter=args.filter, 
-        sample_dir=args.sample_dir, label_dir=args.label_dir, 
-        config=args.config, n_workers=args.n_workers, suffix=args.suffix, 
-        tile_cloud_threshold=args.tile_cloud_threshold
-    ))
+    main()

@@ -5,13 +5,12 @@ import numpy as np
 from pathlib import Path
 import re
 import sys
-import argparse
 from random import Random
 import logging
 import pickle
 from sklearn.model_selection import train_test_split
-
-from floodmaps.utils.utils import SRC_DIR, DATA_DIR, SAMPLES_DIR
+import hydra
+from omegaconf import DictConfig
 ### ADD DEMS IN THE FUTURE - CURRENTLY NOT THE SAME SHAPE
 
 def find_vv_vh_tifs(directory):
@@ -385,20 +384,20 @@ def trainStd(train_events, train_means):
     return overall_channel_std
 
 
-def main(size, samples, seed, method='random', sample_dir='samples_multi_sar_70_10_7/'):
+def main(cfg: DictConfig) -> None:
     """Preprocesses multitemporal SAR tiles into paired single vs composite patches for conditional generation.
 
     Parameters
     ----------
-    size : int
-        Size of the sampled patches.
-    samples : int
-        Number of patches to sample per raw S2 tile.
-    seed : int
-        Random number generator seed.
-    sample_dir : str
-        Directory containing multitemporal SAR tiles for patch sampling.
+    cfg : DictConfig
+        Hydra configuration object containing all preprocessing parameters.
     """
+    # Extract parameters from config
+    size = cfg.data.size
+    samples = cfg.data.samples
+    seed = cfg.seed
+    sample_dir = cfg.data.sample_dir
+    
     logger = logging.getLogger('preprocessing')
     logger.setLevel(logging.DEBUG)
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -409,11 +408,11 @@ def main(size, samples, seed, method='random', sample_dir='samples_multi_sar_70_
     logger.propagate = False
 
     # make our preprocess directory
-    pre_sample_dir = DATA_DIR / 'multi' / f'samples_{size}_{samples}/'
+    pre_sample_dir = Path(cfg.paths.preprocess_dir) / 'multi' / f'samples_{size}_{samples}/'
     pre_sample_dir.mkdir(parents=True, exist_ok=True)
 
     # randomly select samples to be in train and test set
-    sample_path = SAMPLES_DIR / sample_dir
+    sample_path = Path(cfg.paths.imagery_dir) / sample_dir
     all_events = list(sample_path.glob('[0-9]*'))
     train_events, val_test_events = train_test_split(all_events, test_size=0.2, random_state=seed - 20)
     val_events, test_events = train_test_split(val_test_events, test_size=0.5, random_state=seed + 1222)
@@ -446,14 +445,9 @@ def main(size, samples, seed, method='random', sample_dir='samples_multi_sar_70_
 
     logger.debug('Preprocessing complete.')
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(prog='preprocess_ad',
-        description='Preprocesses 4km x 4km multitemporal SAR tiles into paired single vs composite patches for conditional generation.')
-    parser.add_argument('-x', '--size', dest='size', type=int, default=64, help='pixel width of patch (default: 64)')
-    parser.add_argument('-n', '--samples', dest='samples', type=int, default=500, help='number of samples per image (default: 500)')
-    parser.add_argument('-s', '--seed', dest='seed', type=int, default=433002, help='random number generator seed (default: 433002)')
-    parser.add_argument('-m', '--method', dest='method', default='random', choices=['random'], help='sampling method (default: random)')
-    parser.add_argument('--sdir', dest='sample_dir', default='samples_multi_sar_70_10_7/', help='data directory in the sampling folder (default: samples_multi_sar_70_10_7/)')
+@hydra.main(version_base=None, config_path='configs', config_name='config.yaml')
+def hydra_main(cfg: DictConfig) -> None:
+    main(cfg)
 
-    args = parser.parse_args()
-    sys.exit(main(args.size, args.samples, args.seed, method=args.method, sample_dir=args.sample_dir))
+if __name__ == '__main__':
+    hydra_main()

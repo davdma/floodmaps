@@ -1,8 +1,6 @@
 import wandb
 import torch
 import logging
-import argparse
-import copy
 from datetime import datetime
 from torch import nn
 from torch.utils.data import DataLoader
@@ -14,16 +12,15 @@ from matplotlib.colors import Normalize
 import random
 from random import Random
 from PIL import Image
-from glob import glob
 import numpy as np
-import sys
 import pickle
 import json
 from pathlib import Path
+import hydra
+from omegaconf import DictConfig, OmegaConf
 
 from floodmaps.models.model import SARWaterDetector
-from floodmaps.utils.config import Config
-from floodmaps.utils.utils import (SRC_DIR, DATA_DIR, RESULTS_DIR, Metrics, EarlyStopper,
+from floodmaps.utils.utils import (Metrics, EarlyStopper,
                          SARChannelIndexer, get_model_params, nlcd_to_rgb)
 from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
 from floodmaps.utils.metrics import compute_nlcd_metrics
@@ -475,7 +472,7 @@ def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, a
 
 def save_experiment(cls_weights, ad_weights, metrics, cfg, ad_cfg, run):
     """Save experiment files to directory specified by config save_path."""
-    path = Path(cfg.save_path)
+    path = Path(cfg.path.experiment_dir) / cfg.save_path
     path.mkdir(parents=True, exist_ok=True)
 
     if cls_weights is not None:
@@ -707,9 +704,9 @@ def run_experiment_s1(cfg, ad_cfg=None):
     samples = cfg.data.samples
     suffix = getattr(cfg.data, 'suffix', '')
     if suffix:
-        sample_dir = DATA_DIR / 's1_weak' / f'samples_{size}_{samples}_{filter}_{suffix}/'
+        sample_dir = Path(cfg.path.preprocess_dir) / 's1_weak' / f'samples_{size}_{samples}_{filter}_{suffix}/'
     else:
-        sample_dir = DATA_DIR / 's1_weak' / f'samples_{size}_{samples}_{filter}/'
+        sample_dir = Path(cfg.path.preprocess_dir) / 's1_weak' / f'samples_{size}_{samples}_{filter}/'
 
     # load in mean and std
     channels = [bool(int(x)) for x in cfg.data.channels]
@@ -776,8 +773,7 @@ def run_experiment_s1(cfg, ad_cfg=None):
     try:
         if cfg.save:
             if cfg.save_path is None:
-                default_path = f"results/experiments/{datetime.today().strftime('%Y-%m-%d')}_{cfg.model.classifier}_{run.id}/"
-                cfg.save_path = default_path
+                cfg.save_path = f"{datetime.today().strftime('%Y-%m-%d')}_{cfg.model.classifier}_{run.id}/"
                 run.config.update({"save_path": cfg.save_path}, allow_val_change=True)
             print(f'Save path set to: {cfg.save_path}')
 
@@ -835,70 +831,11 @@ def validate_config(cfg):
     assert cfg.wandb.project is not None, "Wandb project must be specified"
     assert validate_channels(cfg.data.channels), "Channels must be a binary string of length 8"
 
-def main(cfg, ad_cfg):
-    validate_config(cfg) # validate ad_cfg?
+@hydra.main(version_base=None, config_paths="configs", config_name="config.yaml")
+def main(cfg: DictConfig):
+    validate_config(cfg)
+    ad_cfg = getattr(cfg, 'ad', None)
     run_experiment_s1(cfg, ad_cfg=ad_cfg)
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(prog='train_sar_classifier', description='Trains SAR classifier model from patches. The classifier inputs a patch with n channels and outputs a binary patch with water pixels labeled 1.')
-
-    # YAML config file
-    parser.add_argument("--config_file", default="configs/classifier_default.yaml", help="Path to YAML config file (default: configs/classifier_default.yaml)")
-        
-    # wandb
-    parser.add_argument('--project', help='Wandb project where run will be logged')
-    parser.add_argument('--group', help='Optional group name for model experiments (default: None)')
-    parser.add_argument('--num_sample_predictions', type=int, help='number of predictions to visualize (default: 40)')
-
-    # evaluation
-    parser.add_argument('--mode', choices=['val', 'test'], help=f"dataset used for evaluation metrics (default: val)")
-
-    # ml
-    parser.add_argument('-e', '--epochs', type=int)
-    parser.add_argument('-b', '--batch_size', type=int)
-    parser.add_argument('-s', '--subset', dest='subset', type=float, help='percentage of training dataset to use per epoch (default: 1.0)')
-    parser.add_argument('-l', '--lr', type=float)
-    parser.add_argument('-p', '--patience', type=int, help='early stopping patience')
-
-    # model
-    parser.add_argument('--classifier', choices=MODEL_NAMES,
-                        help=f"models: {', '.join(MODEL_NAMES)}")
-    # unet
-    parser.add_argument('--dropout', type=float)
-
-    # autodespeckler
-    parser.add_argument('--autodespeckler', choices=AUTODESPECKLER_NAMES,
-                        help=f"models: {', '.join(AUTODESPECKLER_NAMES)}")
-    parser.add_argument('--noise_type', choices=NOISE_NAMES,
-                        help=f"models: {', '.join(NOISE_NAMES)}")
-    parser.add_argument('--noise_coeff', type=float, help='noise coefficient')
-    parser.add_argument('--latent_dim', type=int, help='latent dimensions')
-    parser.add_argument('--AD_num_layers', type=int, help='Autoencoder layers')
-    parser.add_argument('--AD_kernel_size', type=int, help='Autoencoder kernel size')
-    parser.add_argument('--AD_dropout', type=float, help='Autoencoder dropout')
-    parser.add_argument('--AD_activation_func', choices=['leaky_relu', 'relu'], help=f'activations: leaky_relu, relu')
-    parser.add_argument('--VAE_beta', type=float)
-
-    # load weights
-    parser.add_argument('--load_autodespeckler', help='File path to .pth')
-    parser.add_argument('--freeze_autodespeckler', type=bool,help='Freeze autodespeckler weights during training')
-
-    # data loading
-    parser.add_argument('--num_workers', type=int)
-
-    # loss
-    parser.add_argument('--loss', choices=LOSS_NAMES,
-                        help=f"loss: {', '.join(LOSS_NAMES)}")
-
-    # optimizer
-    parser.add_argument('--optimizer', choices=['Adam', 'SGD'],
-                        help=f"optimizer: {', '.join(['Adam', 'SGD'])}")
-
-    # reproducibility
-    parser.add_argument('--seed', type=int, help='seeding')
-
-    _args = parser.parse_args()
-    cfg = Config(**_args.__dict__)
-    ad_config_path = cfg.model.autodespeckler.ad_config
-    ad_cfg = Config(config_file=ad_config_path) if ad_config_path is not None else None
-    sys.exit(main(cfg, ad_cfg))
+    main()

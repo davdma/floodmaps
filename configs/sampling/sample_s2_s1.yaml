@@ -1,8 +1,0 @@
-paths:
-  prism_data: "PRISM/prismprecip_20160801_20241130.nc"
-  ceser_boundary: "CESER/CESER_FM_potential_no-flow_boundary.shp"
-  prism_meshgrid: "PRISM/meshgrid/prism_4km_mesh.shp"
-  nhd_wbd: "NHD/WBD_National_GDB.gdb"
-  elevation_dir: "Elevation/"
-  nlcd_dir: "NLCD/"
-  roads_dir: "Roads/"

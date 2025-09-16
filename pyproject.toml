@@ -13,3 +13,8 @@ dependencies = [
 requires-python = ">= 3.11"
 authors = [{name = "David Ma", email = "dma@anl.gov"}]
 license = "MIT"
+
+[tool.setuptools.packages.find]
+# Look for packages in both src/ and repo root (so configs gets included)
+# The purpose here is to get rid hydra needing to take long relative paths to find configs
+where = ["src", "."]

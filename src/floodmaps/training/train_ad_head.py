@@ -1,6 +1,5 @@
 import wandb
 import logging
-import argparse
 from pathlib import Path
 from datetime import datetime
 from matplotlib.cm import ScalarMappable
@@ -9,11 +8,11 @@ import matplotlib.pyplot as plt
 import random
 from random import Random
 from PIL import Image
-from glob import glob
 import numpy as np
-import sys
 import pickle
 import json
+import hydra
+from omegaconf import DictConfig, OmegaConf
 
 import torch
 from torch import nn
@@ -25,8 +24,7 @@ from floodmaps.training.dataset import DespecklerSARDataset
 from floodmaps.training.optim import get_optimizer
 from floodmaps.training.scheduler import get_scheduler
 from floodmaps.training.loss import get_ad_loss
-from floodmaps.utils.config import Config
-from floodmaps.utils.utils import (DATA_DIR, ADEarlyStopper, Metrics, BetaScheduler, get_gradient_norm,
+from floodmaps.utils.utils import (ADEarlyStopper, Metrics, BetaScheduler, get_gradient_norm,
                    get_model_params, print_model_params_and_grads)
 from floodmaps.utils.metrics import (denormalize, TV_loss, var_laplacian, ssi, get_random_batch,
                     enl, RIS, quality_m)
@@ -323,7 +321,7 @@ def calculate_metrics(dataloader, dataset, train_mean, train_std, model, \
 
 def save_experiment(weights, metrics, cfg, run):
     """Save experiment files to directory specified by config save_path."""
-    path = Path(cfg.save_path)
+    path = Path(cfg.paths.experiment_dir) / cfg.save_path
     path.mkdir(parents=True, exist_ok=True)
 
     if weights is not None:
@@ -607,7 +605,7 @@ def run_experiment_ad(cfg):
     kernel_size = cfg.data.kernel_size
     size = cfg.data.size
     samples = cfg.data.samples
-    sample_dir = DATA_DIR / 'ad' / f'samples_{kernel_size}_{size}_{samples}_dem/'
+    sample_dir = Path(cfg.paths.preprocess_dir) / 'ad' / f'samples_{kernel_size}_{size}_{samples}_dem/'
 
     # load in mean and std
     with open(sample_dir / f'mean_std_{kernel_size}_{size}_{samples}_dem.pkl', 'rb') as f:
@@ -669,8 +667,7 @@ def run_experiment_ad(cfg):
         # setup save path
         if cfg.save:
             if cfg.save_path is None:
-                default_path = f"experiments/{datetime.today().strftime('%Y-%m-%d')}_{cfg.model.autodespeckler}_{run.id}/"
-                cfg.save_path = default_path
+                cfg.save_path = f"{datetime.today().strftime('%Y-%m-%d')}_{cfg.model.autodespeckler}_{run.id}/"
                 run.config.update({"save_path": cfg.save_path}, allow_val_change=True)
             print(f'Save path set to: {cfg.save_path}')
 
@@ -710,6 +707,7 @@ def run_experiment_ad(cfg):
 
 def validate_config(cfg):
     # Add checks
+    assert cfg.save in [True, False], "Save must be a boolean"
     assert cfg.train.lr > 0, "Learning rate must be positive"
     assert cfg.model.autodespeckler in AUTODESPECKLER_NAMES, f"Model must be one of {AUTODESPECKLER_NAMES}"
     assert cfg.train.loss in AD_LOSS_NAMES, f"Loss must be one of {AD_LOSS_NAMES}"
@@ -717,75 +715,15 @@ def validate_config(cfg):
     assert cfg.train.LR_scheduler in SCHEDULER_NAMES, f"LR scheduler must be one of {SCHEDULER_NAMES}"
     assert cfg.train.early_stopping in [True, False], "Early stopping must be a boolean"
     assert not cfg.train.early_stopping or cfg.train.patience is not None, "Patience must be set if early stopping is enabled"
-    assert cfg.train.random_flip in [True, False], "Random flip must be a boolean"
-    assert cfg.train.save in [True, False], "Save must be a boolean"
+    assert cfg.data.random_flip in [True, False], "Random flip must be a boolean"
     assert cfg.train.batch_size is not None and cfg.train.batch_size > 0, "Batch size must be defined and positive"
     assert cfg.eval.mode in ['val', 'test'], f"Evaluation mode must be one of {['val', 'test']}"
     assert cfg.wandb.project is not None, "Wandb project must be specified"
 
-def main(cfg):
+@hydra.main(version_base=None, config_path="configs", config_name="config.yaml")
+def main(cfg: DictConfig) -> None:
     validate_config(cfg)
     run_experiment_ad(cfg)
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(prog='train_ad_head', description='Trains SAR autoencoder head by itself.')
-
-    # YAML config file
-    parser.add_argument("--config_file", default="configs/default.yaml", help="Path to YAML config file (default: configs/default.yaml)")
-
-    # save model, config, and wandb run info to folder
-    # parser.add_argument('--save', action='store_true', help='save model and configs to file (default: False)')
-    parser.add_argument('--save_path', help='directory path for saving the model')
-
-    # wandb
-    parser.add_argument('--project', help='Wandb project where run will be logged')
-    parser.add_argument('--group', help='Optional group name for model experiments')
-    parser.add_argument('--num_sample_predictions', type=int, help='number of predictions to visualize')
-
-    # ml
-    parser.add_argument('-e', '--epochs', type=int)
-    parser.add_argument('-b', '--batch_size', type=int)
-    parser.add_argument('-l', '--lr', type=float)
-    parser.add_argument('-p', '--patience', type=int, help='early stopping patience')
-    parser.add_argument('--LR_scheduler', choices=SCHEDULER_NAMES,
-                        help=f"LR schedulers: {', '.join(SCHEDULER_NAMES)}")
-
-    # autodespeckler
-    parser.add_argument('--autodespeckler', choices=AUTODESPECKLER_NAMES,
-                        help=f"models: {', '.join(AUTODESPECKLER_NAMES)}")
-    parser.add_argument('--noise_type', choices=NOISE_NAMES,
-                        help=f"models: {', '.join(NOISE_NAMES)}")
-    parser.add_argument('--noise_coeff', type=float, help="noise coefficient")
-    parser.add_argument('--latent_dim', type=int, help='latent dimensions')
-    parser.add_argument('--AD_num_layers', type=int, help='Autoencoder layers')
-    parser.add_argument('--AD_kernel_size', type=int, help='Autoencoder kernel size')
-    parser.add_argument('--AD_dropout', type=float, help='Autoencoder dropout')
-    parser.add_argument('--AD_activation_func', choices=['leaky_relu', 'relu', 'softplus', 'mish', 'gelu', 'elu'], help='activations: leaky_relu, relu, softplus, mish, gelu, elu')
-
-    # VAE Beta
-    parser.add_argument('--VAE_beta', type=float, help="VAE beta for KL divergence term")
-    parser.add_argument('--beta_period', type=int, help="Epoch period for beta annealing")
-    parser.add_argument('--beta_cycles', type=int, help="M cycles for beta annealing ")
-    parser.add_argument('--beta_proportion', type=float, help="R proportion used to increase beta within a cycle")
-
-    # data
-    parser.add_argument('--num_workers', type=int)
-
-    # loss
-    parser.add_argument('--loss', choices=AD_LOSS_NAMES,
-                        help=f"loss: {', '.join(AD_LOSS_NAMES)}")
-    parser.add_argument('--clip', type=float, help="Gradient clipping max norm")
-    # print statistics of current gradient and adjust norm used to clip according to the statistics
-    # heuristically use 1
-
-    # optimizer
-    parser.add_argument('--optimizer', choices=['Adam', 'SGD'],
-                        help=f"optimizer: {', '.join(['Adam', 'SGD'])}")
-
-    # reproducibility
-    parser.add_argument('--seed', type=int, help='seeding')
-
-    # Load base config
-    _args = parser.parse_args()
-    cfg = Config(**_args.__dict__)
-    sys.exit(main(cfg))
+    main()

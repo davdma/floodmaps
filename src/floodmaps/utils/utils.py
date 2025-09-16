@@ -12,15 +12,6 @@ import torch.nn.functional as F
 from pathlib import Path
 from matplotlib.colors import to_rgb
 
-SRC_DIR = Path(__file__).resolve().parents[1]
-SAMPLES_DIR = Path(__file__).resolve().parents[2] / 'sampling'
-DATA_DIR = SRC_DIR / 'data'
-PREPROCESS_DIR = SRC_DIR / 'preprocess'
-MODELS_DIR = SRC_DIR / 'models'
-OUTPUT_DIR = SRC_DIR / 'outputs'
-CONFIG_DIR = SRC_DIR / 'configs'
-RESULTS_DIR = SRC_DIR / 'results'
-
 TRAIN_LABELS = ["label_20150919_20150917_496_811.tif", "label_20150919_20150917_497_812.tif",
                 "label_20151112_20151109_472_940.tif", "label_20151112_20151109_473_939.tif",
                 "label_20151112_20151109_473_940.tif", "label_20151112_20151109_473_941.tif",

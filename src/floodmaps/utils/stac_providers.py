@@ -104,11 +104,23 @@ class STACProvider(ABC):
 class MicrosoftPlanetaryComputerProvider(STACProvider):
     """Microsoft Planetary Computer STAC provider implementation."""
     
+    def __init__(self, logger: Optional[logging.Logger] = None, api_key: Optional[str] = None):
+        """Initialize with optional API key parameter."""
+        self.api_key = api_key
+        super().__init__(logger)
+    
     def _initialize_catalog(self):
         """Initialize the Microsoft Planetary Computer catalog."""
-        # Set API key if not already set - will need to configure this for your own account
-        if 'PC_SDK_SUBSCRIPTION_KEY' not in os.environ:
-            os.environ['PC_SDK_SUBSCRIPTION_KEY'] = 'a613baefa08445269838bc3bc0dfe2d9'
+        # Set API key from parameter or environment variable
+        if self.api_key:
+            os.environ['PC_SDK_SUBSCRIPTION_KEY'] = self.api_key
+        elif 'PC_SDK_SUBSCRIPTION_KEY' not in os.environ:
+            raise ValueError(
+                "Microsoft Planetary Computer API key not found. "
+                "Please set the PC_SDK_SUBSCRIPTION_KEY environment variable "
+                "or pass api_key parameter. "
+                "You can get your API key from https://planetarycomputer.microsoft.com/account/request"
+            )
         
         self.catalog = pystac_client.Client.open(
             "https://planetarycomputer.microsoft.com/api/stac/v1"
@@ -189,13 +201,28 @@ class AWSProvider(STACProvider):
             raise ValueError(f"Unknown asset type: {asset_type}")
 
 
-def get_stac_provider(provider_name: str, logger: Optional[logging.Logger] = None) -> STACProvider:
-    """Factory function to get the appropriate STAC provider."""
+def get_stac_provider(provider_name: str, logger: Optional[logging.Logger] = None, api_key: Optional[str] = None) -> STACProvider:
+    """Factory function to get the appropriate STAC provider.
+    
+    Parameters
+    ----------
+    provider_name : str
+        Name of the provider ('mpc', 'aws', etc.)
+    logger : Optional[logging.Logger]
+        Logger instance
+    api_key : Optional[str]
+        API key for providers that require authentication (e.g., Microsoft Planetary Computer)
+    
+    Returns
+    -------
+    STACProvider
+        Configured STAC provider instance
+    """
     provider_name = provider_name.lower()
     
     if provider_name in ["mpc", "microsoft", "planetary_computer"]:
-        return MicrosoftPlanetaryComputerProvider(logger)
+        return MicrosoftPlanetaryComputerProvider(logger, api_key)
     elif provider_name in ["aws", "amazon"]:
         return AWSProvider(logger)
     else:
-        raise ValueError(f"Unknown provider: {provider_name}. Supported providers: mpc, aws, copernicus") 
+        raise ValueError(f"Unknown provider: {provider_name}. Supported providers: mpc, aws") 

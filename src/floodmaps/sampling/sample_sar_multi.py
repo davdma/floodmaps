@@ -1,4 +1,3 @@
-import argparse
 from pathlib import Path
 import numpy as np
 import json
@@ -11,19 +10,14 @@ import rasterio
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 import rasterio.merge
 from rasterio.vrt import WarpedVRT
-import os
-import sys
 from glob import glob
 from pathlib import Path
 from typing import List, Tuple, Dict
 from fiona.transform import transform
+import hydra
+from omegaconf import DictConfig
 
-from floodmaps.utils.sampling_utils import setup_logging
-
-# Set Planetary Computer API key
-os.environ['PC_SDK_SUBSCRIPTION_KEY'] = 'a613baefa08445269838bc3bc0dfe2d9'
-PRISM_CRS = "EPSG:4269"
-SEARCH_CRS = "EPSG:4326"
+from floodmaps.utils.sampling_utils import PRISM_CRS, SEARCH_CRS, setup_logging
 
 def is_completed(sample_dir: Path) -> bool:
     """Check if the sample has already been processed."""
@@ -223,8 +217,6 @@ def download_and_process_sar(items: List,
                 vh_hrefs.append(vh_href)
 
         # Download and merge VV polarization
-        min_height = 999999
-        min_width = 999999
         try:
             # use bilerp for best interpolation quality, also ensure no missing values
             # convert EPSG:4326 CRS of search to utm of data
@@ -339,8 +331,7 @@ def save_multitemporal(temporal_data: Dict[str, np.ndarray],
         json.dump(metadata, f)
 
 def download_multi(search_bbox: Tuple[float, float, float, float], search_start_dt: object,
-                search_end_dt: object, event_dt: object, acquisitions: int, time_interval: int, 
-                num_days: int, allow_missing: bool, output_dir: str, eid: str, logger: logging.Logger):
+                search_end_dt: object, event_dt: object, eid: str, cfg: DictConfig, logger: logging.Logger):
     """Downloads and composites SAR data for a given time interval and stack size.
     
     Parameters
@@ -353,48 +344,40 @@ def download_multi(search_bbox: Tuple[float, float, float, float], search_start_
         End date of the search interval.
     event_dt : datetime object
         Date of the flood event.
-    acquisitions : int
-        Number of acquisitions to download.
-    time_interval : int
-        Time interval in days used as sliding window to find acquisitions.
-    num_days : int
-        Number of days before and after the flood event date to avoid sampling.
-    allow_missing : bool
-        If True, allow missing data in the multitemporal SAR data.
-    output_dir : str
-        Output directory for saving files.
     eid : str
         Event ID of the flood event.
+    cfg : DictConfig
+        Configuration object.
     logger : logging.Logger
         Logger for logging messages.
     """
     # should log and save the time interval of composite: i.e. the date of the
     # first and last acquisitions
     logger.info(f'Downloading multitemporal sar for bbox {search_bbox} \
-                with time interval {time_interval} between {search_start_dt} and {search_end_dt}.')
+                with time interval {cfg.sampling.time_interval} between {search_start_dt} and {search_end_dt}.')
 
     # Get SAR items from STAC API
     current_start = search_start_dt
-    current_end = current_start + timedelta(days=time_interval)
+    current_end = current_start + timedelta(days=cfg.sampling.time_interval)
     found = False
     fails = 0
     while current_end <= search_end_dt:
         # if search interval within num_days of event_date, skip
-        if (event_dt - current_end).days < num_days and (current_start - event_dt).days < num_days:
+        if (event_dt - current_end).days < cfg.sampling.num_days and (current_start - event_dt).days < cfg.sampling.num_days:
             logger.info(f'Skipping {current_start} to {current_end} due to overlap with event date {event_dt}...')
-            current_start += timedelta(days=time_interval)
-            current_end = current_start + timedelta(days=time_interval)
+            current_start += timedelta(days=cfg.sampling.time_interval)
+            current_end = current_start + timedelta(days=cfg.sampling.time_interval)
             continue
 
         time_of_interest = get_date_interval(current_start, current_end)
         logger.info(f'Searching {time_of_interest}...')
         items = get_sar_items(search_bbox, time_of_interest, logger)
-        if len(items) >= acquisitions:
-            logger.info(f'{len(items)} >= {acquisitions} minimum acquisitions found...')
+        if len(items) >= cfg.sampling.acquisitions:
+            logger.info(f'{len(items)} >= {cfg.sampling.acquisitions} minimum acquisitions found...')
             # Download and process SAR data
-            temporal_data, metadata = download_and_process_sar(items, args.output_dir,
-                                                              search_bbox, acquisitions,
-                                                              allow_missing,
+            temporal_data, metadata = download_and_process_sar(items, cfg.sampling.output_dir,
+                                                              search_bbox, cfg.sampling.acquisitions,
+                                                              cfg.sampling.allow_missing,
                                                               logger)
             if temporal_data is None:
                 logger.debug(f"Not enough data found after merging. Trying next interval...")
@@ -405,15 +388,15 @@ def download_multi(search_bbox: Tuple[float, float, float, float], search_start_
 
         if fails >= 3:
             logger.error(f"No SAR scenes found after 3 consecutive failed download attempts. Skipping search for bbox {search_bbox} \
-                        with time interval {time_interval} between {search_start_dt} and {search_end_dt}.")
+                        with time interval {cfg.sampling.time_interval} between {search_start_dt} and {search_end_dt}.")
             return
 
-        current_start += timedelta(days=time_interval)
-        current_end = current_start + timedelta(days=time_interval)
+        current_start += timedelta(days=cfg.sampling.time_interval)
+        current_end = current_start + timedelta(days=cfg.sampling.time_interval)
 
     if not found:
         error_msg = f"No SAR scenes found. Skipping search for bbox {search_bbox} \
-                    with time interval {time_interval} between {search_start_dt} and {search_end_dt}."
+                    with time interval {cfg.sampling.time_interval} between {search_start_dt} and {search_end_dt}."
         logger.error(error_msg)
         return
     
@@ -421,17 +404,17 @@ def download_multi(search_bbox: Tuple[float, float, float, float], search_start_
     metadata.update({'search_start_dt': current_start.strftime('%Y-%m-%d'),
                      'search_end_dt': current_end.strftime('%Y-%m-%d'),
                      'event_dt': event_dt.strftime('%Y-%m-%d'),
-                     'acquisitions': acquisitions,
-                     'time_interval': time_interval,
-                     'num_days': num_days})
+                     'acquisitions': cfg.sampling.acquisitions,
+                     'time_interval': cfg.sampling.time_interval,
+                     'num_days': cfg.sampling.num_days})
     save_multitemporal(temporal_data, current_start, current_end,
-                       output_dir, eid, metadata, logger)
+                       cfg.sampling.output_dir, eid, metadata, logger)
     
     logger.info(f"Completed multitemporal SAR data collection and compositing for {search_bbox}")
 
 
-def main(output_dir: str, time_interval: int, acquisitions: int, num_days: int,
-        bbox: Tuple[float, float, float, float], allow_missing: bool):
+@hydra.main(version_base=None, config_paths="configs", config_name="config.yaml")
+def main(cfg: DictConfig) -> None:
     """Initializes multitemporal SAR data collection. Compositing should be done
     during preprocessing of the data, not here.
 
@@ -441,25 +424,10 @@ def main(output_dir: str, time_interval: int, acquisitions: int, num_days: int,
 
     Metadata should store the date of each acquisition in order and the bounding
     box of the roi.
-
-    Parameters
-    ----------
-    output_dir : str
-        Output directory for saving files.
-    time_interval : int
-        Max tolerated time interval in days between first and last acquisition.
-    acquisitions : int
-        Number of acquisitions to download in the time interval.
-    num_days : int 
-        Number of days before and after flood event date to avoid sampling.
-    bbox : Tuple[float, float, float, float]
-        Bounding box of the search area in PRISM_CRS = EPSG:4269.
-    allow_missing : bool
-        If True, allow missing data in the multitemporal SAR data.
     """
     # Setup logging
     logger = setup_logging(
-        output_dir,
+        cfg.sampling.output_dir,
         logger_name='multitemporal_sar', 
         log_level=logging.DEBUG,
         include_console=False
@@ -471,7 +439,8 @@ def main(output_dir: str, time_interval: int, acquisitions: int, num_days: int,
     search_end_dt = datetime(2025, 4, 29)
 
     # only do single bbox - for testing purposes
-    if bbox is not None:
+    if cfg.sampling.bbox is not None:
+        bbox = tuple(cfg.sampling.bbox)
         minx, miny, maxx, maxy = bbox
         conversion = transform(PRISM_CRS, SEARCH_CRS, (minx, maxx), (miny, maxy))
 
@@ -479,16 +448,14 @@ def main(output_dir: str, time_interval: int, acquisitions: int, num_days: int,
         eid = '20170826_487_695'
 
         search_bbox = (conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1])
-        download_multi(search_bbox, search_start_dt, search_end_dt, event_dt,
-                        acquisitions, time_interval, num_days, allow_missing, output_dir, eid, logger)
+        download_multi(search_bbox, search_start_dt, search_end_dt, event_dt, eid, cfg, logger)
     else:
         # get all bboxes in the sample directory
         samples = glob('samples_200_6_4_10_sar/*_*_*/')
-        test = 0
         for sample in samples:
             # first check if the sample has already been processed
             eid = sample.split('/')[-2]
-            sample_dir = Path(output_dir) / eid
+            sample_dir = Path(cfg.sampling.output_dir) / eid
             if is_completed(sample_dir):
                 logger.info(f"Sample {eid} already processed. Skipping...")
                 continue
@@ -499,26 +466,9 @@ def main(output_dir: str, time_interval: int, acquisitions: int, num_days: int,
             event_dt = datetime(int(event_date[0:4]), int(event_date[4:6]), int(event_date[6:8]))
 
             logger.info(f'Downloading multitemporal sar for EID {eid}...')
-            download_multi(search_bbox, search_start_dt, search_end_dt, event_dt,
-                        acquisitions, time_interval, num_days, allow_missing, output_dir, eid, logger)
+            download_multi(search_bbox, search_start_dt, search_end_dt, event_dt, eid, cfg, logger)
     
     return 0
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Create multitemporal SAR composites from Sentinel-1 data')
-    # if no bbox is provided, will use all bboxes in the sample directory
-    parser.add_argument('--output_dir', type=str, required=True,
-                      help='Output directory for saving composites')
-    parser.add_argument('--time_interval', type=int, required=True,
-                        help='Time interval in days between first and last acquisition')
-    parser.add_argument('--acquisitions', type=int, required=True,
-                        help='Number of acquisitions to download in the time interval')
-    parser.add_argument('--num_days', type=int, required=True, 
-                        help='Days before and after flood event date to avoid sampling')
-    parser.add_argument('--bbox', nargs=4, type=float, default=None,
-                      help='Bounding box coordinates (minx miny maxx maxy) in EPSG:4326')
-    parser.add_argument('--allow_missing', action='store_true',
-                        help='Allow missing data in the time interval')
-    
-    args = parser.parse_args()
-    sys.exit(main(args.output_dir, args.time_interval, args.acquisitions, args.num_days, args.bbox, args.allow_missing))
+    main()

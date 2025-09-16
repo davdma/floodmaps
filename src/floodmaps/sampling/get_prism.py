@@ -11,18 +11,18 @@ from datetime import date, datetime, timedelta
 import requests
 from pathlib import Path
 import argparse
-import sys
+import hydra
+from omegaconf import DictConfig
 
-# DEAL WITH THIS PATH
-PATH_PRISM_DIR = Path('../sampling/PRISM/')
-
-def download_prism_zips(start_date=date(2024, 7, 31), end_date=date(2024, 11, 30)):
+def download_prism_zips(cfg: DictConfig, start_date=date(2024, 7, 31), end_date=date(2024, 11, 30)):
     """Downloads prism precip zip files through HTTP.
     Note that we use 2016/8/1 as the 0 point of the netcdf time dimension as S2 data
     only becomes frequently available after that date.
     
     Parameters
     ----------
+    cfg : DictConfig
+        Configuration dictionary.
     start_date : date
         Start date to download prism precip zip files from.
     end_date : date
@@ -37,18 +37,23 @@ def download_prism_zips(start_date=date(2024, 7, 31), end_date=date(2024, 11, 30
     while (start_date <= end_date):
         dt = start_date.strftime("%Y%m%d")
         # skip if already exists
-        if (PATH_PRISM_DIR / f'PRISM_ppt_stable_4kmD2_{dt}_bil.zip').exists():
+        if (Path(cfg.paths.prism_dir) / f'PRISM_ppt_stable_4kmD2_{dt}_bil.zip').exists():
             start_date += delta
             continue
         
         response = requests.get(f'http://services.nacse.org/prism/data/public/4km/ppt/{dt}')
-        with open(PATH_PRISM_DIR / f'PRISM_ppt_stable_4kmD2_{dt}_bil.zip', 'wb') as p:
+        with open(Path(cfg.paths.prism_dir) / f'PRISM_ppt_stable_4kmD2_{dt}_bil.zip', 'wb') as p:
             p.write(response.content)
 
         start_date += delta
 
-def load_prism_zips():
+def load_prism_zips(cfg: DictConfig):
     """Read all downloaded precip data from PRISM directory into python list.
+
+    Parameters
+    ----------
+    cfg : DictConfig
+        Configuration dictionary.
     
     Returns
     -------
@@ -56,14 +61,14 @@ def load_prism_zips():
         List of tuples containing date, precip data, and geotransform.
     """
     # alphabetical sorting is chronological here
-    _paths_prism_daily = np.sort(glob(str(PATH_PRISM_DIR / '*_bil.zip')))
+    _paths_prism_daily = np.sort(glob(str(Path(cfg.paths.prism_dir) / '*_bil.zip')))
     def read_prism(_path_prism_zip):
         p = re.compile('\d{8}')
         match = p.search(_path_prism_zip)
         if match:
             date = match.group()
         else:
-            raise Exception('No formatted date found for file:', filename)
+            raise Exception('No formatted date found for file:', _path_prism_zip)
         
         compressed_filename = os.path.basename(_path_prism_zip)[:-3] + 'bil'
 
@@ -94,20 +99,24 @@ def load_prism_zips():
 
     return daily_precip
 
-def store_netcdf(daily_precip, filename="prismprecip_20160801_20241130.nc"):
+def store_netcdf(cfg: DictConfig, daily_precip, filename="prismprecip_20160801_20241130.nc"):
     """Store daily precip data into netcdf file.
     
     Parameters
     ----------
+    cfg : DictConfig
+        Configuration dictionary.
     daily_precip : list
         List of tuples containing date, precip data, and geotransform.
+    filename : str
+        Name of the netcdf file to store the data in.
     """
     arr = np.empty((len(daily_precip), len(daily_precip[0][1]), len(daily_precip[0][1][0])))
     for i, entry in tqdm(enumerate(daily_precip)):
         date, data, geo = entry
         arr[i, :, :] = data
 
-    with Dataset(PATH_PRISM_DIR / filename, "w", format="NETCDF4") as nc:
+    with Dataset(Path(cfg.paths.prism_dir) / filename, "w", format="NETCDF4") as nc:
         nc.description = "PRISM Precipitation Dataset"
         time = nc.createDimension("time", len(daily_precip))
         lat = nc.createDimension("y", len(daily_precip[0][1]))
@@ -122,8 +131,25 @@ def store_netcdf(daily_precip, filename="prismprecip_20160801_20241130.nc"):
         geotransform[:] = daily_precip[0][2]
         precip_var[:, :, :] = arr
 
-def main(start_date, end_date):
+def parse_args():
+    parser = argparse.ArgumentParser(
+        program='get_prism',
+        description="""This script
+        can be used to setup PRISM data or to update existing PRISM data to match
+        newly available dates. For setting up PRISM data from scratch, the start_date should be
+        20160801 as that is the 0 point of the netcdf time dimension used for the project dataset.
+        Otherwise to add more dates, set start_date as the date of the most recently downloaded
+        precipitation file.""")
+    parser.add_argument('--start_date', default='20160801', help='start date to download PRISM precip data from (default: 20160801)')
+    parser.add_argument('--end_date', default='20241130', help='end date to download PRISM precip data to (default: 20241130)')
+    return parser.parse_args()
+
+@hydra.main(version_base=None, config_paths="configs", config_name="config.yaml")
+def main(cfg: DictConfig):
     # Convert string dates to date objects
+    args = parse_args()
+    start_date = args.start_date
+    end_date = args.end_date
     start_date_obj = datetime.strptime(start_date, '%Y%m%d').date()
     end_date_obj = datetime.strptime(end_date, '%Y%m%d').date()
     
@@ -132,14 +158,4 @@ def main(start_date, end_date):
     store_netcdf(daily_precip, filename=f"prismprecip_20160801_{end_date}.nc")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(prog='getprism', description="""This script
-        can be used to setup PRISM data or to update existing PRISM data to match
-        newly available dates. For setting up PRISM data from scratch, the start_date should be
-        20160801 as that is the 0 point of the netcdf time dimension used for the project dataset.
-        Otherwise to add more dates, set start_date as the date of the most recently downloaded
-        precipitation file.""")
-    parser.add_argument('--start_date', default='20160801', help='start date to download PRISM precip data from (default: 20160801)')
-    parser.add_argument('--end_date', default='20241130', help='end date to download PRISM precip data to (default: 20241130)')
-    args = parser.parse_args()
-    
-    sys.exit(main(args.start_date, args.end_date))
+    main()

@@ -1,15 +1,14 @@
 import torch
 from torchvision import transforms
 import numpy as np
-import argparse
 import re
 import rasterio
-import sys
 import pickle
 from pathlib import Path
+import hydra
+from omegaconf import DictConfig
 
-from floodmaps.utils.utils import SAMPLES_DIR, DATA_DIR, ChannelIndexer
-from floodmaps.utils.config import Config
+from floodmaps.utils.utils import ChannelIndexer
 from floodmaps.models.model import S2WaterDetector
 
 
@@ -158,22 +157,16 @@ def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_pa
     label[missing_vals] = 0
     return label
 
-
-def main(cfg, format="tif", replace=True, data_dir=""):
+@hydra.main(version_base=None, config_path="configs", config_name="config.yaml")
+def main(cfg: DictConfig):
     """Generates predictions in specified folder using S2 model.
 
     Note: for custom data directories, rasters are expected to have eid defined in file names i.e. rgb_(date)_(eid).tif.
 
     Parameters
     ----------
-    cfg : Config
+    cfg : DictConfig
         Configuration object containing model and data parameters.
-    format : str
-        Output label file format: tif, npy.
-    replace : bool
-        Whether to overwrite pre-existing predictions.
-    data_dir : str
-        Directory path of dataset containing event tiles where predicted labels should be generated and stored.
     """
     device = (
         "cuda"
@@ -193,9 +186,9 @@ def main(cfg, format="tif", replace=True, data_dir=""):
     use_weak = getattr(cfg.data, 'use_weak', False)
     dataset_type = 's2_weak' if use_weak else 's2'
     if suffix:
-        sample_dir = DATA_DIR / dataset_type / f'samples_{size}_{samples}_{suffix}/'
+        sample_dir = cfg.paths.preprocess_dir / dataset_type / f'samples_{size}_{samples}_{suffix}/'
     else:
-        sample_dir = DATA_DIR / dataset_type / f'samples_{size}_{samples}/'
+        sample_dir = cfg.paths.preprocess_dir / dataset_type / f'samples_{size}_{samples}/'
 
     channels = [bool(int(x)) for x in cfg.data.channels]
     with open(sample_dir / f'mean_std_{size}_{samples}.pkl', 'rb') as f:
@@ -208,13 +201,13 @@ def main(cfg, format="tif", replace=True, data_dir=""):
 
     # make prediction for each rgb file in the data dir
     p = re.compile('rgb_(\d{8})_(.+).tif')
-    data_path = SAMPLES_DIR / data_dir
+    data_path = Path(cfg.paths.imagery_dir) / cfg.inference.data_dir
     for rgb_file in data_path.glob('rgb_*.tif'):
         m = p.search(rgb_file.name)
         dt = m.group(1)
         eid = m.group(2)
 
-        if not replace and (data_path / f'pred_{dt}_{eid}.tif').exists():
+        if not cfg.inference.replace and (data_path / f'pred_{dt}_{eid}.tif').exists():
             continue
 
         pred = generate_prediction_s2(model, device, cfg, standardize, train_mean, data_path, dt, eid)
@@ -236,14 +229,5 @@ def main(cfg, format="tif", replace=True, data_dir=""):
                         
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(prog='inference_s2', description='Generate s2 model predictions for specific area of interest.')
-
-    # YAML config file
-    parser.add_argument("--config_file", default="configs/s2_template.yaml", help="Path to YAML config file (default: configs/s2_template.yaml)")
-    parser.add_argument('-f', '--format', default="tif", choices=["npy", "tif"], help='prediction label format: npy, tif (default: tif)')
-    parser.add_argument('--replace', action='store_true', help='overwrite all previously made predictions (default: False)')
-    parser.add_argument('--data_dir', default='downloaded_areas/safb_20240718/', help='directory with rasters to make predictions in (default: samples_200_6_4_10_sar/)')
-
-    _args = parser.parse_args()
-    cfg = Config(**_args.__dict__)
-    sys.exit(main(cfg, format=_args.format, replace=_args.replace, data_dir=_args.data_dir))
+    """Generate s2 model predictions for specific area of interest."""
+    main()

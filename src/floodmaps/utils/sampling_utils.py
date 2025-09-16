@@ -24,9 +24,10 @@ from rasterio.transform import Affine
 from rasterio import windows
 from rasterio.vrt import WarpedVRT
 import rasterio
+from omegaconf import DictConfig
 
-# FIX THESE CONFIGS WITH HYDRA
-# from floodmaps.utils.config import DataConfig
+PRISM_CRS = "EPSG:4269"
+SEARCH_CRS = "EPSG:4326"
 
 # NLCD color mapping dictionary
 NLCD_COLORS = {
@@ -105,6 +106,101 @@ class PRISMData:
     def get_masked_precip(self, mask: np.ndarray) -> np.ndarray:
         """Get masked precipitation data. Sets values outside mask to nan."""
         return np.where(mask, self.precip_data, np.nan)
+
+class SamplingPathManager:
+    """Configuration class for managing data file paths and settings for
+    sampling script."""
+    
+    def __init__(self, cfg: DictConfig):
+        self.cfg = cfg
+        self.validate_paths()
+    
+    def validate_paths(self):
+        """Validate that all required data paths exist."""
+        required_paths = [
+            self.cfg.paths.get('prism_data'),
+            self.cfg.paths.get('ceser_boundary'),
+            self.cfg.paths.get('prism_meshgrid'),
+            self.cfg.paths.get('nhd_wbd'),
+            self.cfg.paths.get('elevation_dir'),
+            self.cfg.paths.get('nlcd_dir'),
+            self.cfg.paths.get('roads_dir')
+        ]
+        
+        missing = []
+        for path in required_paths:
+            if path is None:
+                raise KeyError(f"Required path not found in configuration.")
+            if path and not Path(path).exists():
+                missing.append(path)
+        
+        if missing:
+            raise FileNotFoundError(
+                f"Missing required data files/directories:\n" + "\n".join(missing)
+            )
+    
+    def get_path(self, key: str, required: bool = True) -> str:
+        """
+        Get a specific path from configuration.
+        
+        Parameters
+        ----------
+        key : str
+            Path key from config file
+        required : bool
+            Whether the path is required to exist
+            
+        Returns
+        -------
+        str
+            Path value
+        """
+        path = self.cfg.paths.get(key)
+        
+        if path is None:
+            if required:
+                raise KeyError(f"Required path '{key}' not found in configuration")
+            return ""
+        
+        if required and not Path(path).exists():
+            raise FileNotFoundError(f"Required path does not exist: {path}")
+        
+        return path
+    
+    @property
+    def prism_file(self) -> str:
+        """Get PRISM data file path."""
+        return self.get_path('prism_data')
+    
+    @property
+    def ceser_boundary_file(self) -> str:
+        """Get CESER boundary file path."""
+        return self.get_path('ceser_boundary')
+    
+    @property
+    def prism_meshgrid_file(self) -> str:
+        """Get PRISM meshgrid file path."""
+        return self.get_path('prism_meshgrid')
+    
+    @property
+    def nhd_wbd_file(self) -> str:
+        """Get NHD WBD file path."""
+        return self.get_path('nhd_wbd')
+    
+    @property
+    def elevation_directory(self) -> str:
+        """Get elevation directory path."""
+        return self.get_path('elevation_dir')
+    
+    @property
+    def nlcd_directory(self) -> str:
+        """Get NLCD directory path."""
+        return self.get_path('nlcd_dir')
+    
+    @property
+    def roads_directory(self) -> str:
+        """Get roads directory path."""
+        return self.get_path('roads_dir') 
 
 class DateCRSOrganizer:
     """Organizes products by date first (in chronological order), then CRS (alphabetically).
@@ -382,7 +478,7 @@ def parse_date_string(date_string: str) -> datetime:
 
     raise ValueError(f"Date string '{date_string}' doesn't match expected formats")
 
-def read_manual_indices(manual_file: str, prism_data: PRISMData) -> List[Tuple[datetime, int, int, str]]:
+def read_manual_indices(manual_file: str) -> List[Tuple[datetime, int, int, str]]:
     """
     Reads in manual event date string, y, x indices specifying PRISM events from a text file.
     The function ignores empty lines and lines starting with '#'.
@@ -396,8 +492,6 @@ def read_manual_indices(manual_file: str, prism_data: PRISMData) -> List[Tuple[d
     ----------
     manual_file : str
         Path to text file containing manual event date string, y, x indices, optionally with CRS.
-    prism_data : PRISMData
-        PRISM data object.
 
     Returns
     -------
@@ -449,15 +543,15 @@ def read_manual_indices(manual_file: str, prism_data: PRISMData) -> List[Tuple[d
 
     return manual_indices
 
-def get_mask(region: str, config: DataConfig, shape: Tuple[int, int, int]) -> np.ndarray:
+def get_mask(cfg: DictConfig, shape: Tuple[int, int, int]) -> np.ndarray:
     """Get the mask for the region in the PRISM meshgrid.
 
     TO DO: Will want to add other regions of interest in the future.
     
     Parameters
     ----------
-    region : str
-        Region to get mask for.
+    cfg: DictConfig
+        Configuration object.
     shape : tuple
         Shape of the PRISM data.
 
@@ -466,8 +560,8 @@ def get_mask(region: str, config: DataConfig, shape: Tuple[int, int, int]) -> np
     numpy.ndarray
         Mask for PRISM data.
     """
-    if region == 'ceser':
-        mask = get_ceser_mask(config.ceser_boundary_file, config.prism_meshgrid_file, shape)
+    if cfg.sampling.region == 'ceser':
+        mask = get_ceser_mask(cfg.paths.ceser_boundary, cfg.paths.prism_meshgrid, shape)
     else:
         mask = None
     return mask
@@ -581,7 +675,7 @@ def get_manual_events(prism_data: PRISMData, history: set, manual_file: str, log
             logger.addHandler(ch)
 
     # read in and validate manual indices
-    manual_indices = read_manual_indices(manual_file, prism_data)
+    manual_indices = read_manual_indices(manual_file)
 
     # lists for aggregating event data
     event_dates = []

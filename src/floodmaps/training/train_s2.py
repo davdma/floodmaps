@@ -15,14 +15,14 @@ import random
 from random import Random
 from PIL import Image
 import numpy as np
-import sys
 import pickle
 from pathlib import Path
 import json
+from omegaconf import DictConfig, OmegaConf
+import hydra
 
 from floodmaps.models.model import S2WaterDetector
-from floodmaps.utils.config import Config
-from floodmaps.utils.utils import DATA_DIR, RESULTS_DIR, get_model_params, Metrics, EarlyStopper, ChannelIndexer, nlcd_to_rgb
+from floodmaps.utils.utils import get_model_params, Metrics, EarlyStopper, ChannelIndexer, nlcd_to_rgb
 from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
 from floodmaps.utils.metrics import compute_nlcd_metrics
 
@@ -291,7 +291,7 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
 
 def save_experiment(cls_weights, disc_weights, metrics, cfg, run):
     """Save experiment files to directory specified by config save_path."""
-    path = Path(cfg.save_path)
+    path = Path(cfg.path.experiment_dir) / cfg.save_path
     path.mkdir(parents=True, exist_ok=True)
 
     if cls_weights is not None:
@@ -484,9 +484,9 @@ def run_experiment_s2(cfg):
     use_weak = getattr(cfg.data, 'use_weak', False)
     dataset_type = 's2_weak' if use_weak else 's2'
     if suffix:
-        sample_dir = DATA_DIR / dataset_type / f'samples_{size}_{samples}_{suffix}/'
+        sample_dir = Path(cfg.paths.preprocess_dir) / dataset_type / f'samples_{size}_{samples}_{suffix}/'
     else:
-        sample_dir = DATA_DIR / dataset_type / f'samples_{size}_{samples}/'
+        sample_dir = Path(cfg.paths.preprocess_dir) / dataset_type / f'samples_{size}_{samples}/'
 
     # load in mean and std
     channels = [bool(int(x)) for x in cfg.data.channels]
@@ -553,8 +553,7 @@ def run_experiment_s2(cfg):
     try:
         if cfg.save:
             if cfg.save_path is None:
-                default_path = RESULTS_DIR / "experiments" / f"{datetime.today().strftime('%Y-%m-%d')}_{cfg.model.classifier}_{run.id}/"
-                cfg.save_path = str(default_path)
+                cfg.save_path = f"{datetime.today().strftime('%Y-%m-%d')}_{cfg.model.classifier}_{run.id}/"
                 run.config.update({"save_path": cfg.save_path}, allow_val_change=True)
             print(f'Save path set to: {cfg.save_path}')
         
@@ -608,49 +607,9 @@ def validate_config(cfg):
     assert cfg.wandb.project is not None, "Wandb project must be specified"
     assert validate_channels(cfg.data.channels), "Channels must be a binary string of length 11"
 
-def main(cfg):
-    validate_config(cfg)
+@hydra.main(version_base=None, config_path="configs", config_name="config.yaml")
+def main(cfg: DictConfig):
     run_experiment_s2(cfg)
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(prog='train_classifier', description='Trains classifier model from patches. The classifier inputs a patch with n channels and outputs a binary patch with water pixels labeled 1.')
-
-    # YAML config file
-    parser.add_argument("--config_file", default="configs/s2_template.yaml", help="Path to YAML config file (default: configs/s2_template.yaml)")
-
-    # wandb
-    parser.add_argument('--project', help='Wandb project where run will be logged')
-    parser.add_argument('--group', help='Optional group name for model experiments (default: None)')
-    parser.add_argument('--num_sample_predictions', type=int, help='number of predictions to visualize (default: 40)')
-
-    # evaluation
-    parser.add_argument('--mode', choices=['val', 'test'], help=f"dataset used for evaluation metrics (default: val)")
-
-    # ml
-    parser.add_argument('-e', '--epochs', type=int)
-    parser.add_argument('-b', '--batch_size', type=int)
-    parser.add_argument('-l', '--lr', type=float)
-    parser.add_argument('-p', '--patience', type=int)
-
-    # model
-    parser.add_argument('--classifier', choices=MODEL_NAMES, help=f"models: {', '.join(MODEL_NAMES)}")
-    # unet
-    parser.add_argument('--dropout', type=float)
-
-    # data loading
-    parser.add_argument('--num_workers', type=int)
-
-    # loss
-    parser.add_argument('--loss', choices=LOSS_NAMES,
-                        help=f"loss: {', '.join(LOSS_NAMES)}")
-
-    # optimizer
-    parser.add_argument('--optimizer', choices=['Adam', 'SGD'],
-                        help=f"optimizer: {', '.join(['Adam', 'SGD'])}")
-
-    # reproducibility
-    parser.add_argument('--seed', type=int)
-
-    _args = parser.parse_args()
-    cfg = Config(**_args.__dict__)
-    sys.exit(main(cfg))
+    main()

@@ -1,9 +1,7 @@
 import wandb
 import torch
 import logging
-import argparse
 import copy
-import torch
 from torch import nn
 from torch.utils.data import DataLoader
 from datetime import datetime
@@ -13,9 +11,11 @@ from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
 from random import Random
 from PIL import Image
-from glob import glob
 import numpy as np
-import sys
+import json
+from pathlib import Path
+import hydra
+from omegaconf import DictConfig, OmegaConf
 
 from floodmaps.training.loss import BCEDiceLoss, TverskyLoss
 from floodmaps.models.discriminator import Classifier1, Classifier2, Classifier3
@@ -306,7 +306,7 @@ def sample_predictions(model, val_set, mean, std, config, seed=24330):
 
     return table
 
-def run_experiment(config):
+def run_experiment_disc(config):
     """Run a single S2 discriminator model experiment given the configuration parameters."""
     if wandb.login():
         device = (
@@ -372,63 +372,26 @@ def run_experiment(config):
         raise Exception("Failed to login to wandb.")
 
 def validate_config(cfg):
-    raise NotImplementedError("Not implemented.")
+    def validate_channels(s):
+        return type(s) == str and len(s) == 11 and all(c in '01' for c in s)
 
-def main(cfg):
+    # Add checks
+    assert cfg.train.batch_size is not None and cfg.train.batch_size > 0, "Batch size must be defined and positive"
+    assert cfg.train.lr > 0, "Learning rate must be positive"
+    assert cfg.train.loss in LOSS_NAMES, f"Loss must be one of {LOSS_NAMES}"
+    assert cfg.train.optimizer in ['Adam', 'SGD'], f"Optimizer must be one of {['Adam', 'SGD']}"
+    assert cfg.train.early_stopping in [True, False], "Early stopping must be a boolean"
+    assert not cfg.train.early_stopping or cfg.train.patience is not None, "Patience must be set if early stopping is enabled"
+    assert cfg.model.name in MODEL_NAMES, f"Model must be one of {MODEL_NAMES}"
+    assert cfg.data.random_flip in [True, False], "Random flip must be a boolean"
+    assert cfg.eval.mode in ['val', 'test'], f"Evaluation mode must be one of {['val', 'test']}"
+    assert cfg.wandb.project is not None, "Wandb project must be specified"
+    assert validate_channels(cfg.data.channels), "Channels must be a binary string of length 9"
+    
+@hydra.main(version_base=None, config_path="configs", config_name="config.yaml")
+def main(cfg: DictConfig) -> None:
     validate_config(cfg)
-    run_experiment(cfg)
+    run_experiment_disc(cfg)
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(prog='train_discriminator', description='Trains discriminator from patches. The discriminator inputs a patch with n channels and outputs a single value corresponding to whether the patch is likely to contain water or not.')
-
-    def bool_indices(s):
-        if len(s) == 9 and all(c in '01' for c in s):
-            try:
-                return [bool(int(x)) for x in s]
-            except ValueError:
-                raise argparse.ArgumentTypeError("Invalid boolean string: '{}'".format(s))
-        else:
-            raise argparse.ArgumentTypeError("Boolean string must be of length 9 and have binary digits")
-            
-    # dataset
-    parser.add_argument('-x', '--size', type=int, default=64, help='pixel width of patch (default: 64)')
-    parser.add_argument('-n', '--samples', type=int, default=1000, help='number of samples per image (default: 1000)')
-    parser.add_argument('-m', '--method', default='random', choices=['random', 'relative'], help='sampling method (default: random)')
-    parser.add_argument('-c', '--channels', type=bool_indices, default="111111111", help='string of 9 binary digits for selecting among the 9 available channels (R, G, B, B08, NDWI, DEM, Slope, Water, Roads) (default: 111111111)')
-    parser.add_argument('--sdir', dest='sample_dir', default='../sampling/samples_200_5_4_35/', help='(default: ../sampling/samples_200_5_4_35/)')
-    parser.add_argument('--ldir', dest='label_dir', default='../sampling/labels/', help='(default: ../sampling/labels/)')
-
-    # wandb
-    parser.add_argument('--project', default="FloodSamplesDiscriminator", help='Wandb project where run will be logged')
-    parser.add_argument('--group', default=None, help='Optional group name for model experiments (default: None)')
-    parser.add_argument('--num_sample_predictions', type=int, default=40, help='number of predictions to visualize (default: 40)')
-
-    # ml
-    parser.add_argument('-e', '--epochs', type=int, default=30, help='(default: 30)')
-    parser.add_argument('-b', '--batch_size', type=int, default=32, help='(default: 32)')
-    parser.add_argument('-l', '--learning_rate', type=float, default=0.01, help='(default: 0.01)')
-    parser.add_argument('--early_stopping', action='store_true', help='early stopping (default: False)')
-    parser.add_argument('-p', '--patience', type=int, default=5, help='(default: 5)')
-
-    # model
-    parser.add_argument('--name', default='c1', choices=MODEL_NAMES,
-                        help=f"models: {', '.join(MODEL_NAMES)} (default: c1)")
-    parser.add_argument('--num_pixels', type=int, default=100, help='(default: 100)')
-
-    # data loading
-    parser.add_argument('--num_workers', type=int, default=10, help='(default: 10)')
-    
-    # loss
-    parser.add_argument('--loss', default='BCELoss', choices=LOSS_NAMES,
-                        help=f"loss: {', '.join(LOSS_NAMES)} (default: BCELoss)")
-    parser.add_argument('--alpha', type=float, default=0.3, help='Tversky Loss alpha value (default: 0.3)')
-    parser.add_argument('--beta', type=float, default=0.7, help='Tversky Loss beta value (default: 0.7)')
-
-    # optimizer
-    parser.add_argument('--optimizer', default='Adam', choices=['Adam', 'SGD'],
-                        help=f"optimizer: {', '.join(['Adam', 'SGD'])} (default: Adam)")
-
-    # config will be dict
-    config = vars(parser.parse_args())
-
-    sys.exit(main(config))
+    main()

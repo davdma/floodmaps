@@ -1,4 +1,3 @@
-import argparse
 from datetime import datetime
 from pathlib import Path
 import sys
@@ -8,7 +7,6 @@ import os
 import re
 import json
 import pickle
-import fiona
 import shutil
 from osgeo import gdal, ogr, osr
 from rasterio.transform import array_bounds
@@ -19,8 +17,12 @@ import rasterio
 from fiona.transform import transform
 from pystac.extensions.projection import ProjectionExtension as pe
 import pystac_client
+import hydra
+from omegaconf import DictConfig
 
 from floodmaps.utils.sampling_utils import (
+    PRISM_CRS,
+    SEARCH_CRS,
     NLCD_CODE_TO_RGB,
     PRISMData,
     DateCRSOrganizer,
@@ -42,14 +44,6 @@ from floodmaps.utils.sampling_utils import (
 from floodmaps.utils.stac_providers import get_stac_provider
 from floodmaps.utils.validate import validate_event_rasters
 
-# Import configuration
-# from floodmaps.utils.config import DataConfig
-
-# Initialize configuration with filepaths
-config = DataConfig()
-
-PRISM_CRS = "EPSG:4269"
-SEARCH_CRS = "EPSG:4326"
 NLCD_RANGE = None
 ELEVATION_LAT_LONG = None
 CURRENT_DATE = datetime.now().strftime('%Y-%m-%d')
@@ -84,11 +78,11 @@ pattern_dict = {
     'metadata.json': 'METADATA'
 }
 
-def get_elevation_nw():
+def get_elevation_nw(cfg):
     """Extract all elevation file lat long pairs as well as the filepath in tuple."""
     global ELEVATION_LAT_LONG
     if ELEVATION_LAT_LONG is None:
-        elevation_files = [str(x) for x in Path(config.elevation_directory).glob('n*w*.tif')]
+        elevation_files = [str(x) for x in Path(cfg.paths.elevation_dir).glob('n*w*.tif')]
         if len(elevation_files) == 0:
             raise FileNotFoundError('No elevation files found. Please run get_supplementary.py to download elevation data.')
         p = re.compile(r"n(\d*)w(\d*).tif")
@@ -100,11 +94,11 @@ def get_elevation_nw():
         ELEVATION_LAT_LONG = lst
     return ELEVATION_LAT_LONG
 
-def get_nlcd_range():
+def get_nlcd_range(cfg):
     """Returns a tuple of the earliest and latest year for which NLCD data is available."""
     global NLCD_RANGE
     if NLCD_RANGE is None:
-        nlcd_files = [str(x) for x in Path(config.nlcd_directory).glob('LndCov*.tif')]
+        nlcd_files = [str(x) for x in Path(cfg.paths.nlcd_dir).glob('LndCov*.tif')]
         if len(nlcd_files) == 0:
             raise FileNotFoundError('No NLCD files found. Please run get_supplementary.py to download NLCD data.')
         p = re.compile(r'LndCov(\d{4}).tif')
@@ -112,7 +106,7 @@ def get_nlcd_range():
         NLCD_RANGE = (min(nlcd_years), max(nlcd_years))
     return NLCD_RANGE
 
-def GetHU4Codes(prism_bbox):
+def GetHU4Codes(prism_bbox, cfg):
     """
     Queries national watershed boundary dataset for HUC 4 codes representing
     hydrologic units that intersect with bounding box.
@@ -121,13 +115,15 @@ def GetHU4Codes(prism_bbox):
     ----------
     prism_bbox : (float, float, float, float)
         Tuple in the order minx, miny, maxx, maxy, representing bounding box in PRISM_CRS = EPSG:4269.
+    cfg : DictConfig
+        Configuration object.
 
     Returns
     -------
     list[str]
         HU4 codes.
     """
-    with gdal.OpenEx(config.nhd_wbd_file) as ds:
+    with gdal.OpenEx(cfg.paths.nhd_wbd) as ds:
         minx, miny, maxx, maxy = prism_bbox
         layer = ds.GetLayerByIndex(4)
         layer.SetSpatialFilterRect(minx, miny, maxx, maxy)
@@ -362,7 +358,7 @@ def pipeline_NDWI(stac_provider, dir_path, save_as, dst_crs, item, bbox):
     with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=ndwi_colored.shape[-2], width=ndwi_colored.shape[-1], crs=dst_crs, dtype=ndwi_colored.dtype, transform=out_transform, nodata=None) as dst:
         dst.write(ndwi_colored)
 
-def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, prism_bbox):
+def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, prism_bbox, cfg):
     """Generates raster with burned in geometries of roads given destination raster properties.
 
     Parameters
@@ -382,12 +378,14 @@ def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, 
     prism_bbox : (float, float, float, float)
         Tuple in the order minx, miny, maxx, maxy, representing bounding box,
         in PRISM CRS.
+    cfg : DictConfig
+        Configuration object.
     """
     mem_ds = None
     raster_ds = None
     minx, miny, maxx, maxy = prism_bbox
     try:
-        with gdal.OpenEx(Path(config.roads_directory) / f'{state.strip().upper()}.shp') as ds:
+        with gdal.OpenEx(Path(cfg.paths.roads_dir) / f'{state.strip().upper()}.shp') as ds:
             layer = ds.GetLayer()
             layer.SetSpatialFilterRect(minx, miny, maxx, maxy)
 
@@ -479,7 +477,7 @@ def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, 
                        crs=dst_crs, dtype=rgb_roads.dtype, transform=dst_transform, nodata=None) as dst:
         dst.write(rgb_roads)
 
-def pipeline_dem(dir_path, save_as, dst_shape, dst_crs, dst_transform, bounds):
+def pipeline_dem(dir_path, save_as, dst_shape, dst_crs, dst_transform, bounds, cfg):
     """Generates Digital Elevation Map raster given destination raster properties and bounding box.
 
     Note to developers: slope raster generation removed in favor of calling np.gradient on dem tile during preprocessing.
@@ -498,13 +496,15 @@ def pipeline_dem(dir_path, save_as, dst_shape, dst_crs, dst_transform, bounds):
         Transformation matrix for mapping pixel coordinates to coordinate system of output raster.
     bounds : (float, float, float, float)
         Tuple in the order minx, miny, maxx, maxy, representing bounding box.
+    cfg : DictConfig
+        Configuration object.
     """
     # buffer here accounts for missing edges after reprojection!
     buffer = 0.02
     bounds = (bounds[0] - buffer, bounds[1] - buffer, bounds[2] + buffer, bounds[3] + buffer)
 
     lst = []
-    for lat, long, file in get_elevation_nw():
+    for lat, long, file in get_elevation_nw(cfg):
         # we want the range of the lats and the range of the longs to intersect the bounds
         # nxxwxx is TOP LEFT corner of tile!
         tile_bounds = (int(long) * (-1), int(lat) - 1, int(long) * (-1) + 1, int(lat))
@@ -556,7 +556,7 @@ def pipeline_dem(dir_path, save_as, dst_shape, dst_crs, dst_transform, bounds):
     with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=dem_cmap.shape[-2], width=dem_cmap.shape[-1], crs=dst_crs, dtype=dem_cmap.dtype, transform=dst_transform, nodata=None) as dst:
         dst.write(dem_cmap)
 
-def pipeline_flowlines(dir_path, save_as, dst_shape, dst_crs, dst_transform, prism_bbox,
+def pipeline_flowlines(dir_path, save_as, dst_shape, dst_crs, dst_transform, prism_bbox, cfg,
 exact_fcodes=['46000', '46003', '46006', '46007', '55800', '33600', '33601', '33603', '33400', '42801', '42802', '42805', '42806', '42809']):
     """Generates raster with burned in geometries of flowlines given destination raster properties.
 
@@ -577,6 +577,8 @@ exact_fcodes=['46000', '46003', '46006', '46007', '55800', '33600', '33601', '33
     prism_bbox : (float, float, float, float)
         Tuple in the order minx, miny, maxx, maxy, representing bounding box,
         in PRISM CRS.
+    cfg : DictConfig
+        Configuration object.
     exact_fcodes : list[str], optional
         List of flowline feature FCodes to filter for e.g. ["42801", "42805", "46002"].
     """
@@ -599,7 +601,7 @@ exact_fcodes=['46000', '46003', '46006', '46007', '55800', '33600', '33601', '33
         mem_layer.CreateField(field_defn)
 
         for code in GetHU4Codes(prism_bbox):
-            with gdal.OpenEx(f'NHD/NHDPLUS_H_{code}_HU4_GDB.gdb') as ds:
+            with gdal.OpenEx(Path(cfg.paths.nhd_dir) / f'NHDPLUS_H_{code}_HU4_GDB.gdb') as ds:
                 layer = ds.GetLayerByName('NHDFlowline')
                 layer.SetSpatialFilterRect(minx, miny, maxx, maxy)
                 if exact_fcodes:
@@ -681,7 +683,7 @@ exact_fcodes=['46000', '46003', '46006', '46007', '55800', '33600', '33601', '33
     with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_flowlines.shape[-2], width=rgb_flowlines.shape[-1], crs=dst_crs, dtype=rgb_flowlines.dtype, transform=dst_transform, nodata=None) as dst:
         dst.write(rgb_flowlines)
 
-def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, prism_bbox):
+def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, prism_bbox, cfg):
     """Generates raster with burned in geometries of waterbodies given destination raster properties.
 
     Parameters
@@ -699,6 +701,8 @@ def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, pri
     prism_bbox : (float, float, float, float)
         Tuple in the order minx, miny, maxx, maxy, representing bounding box,
         in PRISM CRS.
+    cfg : DictConfig
+        Configuration object.
     """
     # filter out estuary
     where_clause = "FCode <> 49300"
@@ -720,7 +724,7 @@ def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, pri
         mem_layer.CreateField(field_defn)
 
         for code in GetHU4Codes(prism_bbox):
-            with gdal.OpenEx(f'NHD/NHDPLUS_H_{code}_HU4_GDB.gdb') as ds:
+            with gdal.OpenEx(Path(cfg.paths.nhd_dir) / f'NHDPLUS_H_{code}_HU4_GDB.gdb') as ds:
                 layer = ds.GetLayerByName('NHDWaterbody')
                 layer.SetSpatialFilterRect(minx, miny, maxx, maxy)
                 layer.SetAttributeFilter(where_clause)
@@ -800,7 +804,7 @@ def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, pri
     with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_waterbody.shape[-2], width=rgb_waterbody.shape[-1], crs=dst_crs, dtype=rgb_waterbody.dtype, transform=dst_transform, nodata=None) as dst:
         dst.write(rgb_waterbody)
 
-def pipeline_NLCD(dir_path, save_as, year, dst_shape, dst_crs, dst_transform):
+def pipeline_NLCD(dir_path, save_as, year, dst_shape, dst_crs, dst_transform, cfg):
     """Generates raster with NLCD land cover classes. Uses windowed reading of NLCD raster
     for speed (NLCD files are large).
 
@@ -818,15 +822,17 @@ def pipeline_NLCD(dir_path, save_as, year, dst_shape, dst_crs, dst_transform):
         Coordinate reference system of output raster.
     dst_transform : rasterio.affine.Affine()
         Transformation matrix for mapping pixel coordinates to coordinate system of output raster.
+    cfg : DictConfig
+        Configuration object.
     """
     # if year is after the most recent year, use the most recent year
-    nlcd_range = get_nlcd_range()
+    nlcd_range = get_nlcd_range(cfg)
     if year > nlcd_range[1]:
         year = nlcd_range[1]
     elif year < nlcd_range[0]:
         year = nlcd_range[0]
 
-    with rasterio.open(Path(config.nlcd_directory) / f'LndCov{year}.tif') as src:
+    with rasterio.open(Path(cfg.paths.nlcd_dir) / f'LndCov{year}.tif') as src:
         # data array is of type uint8
         nlcd_crs = src.crs
         nlcd_transform = src.transform
@@ -980,7 +986,7 @@ def pipeline_S1(stac_provider, dir_path, save_as, dst_crs, item, bbox):
     with rasterio.open(dir_path + save_as + '_vh_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vh_cmap.shape[-2], width=img_vh_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vh, nodata=None) as dst:
         dst.write(img_vh_cmap)
 
-def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, within_hours, event_date, event_precip, prism_bbox, eid, dir_path, manual_crs=None):
+def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_path, cfg, manual_crs=None):
     """Samples S2 and S1 coincident imagery for a high precipitation event based on parameters and generates accompanying rasters.
 
     Note to developers: the script simplifies normalization onto a consistent grid by finding any common CRS shared by S2 and S1 products.
@@ -993,14 +999,6 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
     ----------
     stac_provider : STACProvider
         STAC provider object.
-    days_before : int
-        Number of days before high precipitation event allowed for sampling S2 imagery.
-    days_after : int
-        Number of days after high precipitation event allowed for sampling S2 imagery.
-    maxcoverpercentage : int
-        Maximum percentage of combined null data and cloud cover permitted for each sampled cell.
-    within_hours : int
-        Download S1 and S2 data that are within a given number of hours from each other
     event_date : str
         Date of high precipitation event in format YYYYMMDD.
     event_precip: float
@@ -1011,6 +1009,8 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
         Event id.
     dir_path : str
         Path to sampling folder of events.
+    cfg : DictConfig
+        Configuration object.
     manual_crs : str, optional
         Manual CRS specification for event processing. If provided, this CRS will be used
         instead of automatically selecting (alphabetically) from available products. The CRS
@@ -1035,8 +1035,8 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
     conversion = transform(PRISM_CRS, SEARCH_CRS, (minx, maxx), (miny, maxy))
     bbox = (conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1])
     dir_path = dir_path + eid + '/'
-    time_of_interest = get_date_interval(event_date, days_before, days_after)
-    time_of_interest_sar = get_date_interval(event_date, 0, days_after + 1)
+    time_of_interest = get_date_interval(event_date, cfg.sampling.before, cfg.sampling.after)
+    time_of_interest_sar = get_date_interval(event_date, 0, cfg.sampling.after + 1)
 
     # STAC catalog search
     logger.info('Beginning catalog search...')
@@ -1053,8 +1053,8 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
     elif not has_date_after_PRISM([item.datetime for item in items_s2], event_date):
         logger.info(f'Products found but only before precipitation event date {event_date}.')
         return False
-    elif not coincident_items(items_s2, items_s1, within_hours):
-        logger.info(f'No coincident S1 and S2 products found within {within_hours} hours of each other.')
+    elif not coincident_items(items_s2, items_s1, cfg.sampling.within_hours):
+        logger.info(f'No coincident S1 and S2 products found within {cfg.sampling.within_hours} hours of each other.')
         return False
 
     # filter out s2 cloudy/missing tiles and group items by dates in dictionary
@@ -1069,7 +1069,7 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
             logger.exception(f'Cloud null percentage calculation error for item {item.id}.')
             raise err
 
-        if coverpercentage > maxcoverpercentage:
+        if coverpercentage > cfg.sampling.maxcoverpercentage:
             logger.debug(f'Sample {item.id} near event {event_date}, at {minx}, {miny}, {maxx}, {maxy} rejected due to {coverpercentage}% cloud or null cover.')
             continue
 
@@ -1097,7 +1097,7 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
         item_crs = pe.ext(item).crs_string
 
         # filter out non coincident sar products with s2 products we've selected
-        coincident_dt = coincident_with(s2_items_used, item, within_hours)
+        coincident_dt = coincident_with(s2_items_used, item, cfg.sampling.within_hours)
         if coincident_dt is None:
             logger.debug(f'S1 product {item.id} not coincident with any of the selected S2 products.')
             continue
@@ -1108,7 +1108,7 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
             logger.exception(f'Missing percentage calculation error for item {item.id}.')
             raise err
 
-        if coverpercentage > maxcoverpercentage:
+        if coverpercentage > cfg.sampling.maxcoverpercentage:
             logger.debug(f'SAR sample {item.id} near event {event_date}, at {minx}, {miny}, {maxx}, {maxy} rejected due to {coverpercentage}% missing data.')
             continue
 
@@ -1181,15 +1181,15 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
 
         # save all supplementary rasters in raw and rgb colormap
         logger.info('Processing supplementary rasters...')
-        pipeline_roads(dir_path, f'roads_{eid}', dst_shape, main_crs, dst_transform, state, prism_bbox)
+        pipeline_roads(dir_path, f'roads_{eid}', dst_shape, main_crs, dst_transform, state, prism_bbox, cfg)
         logger.debug(f'Roads raster completed successfully.')
-        pipeline_dem(dir_path, f'dem_{eid}', dst_shape, main_crs, dst_transform, prism_bbox)
+        pipeline_dem(dir_path, f'dem_{eid}', dst_shape, main_crs, dst_transform, prism_bbox, cfg)
         logger.debug(f'DEM raster completed successfully.')
-        pipeline_flowlines(dir_path, f'flowlines_{eid}', dst_shape, main_crs, dst_transform, prism_bbox)
+        pipeline_flowlines(dir_path, f'flowlines_{eid}', dst_shape, main_crs, dst_transform, prism_bbox, cfg)
         logger.debug(f'Flowlines raster completed successfully.')
-        pipeline_waterbody(dir_path, f'waterbody_{eid}', dst_shape, main_crs, dst_transform, prism_bbox)
+        pipeline_waterbody(dir_path, f'waterbody_{eid}', dst_shape, main_crs, dst_transform, prism_bbox, cfg)
         logger.debug(f'Waterbody raster completed successfully.')
-        pipeline_NLCD(dir_path, f'nlcd_{eid}', int(eid[:4]), dst_shape, main_crs, dst_transform)
+        pipeline_NLCD(dir_path, f'nlcd_{eid}', int(eid[:4]), dst_shape, main_crs, dst_transform, cfg)
         logger.debug(f'NLCD raster completed successfully.')
     except Exception as err:
         logger.error(f'Raster generation error: {err}, {type(err)}')
@@ -1221,8 +1221,8 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
                 "maxy": maxy
             },
             "Item IDs": file_to_product,
-            "S2, S1 Coincident Within (hours)": within_hours,
-            "Max Cloud/Nodata Cover Percentage (%)": maxcoverpercentage
+            "S2, S1 Coincident Within (hours)": cfg.sampling.within_hours,
+            "Max Cloud/Nodata Cover Percentage (%)": cfg.sampling.maxcoverpercentage
         }
     }
 
@@ -1232,7 +1232,8 @@ def event_sample(stac_provider, days_before, days_after, maxcoverpercentage, wit
     logger.info('Metadata and raster generation completed. Event finished.')
     return True
 
-def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_path=None, within_hours=12, region=None, config_file=None, manual=None, source='mpc'):
+@hydra.main(version_base=None, config_paths="configs", config_name="config.yaml")
+def main(cfg: DictConfig) -> None:
     """
     Samples imagery of events queried from PRISM using a given minimum precipitation threshold.
     Downloaded samples will contain multispectral data and sar data from within specified interval of event date,
@@ -1250,90 +1251,58 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
 
     Note: In the future if more L2A data become available, some previously processed and skipped events become viable.
     In that case do not use history object during run.
-
-    Parameters
-    ----------
-    threshold : int
-    days_before : int
-        Number of days of interest before precipitation event.
-    days_after : int
-        Number of days of interest following precipitation event.
-    cloudcoverpercentage : (int, int)
-        Desired cloud cover percentage range for querying Copernicus Sentinel-2.
-    maxevents: int or None
-        Specify a limit to the number of extreme precipitation events to process.
-    dir_path : str, optional
-        Path to directory where samples will be saved.
-    within_hours : int, optional
-        S1 and S2 coincidence must be within this many hours.
-    region : str, optional
-        Region to sample from.
-    config_file : str, optional
-        Path to custom configuration file.
-    manual : str, optional
-        Path to text file containing manual event indices in lines with format: time, y, x.
-
-    Returns
-    -------
-    int
     """
-    # Reinitialize config with custom file if provided
-    global config
-    if config_file:
-        config = DataConfig(config_file)
-
     # make directory
-    if dir_path is None:
-        dir_path = get_default_dir_path(threshold, days_before, days_after, maxcoverpercentage, region)
-        Path(dir_path).mkdir(parents=True, exist_ok=True)
+    if cfg.sampling.dir_path is None:
+        cfg.sampling.dir_path = get_default_dir_path(cfg.sampling.threshold, cfg.sampling.before, cfg.sampling.after, cfg.sampling.maxcoverpercentage, cfg.sampling.region)
+        Path(cfg.sampling.dir_path).mkdir(parents=True, exist_ok=True)
     else:
         # Create directory if it doesn't exist
         try:
-            Path(dir_path).mkdir(parents=True, exist_ok=True)
+            Path(cfg.sampling.dir_path).mkdir(parents=True, exist_ok=True)
         except (OSError, ValueError) as e:
-            print(f"Invalid directory path '{dir_path}'. Using default.", file=sys.stderr)
-            dir_path = get_default_dir_path(threshold, days_before, days_after, maxcoverpercentage, region)
-            Path(dir_path).mkdir(parents=True, exist_ok=True)
+            print(f"Invalid directory path '{cfg.sampling.dir_path}'. Using default.", file=sys.stderr)
+            cfg.sampling.dir_path = get_default_dir_path(cfg.sampling.threshold, cfg.sampling.before, cfg.sampling.after, cfg.sampling.maxcoverpercentage, cfg.sampling.region)
+            Path(cfg.sampling.dir_path).mkdir(parents=True, exist_ok=True)
 
         # Ensure trailing slash
-        dir_path = os.path.join(dir_path, '')
+        cfg.sampling.dir_path = os.path.join(cfg.sampling.dir_path, '')
 
     # root logger
-    rootLogger = setup_logging(dir_path, logger_name='main', log_level=logging.DEBUG, mode='w', include_console=False)
+    rootLogger = setup_logging(cfg.sampling.dir_path, logger_name='main', log_level=logging.DEBUG, mode='w', include_console=False)
 
     # event logger
-    logger = setup_logging(dir_path, logger_name='events', log_level=logging.DEBUG, mode='a', include_console=False)
+    logger = setup_logging(cfg.sampling.dir_path, logger_name='events', log_level=logging.DEBUG, mode='a', include_console=False)
 
     # log sampling parameters used
     rootLogger.info(
         "S2 + S1 sampling parameters used:\n"
-        f"  Threshold: {threshold}\n"
-        f"  Days before precipitation event: {days_before}\n"
-        f"  Days after precipitation event: {days_after}\n"
-        f"  Max cloud/nodata cover percentage: {maxcoverpercentage}\n"
-        f"  Max events to sample: {maxevents}\n"
-        f"  S1 and S2 coincidence must be within # hours: {within_hours}\n"
-        f"  Region: {region}\n"
-        f"  Config file: {config_file}\n"
-        f"  Manual indices: {manual}\n"
-        f"  Source: {source}\n"
+        f"  Threshold: {cfg.sampling.threshold}\n"
+        f"  Days before precipitation event: {cfg.sampling.before}\n"
+        f"  Days after precipitation event: {cfg.sampling.after}\n"
+        f"  Max cloud/nodata cover percentage: {cfg.sampling.maxcoverpercentage}\n"
+        f"  Max events to sample: {cfg.sampling.maxevents}\n"
+        f"  S1 and S2 coincidence must be within # hours: {cfg.sampling.within_hours}\n"
+        f"  Region: {cfg.sampling.region}\n"
+        f"  Manual indices: {cfg.sampling.manual}\n"
+        f"  Source: {cfg.sampling.source}\n"
     )
 
     # history set of tuples
-    history = get_history(dir_path + 'history.pickle')
+    history = get_history(cfg.sampling.dir_path + 'history.pickle')
 
     # load PRISM data object
-    prism_data = PRISMData.from_file(config.prism_file)
+    prism_data = PRISMData.from_file(cfg.paths.prism_data)
 
     # get PRISM event indices and event data
-    if manual:
+    if cfg.sampling.manual:
         rootLogger.info("Using manual indices...")
-        num_candidates, events = get_manual_events(prism_data, history, manual, logger=rootLogger)
-        rootLogger.info(f"Found {num_candidates} events from {manual}.")
+        num_candidates, events = get_manual_events(prism_data, history, cfg.sampling.manual, logger=rootLogger)
+        rootLogger.info(f"Found {num_candidates} events from {cfg.sampling.manual}.")
     else:
-        mask = get_mask(region, config, prism_data.shape)
+        mask = get_mask(cfg, prism_data.shape)
         rootLogger.info("Finding candidate extreme precipitation events...")
-        num_candidates, events = get_extreme_events(prism_data, history, threshold=threshold, mask=mask, logger=rootLogger)
+        num_candidates, events = get_extreme_events(prism_data, history, threshold=cfg.sampling.threshold, mask=mask, logger=rootLogger)
         rootLogger.info(f"Found {num_candidates} candidate extreme precipitation events.")
 
     rootLogger.info("Initializing event sampling...")
@@ -1342,10 +1311,10 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
     try:
         rootLogger.info(f"Searching through {num_candidates} candidate indices/events...")
         # get stac provider
-        stac_provider = get_stac_provider(source, logger=logger)
+        stac_provider = get_stac_provider(cfg.sampling.source, logger=logger)
         for event_date, event_precip, prism_bbox, eid, indices, crs in events:
-            if Path(dir_path + eid + '/').is_dir():
-                if event_completed(dir_path + eid + '/', regex_patterns, pattern_dict, logger=rootLogger):
+            if Path(cfg.sampling.dir_path + eid + '/').is_dir():
+                if event_completed(cfg.sampling.dir_path + eid + '/', regex_patterns, pattern_dict, logger=rootLogger):
                     rootLogger.debug(f'Event {eid} index {indices} has already been processed before. Moving on to the next event...')
                     alr_completed += 1
                     history.add(indices)
@@ -1356,9 +1325,9 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
             max_attempts = 3
             for attempt in range(1, max_attempts + 1):
                 try:
-                    if event_sample(stac_provider, days_before, days_after,
-                                    maxcoverpercentage, within_hours, event_date, event_precip,
-                                    prism_bbox, eid, dir_path, manual_crs=crs):
+                    if event_sample(stac_provider, event_date, event_precip,
+                                prism_bbox, eid, cfg.sampling.dir_path, cfg,
+                                manual_crs=crs):
                         count += 1
                     history.add(indices)
                     break
@@ -1376,14 +1345,14 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
                     raise err
 
             # once sampled maxevents, stop pipeline
-            if count >= maxevents:
-                rootLogger.info(f"Maximum number of events = {maxevents} reached. Stopping event sampling...")
+            if count >= cfg.sampling.maxevents:
+                rootLogger.info(f"Maximum number of events = {cfg.sampling.maxevents} reached. Stopping event sampling...")
                 break
     except Exception as err:
         rootLogger.exception("Unexpected error during event sampling")
     finally:
         # store all previously processed events
-        with open(dir_path + 'history.pickle', 'wb') as f:
+        with open(cfg.sampling.dir_path + 'history.pickle', 'wb') as f:
             pickle.dump(history, f)
 
     rootLogger.debug(f"Number of events already completed: {alr_completed}")
@@ -1391,18 +1360,4 @@ def main(threshold, days_before, days_after, maxcoverpercentage, maxevents, dir_
     return 0
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(prog='sampleS2andS1', description='Samples imagery from Copernicus SENTINEL-2 and SENTINEL-1 (through a provider API) for top precipitation events and generates additional accompanying rasters for each event.')
-    parser.add_argument('threshold', type=int, help='minimum daily cumulative precipitation (mm) threshold for search')
-    parser.add_argument('-b', '--before', dest='days_before', default=2, type=int, help='number of days allowed for download before precipitation event (default: 2)')
-    parser.add_argument('-a', '--after', dest='days_after', default=4, type=int, help='number of days allowed for download following precipitation event (default: 4)')
-    parser.add_argument('-c', '--maxcover', dest='maxcoverpercentage', default=30, type=int, help='maximum cloud and no data cover percentage (default: 30)')
-    parser.add_argument('-s', '--maxevents', dest='maxevents', default=100, type=int, help='maximum number of extreme precipitation events to attempt downloading (default: 100)')
-    parser.add_argument('-d', '--dir', dest='dir_path', help='specify a directory name for downloaded samples, format should end with backslash (default: None)')
-    parser.add_argument('-w', '--within_hours', dest='within_hours', default=12, type=int, help='Floods event must have S1 and S2 data within this many hours. (default: 12)')
-    parser.add_argument('-r', '--region', default=None, choices=['ceser'], help='filter precipitation only from supported regions: ["ceser"]. (default: None)')
-    parser.add_argument('-m', '--manual', default=None, help='text file for parsing manual event indices with format: time, y, x (default: None)')
-    parser.add_argument('-f', '--config', dest='config_file', help='specify a custom configuration file path')
-    parser.add_argument('--source', choices=['mpc', 'aws'], default='mpc', help='Specify a provider (Microsoft Planetary Computer, AWS) for the ESA data (default: mpc)')
-    args = parser.parse_args()
-
-    sys.exit(main(args.threshold, args.days_before, args.days_after, args.maxcoverpercentage, args.maxevents, dir_path=args.dir_path, within_hours=args.within_hours, region=args.region, config_file=args.config_file, manual=args.manual, source=args.source))
+    main()

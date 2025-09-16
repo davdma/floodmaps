@@ -157,9 +157,9 @@ def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_pa
     label[missing_vals] = 0
     return label
 
-@hydra.main(version_base=None, config_path="configs", config_name="config.yaml")
+@hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig):
-    """Generates predictions in specified folder using S2 model.
+    """Generates predictions in specified folder for specific area of interest using S2 model.
 
     Note: for custom data directories, rasters are expected to have eid defined in file names i.e. rgb_(date)_(eid).tif.
 
@@ -168,6 +168,9 @@ def main(cfg: DictConfig):
     cfg : DictConfig
         Configuration object containing model and data parameters.
     """
+    # TMP DEBUG
+    from omegaconf import OmegaConf
+    print(OmegaConf.to_yaml(cfg))
     device = (
         "cuda"
         if torch.cuda.is_available()
@@ -186,9 +189,9 @@ def main(cfg: DictConfig):
     use_weak = getattr(cfg.data, 'use_weak', False)
     dataset_type = 's2_weak' if use_weak else 's2'
     if suffix:
-        sample_dir = cfg.paths.preprocess_dir / dataset_type / f'samples_{size}_{samples}_{suffix}/'
+        sample_dir = Path(cfg.paths.preprocess_dir) / dataset_type / f'samples_{size}_{samples}_{suffix}/'
     else:
-        sample_dir = cfg.paths.preprocess_dir / dataset_type / f'samples_{size}_{samples}/'
+        sample_dir = Path(cfg.paths.preprocess_dir) / dataset_type / f'samples_{size}_{samples}/'
 
     channels = [bool(int(x)) for x in cfg.data.channels]
     with open(sample_dir / f'mean_std_{size}_{samples}.pkl', 'rb') as f:
@@ -211,7 +214,7 @@ def main(cfg: DictConfig):
             continue
 
         pred = generate_prediction_s2(model, device, cfg, standardize, train_mean, data_path, dt, eid)
-        if format == "tif":
+        if cfg.inference.format == "tif":
             # save result of prediction as .tif file
             # add transform
             with rasterio.open(rgb_file) as src:
@@ -222,12 +225,11 @@ def main(cfg: DictConfig):
             broadcasted = np.broadcast_to(mult_pred, (3, *pred.shape)).astype(np.uint8)
             with rasterio.open(data_path / f'pred_{dt}_{eid}.tif', 'w', driver='Gtiff', count=3, height=pred.shape[-2], width=pred.shape[-1], dtype=np.uint8, crs=crs, transform=transform) as dst:
                 dst.write(broadcasted)
-        elif format == "npy":
+        elif cfg.inference.format == "npy":
             np.save(data_path / f'pred_{dt}_{eid}.npy', pred)
         else:
             raise Exception("format unknown")
                         
 
 if __name__ == '__main__':
-    """Generate s2 model predictions for specific area of interest."""
     main()

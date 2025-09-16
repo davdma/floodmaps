@@ -291,7 +291,7 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
 
 def save_experiment(cls_weights, disc_weights, metrics, cfg, run):
     """Save experiment files to directory specified by config save_path."""
-    path = Path(cfg.path.experiment_dir) / cfg.save_path
+    path = Path(cfg.paths.experiment_dir) / cfg.save_path
     path.mkdir(parents=True, exist_ok=True)
 
     if cls_weights is not None:
@@ -607,7 +607,7 @@ def validate_config(cfg):
     assert cfg.wandb.project is not None, "Wandb project must be specified"
     assert validate_channels(cfg.data.channels), "Channels must be a binary string of length 11"
 
-@hydra.main(version_base=None, config_path="configs", config_name="config.yaml")
+@hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig):
     run_experiment_s2(cfg)
 

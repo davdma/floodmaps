@@ -445,7 +445,7 @@ def main(cfg: DictConfig) -> None:
 
     logger.debug('Preprocessing complete.')
 
-@hydra.main(version_base=None, config_path='configs', config_name='config.yaml')
+@hydra.main(version_base=None, config_path='pkg://configs', config_name='config.yaml')
 def hydra_main(cfg: DictConfig) -> None:
     main(cfg)
 

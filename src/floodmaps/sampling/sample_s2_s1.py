@@ -1232,8 +1232,7 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
     logger.info('Metadata and raster generation completed. Event finished.')
     return True
 
-@hydra.main(version_base=None, config_paths="configs", config_name="config.yaml")
-def main(cfg: DictConfig) -> None:
+def run_sample_s2_s1(cfg: DictConfig) -> None:
     """
     Samples imagery of events queried from PRISM using a given minimum precipitation threshold.
     Downloaded samples will contain multispectral data and sar data from within specified interval of event date,
@@ -1357,7 +1356,10 @@ def main(cfg: DictConfig) -> None:
 
     rootLogger.debug(f"Number of events already completed: {alr_completed}")
     rootLogger.debug(f"Number of successful events sampled from this run: {count}")
-    return 0
+
+@hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
+def main(cfg: DictConfig) -> None:
+    run_sample_s2_s1(cfg)
 
 if __name__ == '__main__':
     main()

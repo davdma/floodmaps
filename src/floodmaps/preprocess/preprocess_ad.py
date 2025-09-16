@@ -313,7 +313,7 @@ def main(cfg: DictConfig) -> None:
         pickle.dump((mean, std), f)
     logger.info('Training mean and std statistics saved.')
 
-    if method == 'random':
+    if cfg.preprocess.method == 'random':
         rng = Random(seed)
         generate_patches(train_events, size, samples, rng, pre_sample_dir, sample_dir, kernel_size=kernel_size, typ="train")
         generate_patches(val_events, size, samples, rng, pre_sample_dir, sample_dir, kernel_size=kernel_size, typ="val")
@@ -322,7 +322,7 @@ def main(cfg: DictConfig) -> None:
 
     logger.debug('Preprocessing complete.')
 
-@hydra.main(version_base=None, config_path='configs', config_name='config.yaml')
+@hydra.main(version_base=None, config_path='pkg://configs', config_name='config.yaml')
 def hydra_main(cfg: DictConfig) -> None:
     main(cfg)
 

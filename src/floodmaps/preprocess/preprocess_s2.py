@@ -19,7 +19,7 @@ def _find_event_dir(img_dt: str, eid: str, sample_dirs: List[str], cfg: DictConf
     Returns the event directory Path or None if not found.
     """
     for sd in sample_dirs:
-        event_dir = cfg.paths.imagery_dir / sd / eid
+        event_dir = Path(cfg.paths.imagery_dir) / sd / eid
         if not event_dir.is_dir():
             continue
         return event_dir
@@ -65,7 +65,7 @@ def random_crop(label_paths, size, num_samples, rng, pre_sample_dir, sample_dirs
         else:
             raise ValueError(f'Label file {label_rel} does not match expected format.')
 
-        with rasterio.open(cfg.paths.labels_dir / label_rel) as src:
+        with rasterio.open(Path(cfg.paths.labels_dir) / label_rel) as src:
             label_raster = src.read([1, 2, 3])
             # if label has any values != 0 or 255 then print to log!
             if np.any((label_raster > 0) & (label_raster < 255)):
@@ -387,7 +387,7 @@ def save_event_splits(train_labels: List[str], val_labels: List[str], test_label
         logger.error(f'Failed to save event splits: {e}')
         raise
 
-@hydra.main(version_base=None, config_path='configs', config_name='config.yaml')
+@hydra.main(version_base=None, config_path='pkg://configs', config_name='config.yaml')
 def main(cfg: DictConfig) -> None:
     """Preprocesses raw S2 tiles and corresponding labels into smaller patches. The data will be stored
     as separate npy files for train, val, and test sets, along with a mean_std.pkl file containing the
@@ -414,9 +414,9 @@ def main(cfg: DictConfig) -> None:
 
     # make our preprocess directory
     if getattr(cfg, 'suffix', None):
-        pre_sample_dir = cfg.paths.preprocess_dir / 's2' / f'samples_{cfg.preprocess.size}_{cfg.preprocess.samples}_{cfg.preprocess.suffix}'
+        pre_sample_dir = Path(cfg.paths.preprocess_dir) / 's2' / f'samples_{cfg.preprocess.size}_{cfg.preprocess.samples}_{cfg.preprocess.suffix}'
     else:
-        pre_sample_dir = cfg.paths.preprocess_dir / 's2' / f'samples_{cfg.preprocess.size}_{cfg.preprocess.samples}'
+        pre_sample_dir = Path(cfg.paths.preprocess_dir) / 's2' / f'samples_{cfg.preprocess.size}_{cfg.preprocess.samples}'
     pre_sample_dir.mkdir(parents=True, exist_ok=True)
 
     # Resolve splits and sample dirs

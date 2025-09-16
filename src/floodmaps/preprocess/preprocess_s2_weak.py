@@ -662,7 +662,7 @@ def build_label_index(label_dirs: list[str], cfg: DictConfig) -> Dict[Tuple[str,
     idx: Dict[Tuple[str, str], Path] = {}
     p = re.compile(r'label_(\d{8})_(\d{8}_\d+_\d+)\.tif$')
     for ld in label_dirs or []:
-        base = cfg.paths.labels_dir / ld
+        base = Path(cfg.paths.labels_dir) / ld
         if not base.is_dir():
             continue
         for fp in base.glob('label_*.tif'):
@@ -742,7 +742,7 @@ def save_event_splits(train_events: List[Path], val_events: List[Path], test_eve
         raise
 
 
-@hydra.main(version_base=None, config_path='configs', config_name='config.yaml')
+@hydra.main(version_base=None, config_path='pkg://configs', config_name='config.yaml')
 def main(cfg: DictConfig) -> None:
     """Preprocesses raw S2 tiles and corresponding labels into smaller patches.
 

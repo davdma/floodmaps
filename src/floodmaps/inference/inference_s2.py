@@ -153,7 +153,7 @@ def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_pa
     pred_map = torch.where(count_map > 0, pred_map / count_map, pred_map)
     
     # Convert to final binary prediction
-    label = torch.where(pred_map > 0.5, 1.0, 0.0).byte().numpy()
+    label = torch.where(pred_map >= 0.5, 1.0, 0.0).byte().numpy()
     label[missing_vals] = 0
     return label
 
@@ -168,9 +168,6 @@ def main(cfg: DictConfig):
     cfg : DictConfig
         Configuration object containing model and data parameters.
     """
-    # TMP DEBUG
-    from omegaconf import OmegaConf
-    print(OmegaConf.to_yaml(cfg))
     device = (
         "cuda"
         if torch.cuda.is_available()

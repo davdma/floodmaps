@@ -870,7 +870,7 @@ def filter_cloud_tiles_parallel(events: List[Path], tile_cloud_threshold: float,
 
     return [s for s, m in zip(events, mask) if m]
 
-@hydra.main(version_base=None, config_path='configs', config_name='config.yaml')
+@hydra.main(version_base=None, config_path='pkg://configs', config_name='config.yaml')
 def main(cfg: DictConfig) -> None:
     """Preprocesses raw S1 tiles and corresponding labels into smaller patches.
 

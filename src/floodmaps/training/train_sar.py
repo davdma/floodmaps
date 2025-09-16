@@ -472,7 +472,7 @@ def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, a
 
 def save_experiment(cls_weights, ad_weights, metrics, cfg, ad_cfg, run):
     """Save experiment files to directory specified by config save_path."""
-    path = Path(cfg.path.experiment_dir) / cfg.save_path
+    path = Path(cfg.paths.experiment_dir) / cfg.save_path
     path.mkdir(parents=True, exist_ok=True)
 
     if cls_weights is not None:
@@ -704,9 +704,9 @@ def run_experiment_s1(cfg, ad_cfg=None):
     samples = cfg.data.samples
     suffix = getattr(cfg.data, 'suffix', '')
     if suffix:
-        sample_dir = Path(cfg.path.preprocess_dir) / 's1_weak' / f'samples_{size}_{samples}_{filter}_{suffix}/'
+        sample_dir = Path(cfg.paths.preprocess_dir) / 's1_weak' / f'samples_{size}_{samples}_{filter}_{suffix}/'
     else:
-        sample_dir = Path(cfg.path.preprocess_dir) / 's1_weak' / f'samples_{size}_{samples}_{filter}/'
+        sample_dir = Path(cfg.paths.preprocess_dir) / 's1_weak' / f'samples_{size}_{samples}_{filter}/'
 
     # load in mean and std
     channels = [bool(int(x)) for x in cfg.data.channels]
@@ -831,7 +831,7 @@ def validate_config(cfg):
     assert cfg.wandb.project is not None, "Wandb project must be specified"
     assert validate_channels(cfg.data.channels), "Channels must be a binary string of length 8"
 
-@hydra.main(version_base=None, config_paths="configs", config_name="config.yaml")
+@hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig):
     validate_config(cfg)
     ad_cfg = getattr(cfg, 'ad', None)

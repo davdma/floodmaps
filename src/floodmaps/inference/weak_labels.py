@@ -3,17 +3,17 @@ from torch import nn
 from torchvision import transforms
 from datetime import datetime, timezone, timedelta
 import numpy as np
-import argparse
 import re
 import rasterio
-import sys
 import pickle
+from pathlib import Path
+import hydra
+from omegaconf import DictConfig
 
 from floodmaps.models.model import S2WaterDetector, SARWaterDetector
-from floodmaps.utils.utils import SAMPLES_DIR, DATA_DIR, ChannelIndexerDeprecated, SARChannelIndexer
-from floodmaps.utils.config import Config
+from floodmaps.utils.utils import ChannelIndexerDeprecated, SARChannelIndexer
 
-def single_prediction_s2(cfg, dt, eid, format="tif", data_dir=""):
+def single_prediction_s2(cfg: DictConfig, dt: str, eid: str, format="tif"):
     """Predict one S2 sample for quality control purposes.
     
     Parameters
@@ -42,7 +42,13 @@ def single_prediction_s2(cfg, dt, eid, format="tif", data_dir=""):
     # dataset and transforms
     size = cfg.data.size
     samples = cfg.data.samples
-    sample_dir = DATA_DIR / 's2' / f'samples_{size}_{samples}/'
+    suffix = getattr(cfg.data, 'suffix', '')
+    use_weak = getattr(cfg.data, 'use_weak', False)
+    dataset_type = 's2_weak' if use_weak else 's2'
+    if suffix:
+        sample_dir = Path(cfg.paths.preprocess_dir) / dataset_type / f'samples_{size}_{samples}_{suffix}/'
+    else:
+        sample_dir = Path(cfg.paths.preprocess_dir) / dataset_type / f'samples_{size}_{samples}/'
 
     channels = [bool(int(x)) for x in cfg.data.channels]
     b_channels = sum(channels[-2:])
@@ -59,7 +65,7 @@ def single_prediction_s2(cfg, dt, eid, format="tif", data_dir=""):
     standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
 
     # Convert string path to Path object for consistency
-    event_path = SAMPLES_DIR / data_dir / eid
+    event_path = Path(cfg.inference.data_dir) / eid
     pred = get_sample_prediction_s2(model, cfg, standardize, train_mean, event_path, dt, eid)
 
     if format == "tif":
@@ -80,12 +86,12 @@ def single_prediction_s2(cfg, dt, eid, format="tif", data_dir=""):
     else:
         raise Exception("format unknown")
 
-def single_prediction_sar(cfg, s2_dt, s1_dt, eid, format="tif", data_dir=""):
+def single_prediction_sar(cfg: DictConfig, s2_dt: str, s1_dt: str, eid: str, format="tif"):
     """Predict one SAR sample for quality control purposes.
     
     Parameters
     ----------
-    cfg : Config
+    cfg : DictConfig
         Configuration object containing model and data parameters.
     s2_dt : str
         Date that the S2 image was taken.
@@ -106,8 +112,7 @@ def single_prediction_sar(cfg, s2_dt, s1_dt, eid, format="tif", data_dir=""):
     print(f"Using {device} device")
 
     # load model and weights
-    ad_config_path = cfg.model.autodespeckler.ad_config
-    ad_cfg = Config(config_file=ad_config_path) if ad_config_path is not None else None
+    ad_cfg = getattr(cfg, 'ad', None)
     model = SARWaterDetector(cfg, ad_cfg=ad_cfg).to(device)
     model.eval()
 
@@ -115,24 +120,22 @@ def single_prediction_sar(cfg, s2_dt, s1_dt, eid, format="tif", data_dir=""):
     size = cfg.data.size
     samples = cfg.data.samples
     filter_type = cfg.data.filter
-    sample_dir = DATA_DIR / 'sar' / f'samples_{size}_{samples}_{filter_type}/'
+    suffix = getattr(cfg.data, 'suffix', '')
+    if suffix:
+        sample_dir = Path(cfg.paths.preprocess_dir) / 's1_weak' / f'samples_{size}_{samples}_{filter_type}_{suffix}/'
+    else:
+        sample_dir = Path(cfg.paths.preprocess_dir) / 's1_weak' / f'samples_{size}_{samples}_{filter_type}/'
 
     channels = [bool(int(x)) for x in cfg.data.channels]
-    b_channels = sum(channels[-2:])
     with open(sample_dir / f'mean_std_{size}_{samples}_{filter_type}.pkl', 'rb') as f:
         train_mean, train_std = pickle.load(f)
 
         train_mean = torch.from_numpy(train_mean[channels])
         train_std = torch.from_numpy(train_std[channels])
-        # make sure binary channels are 0 mean and 1 std
-        if b_channels > 0:
-            train_mean[-b_channels:] = 0
-            train_std[-b_channels:] = 1
-
     standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
 
     # Convert string path to Path object for consistency
-    event_path = SAMPLES_DIR / data_dir / eid
+    event_path = Path(cfg.inference.data_dir) / eid
     pred = get_sample_prediction_sar(model, cfg, standardize, train_mean, event_path, s2_dt, s1_dt, eid)
 
     if format == "tif":
@@ -153,7 +156,7 @@ def single_prediction_sar(cfg, s2_dt, s1_dt, eid, format="tif", data_dir=""):
     else:
         raise Exception("format unknown")
 
-def get_sample_prediction_sar(model, cfg, standardize, train_mean, event_path, s2_dt, s1_dt, eid, device='cpu'):
+def get_sample_prediction_sar(model, cfg: DictConfig, standardize, train_mean, event_path, s2_dt, s1_dt, eid, device='cpu', threshold=0.5):
     """Generate new predictions on unseen SAR data using water detector model.
     Predictions are made using a sliding window with 25% overlap.
 
@@ -161,7 +164,7 @@ def get_sample_prediction_sar(model, cfg, standardize, train_mean, event_path, s
     ----------
     model : obj
         Model object for inference.
-    cfg : Config
+    cfg : DictConfig
         Configuration object containing model and data parameters.
     standardize : obj
         Standardization of input channels before being fed into the model.
@@ -280,7 +283,7 @@ def get_sample_prediction_sar(model, cfg, standardize, train_mean, event_path, s
                     pred = output.squeeze()
 
                 # Convert to binary prediction
-                pred_binary = torch.where(torch.sigmoid(pred) > 0.5, 1.0, 0.0).byte()
+                pred_binary = torch.where(torch.sigmoid(pred) > threshold, 1.0, 0.0).byte()
 
                 # Add to prediction map (average overlapping regions)
                 pred_map[y:y+patch_size, x:x+patch_size] += pred_binary
@@ -290,11 +293,11 @@ def get_sample_prediction_sar(model, cfg, standardize, train_mean, event_path, s
     pred_map = torch.where(count_map > 0, pred_map / count_map, pred_map)
 
     # Convert to final binary prediction
-    label = torch.where(pred_map > 0.5, 1.0, 0.0).byte().to('cpu').numpy()
+    label = torch.where(pred_map >= 0.5, 1.0, 0.0).byte().to('cpu').numpy()
     label[missing_vals] = 0
     return label
 
-def get_sample_prediction_s2(model, cfg, standardize, train_mean, event_path, dt, eid):
+def get_sample_prediction_s2(model, cfg: DictConfig, standardize, train_mean, event_path, dt, eid, threshold=0.5):
     """Generate new predictions on unseen data using water detector model.
     Predictions are made using a sliding window with 25% overlap.
 
@@ -302,7 +305,7 @@ def get_sample_prediction_s2(model, cfg, standardize, train_mean, event_path, dt
     ----------
     model : obj
         Model object for inference.
-    cfg : Config
+    cfg : DictConfig
         Configuration object containing model and data parameters.
     standardize : obj
         Standardization of input channels before being fed into the model.
@@ -314,7 +317,8 @@ def get_sample_prediction_s2(model, cfg, standardize, train_mean, event_path, dt
         Date that the TCI of the sample was taken.
     eid : str
         Event ID of the sample.
-
+    threshold : float
+        Threshold for the prediction.
     Returns
     -------
     label : ndarray
@@ -420,7 +424,7 @@ def get_sample_prediction_s2(model, cfg, standardize, train_mean, event_path, dt
                     pred = output.squeeze()
                 
                 # Convert to binary prediction
-                pred_binary = torch.where(torch.sigmoid(pred) > 0.5, 1.0, 0.0).byte()
+                pred_binary = torch.where(torch.sigmoid(pred) > threshold, 1.0, 0.0).byte()
                 
                 # Add to prediction map (average overlapping regions)
                 pred_map[y:y+patch_size, x:x+patch_size] += pred_binary
@@ -430,7 +434,7 @@ def get_sample_prediction_s2(model, cfg, standardize, train_mean, event_path, dt
     pred_map = torch.where(count_map > 0, pred_map / count_map, pred_map)
     
     # Convert to final binary prediction
-    label = torch.where(pred_map > 0.5, 1.0, 0.0).byte().numpy()
+    label = torch.where(pred_map >= 0.5, 1.0, 0.0).byte().numpy()
     label[missing_vals] = 0
     return label
 
@@ -441,23 +445,15 @@ def parse_manual_file(manual_file):
         eids = [line.strip() for line in f]
     return eids
 
-def main(cfg, format="tif", replace=True, data_dir="", post=False, manual=None):
+def run_weak_labeling(cfg: DictConfig):
     """Generates machine labels for dataset using tuned S2 optical model.
 
-    Note: run with conda environment 'floodmaps'.
+    Note: run with conda environment 'floodmaps-training'.
 
     Parameters
     ----------
-    cfg : Config
+    cfg : DictConfig
         Configuration object containing model and data parameters.
-    format : str
-        Output label file format: tif, npy.
-    replace : bool
-        Whether to overwrite pre-existing predictions.
-    data_dir : str
-        Directory path of dataset containing event tiles where predicted labels should be generated and stored.
-    post : bool
-        Only make predictions on tiles taken post flood event.
     """
     device = (
         "cuda"
@@ -472,30 +468,32 @@ def main(cfg, format="tif", replace=True, data_dir="", post=False, manual=None):
     # dataset and transforms
     size = cfg.data.size
     samples = cfg.data.samples
-    sample_dir = DATA_DIR / 's2' / f'samples_{size}_{samples}_deprecated/' # currently using old model w deprecated data channels
+    suffix = getattr(cfg.data, 'suffix', '') # for old model can use suffix=deprecated
+    use_weak = getattr(cfg.data, 'use_weak', False)
+    dataset_type = 's2_weak' if use_weak else 's2'
+    if suffix:
+        sample_dir = Path(cfg.paths.preprocess_dir) / dataset_type / f'samples_{size}_{samples}_{suffix}/'
+    else:
+        sample_dir = Path(cfg.paths.preprocess_dir) / dataset_type / f'samples_{size}_{samples}/'
 
     channels = [bool(int(x)) for x in cfg.data.channels]
-    b_channels = sum(channels[-2:])
     with open(sample_dir / f'mean_std_{size}_{samples}.pkl', 'rb') as f:
         train_mean, train_std = pickle.load(f)
 
         train_mean = torch.from_numpy(train_mean[channels])
         train_std = torch.from_numpy(train_std[channels])
-        # make sure binary channels are 0 mean and 1 std
-        if b_channels > 0:
-            train_mean[-b_channels:] = 0
-            train_std[-b_channels:] = 1
 
     standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
 
     # get list of events to predict
     lst = []
+    manual = getattr(cfg.inference, 'manual', None)
     if manual is not None:
         eids = parse_manual_file(manual)
-        lst.extend([SAMPLES_DIR / data_dir / eid for eid in eids])
+        lst.extend([Path(cfg.inference.data_dir) / eid for eid in eids])
     else:
         # iterate over all events in dataset dir
-        lst.extend((SAMPLES_DIR / data_dir).glob("[0-9]*"))
+        lst.extend((Path(cfg.inference.data_dir)).glob("[0-9]*"))
 
     # get eid then use to find the tci dates for each event
     p = re.compile('tci_(\d{8})_(\d{8})_(.+).tif')
@@ -513,15 +511,15 @@ def main(cfg, format="tif", replace=True, data_dir="", post=False, manual=None):
                 event_dt = datetime.strptime(m.group(2), '%Y%m%d') - timedelta(days=1)
 
                 # skip if pre-precipitation event
-                if post and img_dt < event_dt:
+                if cfg.inference.post and img_dt < event_dt:
                     continue
 
-                if not replace and (event_path / f'pred_{dt}_{eid}.tif').exists():
+                if not cfg.inference.replace and (event_path / f'pred_{dt}_{eid}.tif').exists():
                     continue
                 else:
                     pred = get_sample_prediction_s2(model, cfg, standardize, train_mean, event_path, dt, eid)
 
-                    if format == "tif":
+                    if cfg.inference.format == "tif":
                         # save result of prediction as .tif file
                         # add transform
                         with rasterio.open(event_path / f'tci_{dt}_{eid}.tif') as src:
@@ -532,22 +530,15 @@ def main(cfg, format="tif", replace=True, data_dir="", post=False, manual=None):
                         broadcasted = np.broadcast_to(mult_pred, (3, *pred.shape)).astype(np.uint8)
                         with rasterio.open(event_path / f'pred_{dt}_{eid}.tif', 'w', driver='Gtiff', count=3, height=pred.shape[-2], width=pred.shape[-1], dtype=np.uint8, crs=crs, transform=transform) as dst:
                             dst.write(broadcasted)
-                    elif format == "npy":
+                    elif cfg.inference.format == "npy":
                         np.save(event_path / f'pred_{dt}_{eid}.npy', pred)
                     else:
                         raise Exception("format unknown")
 
+@hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
+def main(cfg: DictConfig):
+    """Main entry point for weak label generation."""
+    run_weak_labeling(cfg)
+
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(prog='weak_labels', description='Generate s2 model predictions (weak labels) for dataset ground truthing.')
-
-    # YAML config file
-    parser.add_argument("--config_file", default="configs/s2_template.yaml", help="Path to YAML config file (default: configs/s2_template.yaml)")
-    parser.add_argument('-f', '--format', default="tif", choices=["npy", "tif"], help='prediction label format: npy, tif (default: tif)')
-    parser.add_argument('--replace', action='store_true', help='overwrite all previously made predictions (default: False)')
-    parser.add_argument('--data_dir', default='samples_200_6_4_10_sar/', help='dataset directory to make predictions in (default: samples_200_6_4_10_sar/)')
-    parser.add_argument('--manual', default=None, help='manual file to specify list of EIDs in directory for predictions (default: None)')
-    parser.add_argument('--post', action='store_true', help='only label post-event images (default: False)')
-
-    _args = parser.parse_args()
-    cfg = Config(**_args.__dict__)
-    sys.exit(main(cfg, format=_args.format, replace=_args.replace, data_dir=_args.data_dir, post=_args.post, manual=_args.manual))
+    main()

@@ -270,7 +270,7 @@ def downloadS1(stac_provider, sample, cfg):
 
     return True
 
-@hydra.main(version_base=None, config_paths="configs", config_name="config.yaml")
+@hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig) -> None:
     """Samples S1 imagery on top of pre-existing S2 sample folder.
     Can run this on a S2 only directory downloaded using sample_s2.py, or to

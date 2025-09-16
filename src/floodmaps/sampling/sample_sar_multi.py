@@ -413,7 +413,7 @@ def download_multi(search_bbox: Tuple[float, float, float, float], search_start_
     logger.info(f"Completed multitemporal SAR data collection and compositing for {search_bbox}")
 
 
-@hydra.main(version_base=None, config_paths="configs", config_name="config.yaml")
+@hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig) -> None:
     """Initializes multitemporal SAR data collection. Compositing should be done
     during preprocessing of the data, not here.

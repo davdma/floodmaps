@@ -142,6 +142,13 @@ conda activate floodmaps-training
 python -m floodmaps.inference.inference_s2
 ```
 
+By default `hydra` will save its specific log files and outputs next to the python script. To avoid cluttering the repo, it is highly recommended to either disable this logging completely or modify the hydra output directory location through this setting in `config.yaml`:
+
+```yaml
+hydra:
+  run:
+    dir: ${base_dir}/hydra
+```
 
 
 

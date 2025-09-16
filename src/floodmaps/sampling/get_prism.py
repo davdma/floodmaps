@@ -144,7 +144,7 @@ def parse_args():
     parser.add_argument('--end_date', default='20241130', help='end date to download PRISM precip data to (default: 20241130)')
     return parser.parse_args()
 
-@hydra.main(version_base=None, config_paths="configs", config_name="config.yaml")
+@hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig):
     # Convert string dates to date objects
     args = parse_args()

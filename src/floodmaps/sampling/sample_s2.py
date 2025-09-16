@@ -1054,7 +1054,7 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
     logger.info('Metadata and raster generation completed. Event finished.')
     return True
     
-@hydra.main(version_base=None, config_paths="configs", config_name="config.yaml")
+@hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig) -> None:
     """
     Samples imagery of events queried from PRISM using a given minimum precipitation threshold.

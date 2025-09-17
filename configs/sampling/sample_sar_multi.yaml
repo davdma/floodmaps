@@ -1,0 +1,6 @@
+output_dir: None # specify a directory name for downloaded samples, format should end with backslash
+time_interval: 10 # time interval in days between first and last acquisition
+acquisitions: 10 # number of acquisitions to download in the time interval
+num_days: 10 # number of days before and after flood event date to avoid sampling
+bbox: [1.0, 1.0, 1.0, 1.0] # bounding box coordinates [minx miny maxx maxy] in PRISM_CRS = EPSG:4269
+allow_missing: false # allow missing data in the time interval

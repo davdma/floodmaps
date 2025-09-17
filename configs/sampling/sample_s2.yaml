@@ -1,0 +1,9 @@
+threshold: 100 # minimum daily cumulative precipitation (mm) threshold for search
+before: 2 # number of days allowed for download before precipitation event
+after: 4 # number of days allowed for download following precipitation event
+maxcoverpercentage: 30 # maximum cloud and no data cover percentage
+maxevents: 100 # maximum number of extreme precipitation events to attempt downloading
+dir_path: None # specify a directory name for downloaded samples, format should end with backslash
+region: None # filter precipitation only from supported regions: ["ceser"]
+manual: None # text file for parsing manual event indices with format: time, y, x
+source: mpc # specify a provider (Microsoft Planetary Computer, AWS) for the ESA data ['mpc', 'aws']

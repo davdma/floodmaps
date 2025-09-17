@@ -1,0 +1,11 @@
+defaults:
+  - paths: default
+  - inference: inference_s2
+  - s2_unet_infer_v2 # for training
+  - __self__
+
+# hydra config
+hydra:
+  # output_subdir: null -> disable hydra completely
+  run:
+    dir: ${paths.base_dir}/hydra # keeps hydra outputs from cluttering directory

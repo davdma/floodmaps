@@ -1,0 +1,5 @@
+format: tif # ['tif', 'npy']
+replace: true # whether to overwrite pre-existing predictions
+manual: # manual file to specify list of EIDs in directory for predictions
+data_dir: ${paths.imagery_dir}/s2_200_5_4_35/
+post: true # only label post-event images

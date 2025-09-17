@@ -17,14 +17,12 @@ floodmaps/
 └── utils/                # Shared utilities and helpers
 ```
 
-## Quick Start
+## Pipeline
 
 ### Prerequisites
 1. **Environment**: Python environment with `torch`, `wandb`, `hydra`, and other dependencies installed via `envs/` conda environment yml files
 2. **Wandb Account**: For experiment tracking and visualization
 3. **API Key(s)**: Needed if using the repo to download new satellite data using Microsoft PlanetarySTAC or AWS S3 bucket
-
-## Pipeline Overview
 
 ### Workflow
 ```

@@ -1,6 +1,69 @@
 # Config File Structure
-This document explains how to write the config yaml file for running experiments and tuning. Since the checks for config
-files are not very extensively implemented beyond basic assertions, ensure you follow the structure to avoid running into errors.
+This document explains how to use [Hydra](https://hydra.cc/) for managing configurations for sampling data, running experiments, inference, tuning and more in the repo.
+
+### Basic Usage
+The main entry point to the configuration is the `config.yaml` file at the base of the `configs` directory. This is what the python scripts by default parses at runtime. Configs specific to sampling, preprocessing, inferencing etc. are organized inside `configs/` subdirectories and represent **config groups**.
+
+A way to think about this is that `config.yaml` serves as the **composition root** that assembles different configuration pieces (i.e. files from different groups) together into the final `DictConfig` object given to the script.
+
+For instance a `config.yaml` for running the `inference_s2.py` script might look like:
+```yaml
+defaults:
+  - paths: default          # Config group: paths/default.yaml
+  - inference: inference_s2  # Config group: inference/inference_s2.yaml  
+  - s2_unet_infer_v2        # Base config: s2_unet_infer_v2.yaml
+  - __self__                # Where to place this config's content
+
+# This config's own parameters
+hydra:
+  run:
+    dir: ${paths.base_dir}/hydra
+```
+
+In this case you have `paths/default.yaml` used to specify `paths` across the repo, `inference/inference_s2.yaml` for inference params and `s2_unet_infer_v2.yaml` used to define the model that we want to use for inference.
+
+Developer note: for maximum flexibility, the config files are not type checked or validated by any schema (beyond some basic asserts). For this reason, follow the structure to avoid running into errors at runtime.
+
+### Model Configs
+
+**Important:** a choice was made to keep model param config files at the same level as `config.yaml` instead of a config group or subdirectory like `configs/training/` due to how often they are needed and used in code. Consequently, when specifying model params, the config file must at the same level as `config.yaml` and specified like this:
+
+```yaml
+# inside config.yaml
+defaults:
+  - s2_unet                 # UNET model training params
+  - __self__
+```
+
+### The `__self__` Directive
+
+`__self__` controls merge order in the defaults list. Put it at the end so your main config overrides everything else:
+
+```yaml
+defaults:
+  - paths: default
+  - sampling: sample_s2
+  - __self__              # Main config has final say
+
+sampling:
+  threshold: 150  # This overrides threshold from sample_s2.yaml
+```
+
+### Variable Interpolation
+
+Use `${...}` syntax to reference other config values:
+
+```yaml
+# From the paths/default.yaml
+paths:
+  base_dir: /lcrc/project/hydrosm/dma
+  data_dir: ${.base_dir}/data
+  output_dir: ${.base_dir}/outputs
+
+# In your main config
+model:
+    weights: ${paths.output_dir}/experiments/best_model/unet_cls.pth
+```
 
 ### Training
 For training the config structure can differ slightly whether you are training S2 or S1 models.
@@ -10,7 +73,6 @@ For S2 training to submit to `train_s2.py` the structure looks like:
 seed: 831002
 save: True
 save_path:
-
 data:
     size: 64 # pixel width of dataset patches
     samples: 1000 # 1000
@@ -18,7 +80,6 @@ data:
     use_weak: False # Use s2_weak (machine labels) vs s2 (manual labels)
     suffix: "" # Optional suffix for preprocessing variant datasets
     random_flip: True
-
 model:
     classifier: "unet" # ['unet', 'unet++']
     discriminator: # ['classifier1', 'classifier2', 'classifier3']
@@ -29,7 +90,6 @@ model:
         dropout:
         deep_supervision:
     discriminator_weights:
-
 train:
     epochs: 400
     batch_size: 4608
@@ -51,27 +111,21 @@ train:
         save_chkpt: True # whether to save checkpoints
         save_chkpt_path:
         save_chkpt_interval: 20 # save checkpoint every N epochs
-
 eval:
     mode: val # ['val', 'test'],
-    
 wandb:
     project: debug
     group:
     num_sample_predictions: 40
-
 logging:
     grad_norm_freq: 10
-
 ```
 
 For S1 training to submit to `train_s1.py` the structure looks like:
-
 ```yaml
 seed: 831002
 save: False
 save_path:
-
 data:
     size: 68 # pixel width of dataset patches
     window: 64 # pixel width of model input/output
@@ -80,7 +134,6 @@ data:
     use_lee: False
     suffix: "" # Optional suffix for preprocessing variant datasets
     random_flip: True
-
 model:
     classifier: "unet++" # ['unet', 'unet++']
     weights:
@@ -94,7 +147,6 @@ model:
         ad_weights:
         freeze:
         freeze_epochs:
-
 train:
     epochs: 200
     batch_size: 256
@@ -119,15 +171,12 @@ train:
         save_chkpt: True # whether to save checkpoints
         save_chkpt_path:
         save_chkpt_interval: 20 # save checkpoint every N epochs
-
 eval:
     mode: val # ['val', 'test'],
-    
 wandb:
     project:
     group:
     num_sample_predictions: 40
-
 logging:
     grad_norm_freq: 10
 ```
@@ -150,3 +199,19 @@ model:
 ```
 
 Here we instantiate the UNet model and keep the `dropout` hyperparameter blank for the tuning job to specify.
+
+### Command Line Usage
+
+```bash
+# Basic usage
+python -m floodmaps.script --config-name=my_config
+
+# Override parameters
+python -m floodmaps.script --config-name=my_config train.lr=0.01 data.size=128
+
+# Use different config groups
+python -m floodmaps.script --config-name=my_config sampling=sample_s2_s1
+
+# Multi-run sweeps
+python -m floodmaps.script --config-name=my_config --multirun train.lr=0.001,0.01,0.1
+```

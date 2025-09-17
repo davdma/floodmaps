@@ -586,7 +586,7 @@ exact_fcodes=['46000', '46003', '46006', '46007', '55800', '33600', '33601', '33
         mem_layer.CreateField(field_defn)
 
         for code in GetHU4Codes(prism_bbox, cfg):
-            with gdal.OpenEx(f'NHD/NHDPLUS_H_{code}_HU4_GDB.gdb') as ds:
+            with gdal.OpenEx(Path(cfg.paths.nhd_dir) / f'NHDPLUS_H_{code}_HU4_GDB.gdb') as ds:
                 layer = ds.GetLayerByName('NHDFlowline')
                 layer.SetSpatialFilterRect(minx, miny, maxx, maxy)
                 if exact_fcodes:

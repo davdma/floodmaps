@@ -476,7 +476,7 @@ def parse_date_string(date_string: str) -> datetime:
         except ValueError:
             continue
 
-    raise ValueError(f"Date string '{date_string}' doesn't match expected formats")
+    raise ValueError(f"Date string '{date_string}' doesn't match expected formats YYYYMMDD or YYYY-MM-DD")
 
 def read_manual_indices(manual_file: str) -> List[Tuple[datetime, int, int, str]]:
     """

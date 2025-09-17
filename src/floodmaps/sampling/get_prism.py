@@ -13,6 +13,9 @@ from pathlib import Path
 import argparse
 import hydra
 from omegaconf import DictConfig
+from typing import List, Tuple
+
+from floodmaps.utils.sampling_utils import parse_date_string
 
 def download_prism_zips(cfg: DictConfig, start_date=date(2024, 7, 31), end_date=date(2024, 11, 30)):
     """Downloads prism precip zip files through HTTP.
@@ -99,7 +102,8 @@ def load_prism_zips(cfg: DictConfig):
 
     return daily_precip
 
-def store_netcdf(cfg: DictConfig, daily_precip, filename="prismprecip_20160801_20241130.nc"):
+def store_netcdf(cfg: DictConfig, daily_precip: List[Tuple[str, np.ndarray, np.ndarray]],
+                filename: str = "prismprecip_20160801_20241130.nc") -> None:
     """Store daily precip data into netcdf file.
     
     Parameters
@@ -140,8 +144,8 @@ def parse_args():
         20160801 as that is the 0 point of the netcdf time dimension used for the project dataset.
         Otherwise to add more dates, set start_date as the date of the most recently downloaded
         precipitation file.""")
-    parser.add_argument('--start_date', default='20160801', help='start date to download PRISM precip data from (default: 20160801)')
-    parser.add_argument('--end_date', default='20241130', help='end date to download PRISM precip data to (default: 20241130)')
+    parser.add_argument('--start_date', default='2016-08-01', help='start date to download PRISM precip data from (default: 2016-08-01)')
+    parser.add_argument('--end_date', default='2024-11-30', help='end date to download PRISM precip data to (default: 2024-11-30)')
     return parser.parse_args()
 
 @hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
@@ -150,12 +154,15 @@ def main(cfg: DictConfig):
     args = parse_args()
     start_date = args.start_date
     end_date = args.end_date
-    start_date_obj = datetime.strptime(start_date, '%Y%m%d').date()
-    end_date_obj = datetime.strptime(end_date, '%Y%m%d').date()
+    start_date_obj = parse_date_string(start_date).date()
+    end_date_obj = parse_date_string(end_date).date()
+
+    # Make prism directory if it doesn't exist
+    Path(cfg.paths.prism_dir).mkdir(parents=True, exist_ok=True)
     
-    download_prism_zips(start_date=start_date_obj, end_date=end_date_obj)
-    daily_precip = load_prism_zips()
-    store_netcdf(daily_precip, filename=f"prismprecip_20160801_{end_date}.nc")
+    download_prism_zips(cfg, start_date=start_date_obj, end_date=end_date_obj)
+    daily_precip = load_prism_zips(cfg)
+    store_netcdf(cfg, daily_precip, filename=f"prismprecip_20160801_{end_date_obj.strftime('%Y%m%d')}.nc")
 
 if __name__ == "__main__":
     main()

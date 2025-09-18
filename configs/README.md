@@ -20,18 +20,52 @@ hydra:
     dir: ${paths.base_dir}/hydra
 ```
 
-In this case you have `paths/default.yaml` used to specify paths across the repo, `inference/inference_s2.yaml` for inference params and `s2_unet_infer_v2.yaml` used to define the model that we want to use for inference.
+As a sample of what the `DictConfig` object looks like from this, here is the output of `print(OmegaConf.to_yaml(cfg))` to the above `config.yaml` input:
 
-Developer note: for maximum flexibility, the config files are not type checked or validated by any schema (beyond some basic asserts). For this reason, follow the structure to avoid running into errors at runtime.
+```text
+paths:
+  base_dir: /lcrc/project/hydrosm/dma
+  data_dir: ${.base_dir}/data
+  output_dir: ${.base_dir}/outputs
+  # ...
+inference:
+  format: tif
+  replace: true
+  data_dir: areas/safb_20240718/
+seed: 831002
+save: true
+save_path: null
+data:
+  size: 64
+  samples: 1000
+  channels: '11111011111'
+  use_weak: false
+  suffix: all
+  random_flip: true
+model:
+  classifier: unet
+  discriminator: null
+  weights: ${paths.output_dir}/experiments/tmp_infer_s2_model/unet_cls.pth
+  unet:
+    dropout: 0.2392593256577808
+  unetpp:
+    dropout: null
+    deep_supervision: null
+  discriminator_weights: null
+```
+
+In this case you have `paths/default.yaml` used to specify paths across the repo, `inference/inference_s2.yaml` for inference params and `s2_unet_infer_v2.yaml` used to define the model that we want to use for inference. Since `paths` and `inference` are both config groups, their attributes are nested under `paths:` and `inference:` in the output config object. Observe that model params like `seed`, `save`, `save_path`, `data`, `model` that came from `s2_unet_infer_v2.yaml` are not indented under a shared `models:` group. See the reason for this below.
+
+Developer note: for maximum flexibility, the config files are not type checked or validated by any schema (beyond some basic asserts). For this reason, follow the structure of the provided templates to avoid running into errors at runtime.
 
 ### Model Configs
 
-**Important:** a choice was made to keep model param config files at the same level as `config.yaml` instead of a config group or subdirectory like `configs/training/` due to how often they are needed and used in code. Consequently, when specifying model params, the config file e.g. `s2_unet.yaml` must at the same level as `config.yaml` and specified like this:
+**Important:** a choice was made to keep model configs at the same level as `config.yaml` instead of inside a config group or subdirectory like `configs/models/` due to how often they are needed and used in code. Consequently, when specifying model params, the config file e.g. `s2_unet.yaml` must at the same level as `config.yaml` and specified like this:
 
 ```yaml
 # inside config.yaml
 defaults:
-  - s2_unet                 # UNET model training params
+  - s2_unet                 # Unet model training params
   - __self__
 ```
 

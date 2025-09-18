@@ -2,8 +2,6 @@
 
 This directory contains scripts for preprocessing satellite imagery and labels into smaller sized training patches for flood detection models. The preprocessing pipeline handles both manual and machine-generated labels with parallel processing capabilities for large-scale datasets.
 
-## Overview
-
 ### Script Types
 
 1. **Manual Label Preprocessing**: `preprocess_s2.py`
@@ -13,24 +11,13 @@ This directory contains scripts for preprocessing satellite imagery and labels i
 
 2. **Weak Label Preprocessing**: `preprocess_s2_weak.py` and `preprocess_sar_weak.py`
    - Processes machine-generated prediction tiles with optional manual label substitution
-   - **Requires `pred_*.tif` files**: Generated using [`../weak_labels.py`](../weak_labels.py) script
+   - **Requires `pred_*.tif` files**: Generated using [`../inference/weak_labels.py`](../inference/weak_labels.py) script
    - Find valid tiles in list of sample directories (YAML defined)
    - Handles large-scale datasets (10,000+ tiles) using concurrent workers
 
 ### Prerequisites for Weak Label Preprocessing
 
-Before running weak label preprocessing scripts, you must generate machine labels:
-
-```bash
-# Generate machine labels using trained S2 model
-python ../weak_labels.py \
-    --config_file ../configs/s2_trained_model.yaml \
-    --data_dir "s2_200_5_4_35/" \
-    --format tif \
-    --replace
-```
-
-This creates `pred_YYYYMMDD_YYYYMMDD_Y_X.tif` files in each event directory that the preprocessing scripts will use as labels.
+Before running weak label preprocessing scripts, you must generate machine labels using the `weak_labels.py` script. This creates `pred_YYYYMMDD_YYYYMMDD_Y_X.tif` files in each event directory that the preprocessing scripts will use as labels.
 
 ## Data Structure
 
@@ -52,43 +39,7 @@ This creates `pred_YYYYMMDD_YYYYMMDD_Y_X.tif` files in each event directory that
 - Channels 13-15: TCI (RGB scaled to [0,1])
 - Channel 16: NLCD land cover
 
-## Usage
-
-### Command Line Interface
-
-#### S2 Manual Label Preprocessing
-```bash
-python preprocess_s2.py \
-    --size 64 \
-    --samples 1000 \
-    --seed 433002 \
-    --config configs/preprocess/preprocess_manual.yaml
-```
-
-#### S2 Weak Label Preprocessing
-```bash
-python preprocess_s2_weak.py \
-    --size 64 \
-    --samples 1000 \
-    --seed 433002 \
-    --workers 8 \
-    --config configs/preprocess/preprocess.yaml
-```
-
-#### SAR Weak Label Preprocessing
-```bash
-python preprocess_sar_weak.py \
-    --size 64 \
-    --samples 1000 \
-    --seed 433002 \
-    --filter raw \
-    --workers 8 \
-    --config configs/preprocess/preprocess.yaml
-```
-
 ### Configuration Files
-
-Configuration files allow flexible specification of data directories and processing parameters.
 
 #### Manual Label Configuration (`preprocess_manual.yaml`)
 ```yaml
@@ -144,7 +95,7 @@ s2:  # Sentinel-2 configuration
 ## Output Structure
 
 ```
-data/
+data/preprocess/
 ├── s1_weak/
 │   └── samples_64_1000_raw/
 │       ├── train_patches.npy
@@ -165,23 +116,6 @@ data/
         └── mean_std_64_1000.pkl
 ```
 
-## Command Line Options
-
-### Common Options
-- `--size`: Patch size in pixels (default: 68)
-- `--samples`: Patches per tile (default: 1000)  
-- `--seed`: Random seed (default: 433002)
-- `--workers`: Number of parallel workers (default: 1)
-- `--config`: YAML configuration file path
-
-### SAR-Specific Options
-- `--filter`: SAR filtering method ('raw' or 'lee', default: 'raw')
-- `--cloud_threshold`: Maximum cloud threshold on a sampled patch (default: 0.1)
-
-### Directory Options (when not using config just to specify one)
-- `--sdir`: Sample directory name
-- `--ldir`: Label directory name
-
 ## Developer Notes
 
 There are some important implementation details with regards to available RAM memory on the node (or computer). The datasets can get quite large, if you are sampling `1000` 64 by 64 patches with `2000` tiles with `16` channels per tile you can end up with a `1000 * 2000 * 16 * 64 * 64 * 4 / 1024**3 = 488 GB` sized numpy array. On LCRC improv nodes, the standard nodes have memory of `~233GB` regardless of `ncpus` requested, so this will not fit all on memory. The solution is to have two strategies depending on whether the arrays will fit in memory. If the array fits, each worker creates their own array in memory and the results are concatenated. If the array does not fit, each worker writes to a memory mapped array, which is then combined by writing them individually into a much larger memory mapped array.
@@ -189,6 +123,6 @@ There are some important implementation details with regards to available RAM me
 ⚠️ **Important**: While preprocessing supports generating much larger than memory `.npy` output files, the current `Dataset` classes assume they still fit in memory during training. If your final dataset exceeds available RAM, you'll need to implement memory-mapped data loading in your training pipeline (just add a `mmap_mode='r'` argument, but currently not implemented).
 
 Some tips:
-1. **Worker Count**: Use `--workers` equal to available CPU cores for optimal performance.
+1. **Worker Count**: Use `n_workers` equal to available CPU cores for optimal performance.
 2. **Memory Monitoring**: Monitor memory usage during processing; script will automatically choose appropriate strategy, but if strained consider using a smaller `num_samples` argument.
 3. **Scratch Space**: The temp mem mapped arrays are saved on `/scratch/floodmapspre` directory. Ensure sufficient scratch disk space for large datasets.

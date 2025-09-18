@@ -21,7 +21,7 @@ The method for data collection is as follows:
 * Flood events are identified through high precipitation cells in the PRISM dataset from August 2016 onward. For cells that meet or exceed a specified precipitation threshold, the specific date, time, and georeferenced coordinates are then used to search for Sentinel-2 captures through Copernicus data providers (e.g. Planetary Computer or AWS).
 * The resulting captures are stored in event directories, where each "event" we denote simply as a cell we queried on a specified date with a high precipitation measurement.
 * Each event has an event id or `eid` in the format `YYYYMMDD_YCoord_XCoord` where `YCoord` and `XCoord` is the position of the cell on the grid defined by the PRISM dataset.
-* It may also be the case that some flood events and corresponding captures of interest have low precipitation (e.g. lie downstream of high precipitation cells or simply not caused by precipitation) and get filtered out by this method. To ensure these are still included, an option `--manual` is added to the scripts to specify cells for download regardless of precipitation. To learn more about this option go to [manual download](#manual-download).
+* It may also be the case that some flood events and corresponding captures of interest have low precipitation (e.g. lie downstream of high precipitation cells or simply not caused by precipitation) and get filtered out by this method. To ensure these are still included, an option `manual` is added to the scripts to specify cells for download regardless of precipitation. To learn more about this option go to [manual download](#manual-download).
 * The manual files can be used to specify a list of event tiles for the script to download. For instance, in the `manual/` directory you will find `label.txt` files for obtaining all the event tiles associated with the hand labeled flood maps in the Texas and Illinois datasets. A list of carefully curated but unlabeled flood tiles are also provided.
 
 ## Currently Supported Channels
@@ -44,37 +44,38 @@ The method for data collection is as follows:
 * NLCD layer
 
 ## Setup: From LCRC
-If working on LCRC as an argonne collaborator, you can skip downloading all the data files. Simply link to my data file paths in your sampling configs file at `/lcrc/project/hydrosm/dma/sampling` - you just need to append the absolute file path to my directory to the current paths.
+If working on LCRC as an argonne collaborator, you can skip downloading all the data files. Simply add my data file path to your config paths yaml with `data_dir: /lcrc/project/hydrosm/dma/data`.
 
 ## Setup: From Scratch
-To use the data download scripts and setup the `sampling/` directory in the cloned repo, first download the PRISM precipitation data file and other necessary data files for generating the layers in the sampled dataset. This can be done by running the following python scripts inside your directory.
+To use the data download scripts in a freshly cloned repo, first download the PRISM precipitation data file and other necessary data files for generating the layers in the sampled dataset. This can be done by running the following python scripts inside your directory.
 
 Scripts for downloading PRISM and supplementary datasets:
 * `get_prism.py` - run this first for downloading PRISM precipitation zip files and collating into NetCDF data file. Can later be used for updating precip data to latest available on PRISM.
 * `get_supplementary.py` - run this for downloading TIGER roads, NHD, DEM, NLCD datasets needed for supplementary rasters.
-    * For the DEM data you will need to filter for 1/3 arc second DEM and download the txt file of products via https://apps.nationalmap.gov/downloader/ and save as `neddownload.txt` inside of `sampling/` for the DEM downloading to work. The one in the repo is for reference.
-    * For the NHD data once you have downloaded the `.zip` files, you will need to unzip them in the NHD folder. You can use the following bash command:
+    * For the DEM data you will need to filter for 1/3 arc second DEM and download the txt file of products via https://apps.nationalmap.gov/downloader/ and save as `neddownload.txt` inside of `sampling/` for the DEM downloading to work. The one in the repo can be used for now, but might eventually be out of date.
+    * For the NHD data once you have downloaded the `.zip` files, it is important to have them unzipped for performance. This is done automatically in the download script.
 
-```bash
-for f in *.zip; do
-    unzip "$f" && rm "$f"
-done
-```
-
-Then you will need to create a yaml configuration file (e.g. in `sampling/configs/`) to specify the file paths to the PRISM and supplementary data you have downloaded. An example `configs/sample_s2_s1.yaml` file with the paths to the PRISM NetCDF file, meshgrid, region shapefiles (e.g. Illinois CESER boundary) among other data needed by the sampling scripts:
+Then make sure the file paths to the PRISM and supplementary data you have downloaded is correct in `configs/paths` yaml. Here is the default `configs/paths/default.yaml` file with the paths to the PRISM NetCDF file, meshgrid, region shapefiles (e.g. Illinois CESER boundary) among other data needed by the sampling scripts. If you just change the `base_dir` to point to your cloned repo then it should work by default:
 
 ```yaml
-paths:
-  prism_data: "PRISM/prismprecip_20160801_20241130.nc"
-  ceser_boundary: "CESER/CESER_FM_potential_no-flow_boundary.shp"
-  prism_meshgrid: "PRISM/meshgrid/prism_4km_mesh.shp"
-  nhd_wbd: "NHD/WBD_National_GDB.gdb"
-  elevation_dir: "Elevation/"
-  nlcd_dir: "NLCD/"
-  roads_dir: "Roads/"
+base_dir: /lcrc/project/hydrosm/dma
+data_dir: ${.base_dir}/data
+output_dir: ${.base_dir}/outputs
+supplementary_dir: ${.data_dir}/supplementary
+
+# supplementary files
+prism_data: ${.supplementary_dir}/prism/prismprecip_20160801_20241130.nc
+ceser_boundary: ${.supplementary_dir}/ceser/CESER_FM_potential_no-flow_boundary.shp
+prism_meshgrid: ${.supplementary_dir}/prism/meshgrid/prism_4km_mesh.shp
+nhd_wbd: ${.supplementary_dir}/nhd/WBD_National_GDB.gdb
+elevation_dir: ${.supplementary_dir}/elevation/
+nlcd_dir: ${.supplementary_dir}/nlcd/
+roads_dir: ${.supplementary_dir}/roads/
+nhd_dir: ${.supplementary_dir}/nhd/
+prism_dir: ${.supplementary_dir}/prism/
 ```
 
-The CESER boundary shapefile is downloaded from the ANL box folder, while the PRISM 4km mesh grid shapefile is downloaded from the [PRISM website link](https://prism.oregonstate.edu/downloads/data/prism_4km_mesh.zip).
+For the Illinois data sampling, the CESER boundary shapefile is downloaded from the ANL box folder. The PRISM 4km mesh grid shapefile is downloaded from the [PRISM website link](https://prism.oregonstate.edu/downloads/data/prism_4km_mesh.zip).
 
 ## Sampling Scripts
 There are several sampling scripts:
@@ -91,7 +92,7 @@ There are several sampling scripts:
 
 ## Manual Download
 
-Manual files allow the user to download any geographic tiles in the US at a point in time provided there are S2 and S1 captures that meet the parameter requirements such as the search interval (within the `--before` and `--after` arguments) and cloud cover threshold. The manual text files must have lines formatted in the form: `YYYY-MM-DD, YCoord, XCoord` or `YYYY-MM-DD, YCoord, XCoord, EPSG:XXXX`. Lines leading with the hash tag symbol `#` will be treated as comments and ignored. For example:
+Manual files allow the user to download any geographic tiles in the US at a point in time provided there are S2 and S1 captures that meet the parameter requirements such as the search interval (within the `before` and `after` sampling config arguments) and cloud cover threshold. The manual text files must have lines formatted in the form: `YYYY-MM-DD, YCoord, XCoord` or `YYYY-MM-DD, YCoord, XCoord, EPSG:XXXX`. Lines leading with the hash tag symbol `#` will be treated as comments and ignored. For example:
 
 ```text
 # The script will try to download 5 separate event tiles

@@ -20,13 +20,13 @@ hydra:
     dir: ${paths.base_dir}/hydra
 ```
 
-In this case you have `paths/default.yaml` used to specify `paths` across the repo, `inference/inference_s2.yaml` for inference params and `s2_unet_infer_v2.yaml` used to define the model that we want to use for inference.
+In this case you have `paths/default.yaml` used to specify paths across the repo, `inference/inference_s2.yaml` for inference params and `s2_unet_infer_v2.yaml` used to define the model that we want to use for inference.
 
 Developer note: for maximum flexibility, the config files are not type checked or validated by any schema (beyond some basic asserts). For this reason, follow the structure to avoid running into errors at runtime.
 
 ### Model Configs
 
-**Important:** a choice was made to keep model param config files at the same level as `config.yaml` instead of a config group or subdirectory like `configs/training/` due to how often they are needed and used in code. Consequently, when specifying model params, the config file must at the same level as `config.yaml` and specified like this:
+**Important:** a choice was made to keep model param config files at the same level as `config.yaml` instead of a config group or subdirectory like `configs/training/` due to how often they are needed and used in code. Consequently, when specifying model params, the config file e.g. `s2_unet.yaml` must at the same level as `config.yaml` and specified like this:
 
 ```yaml
 # inside config.yaml
@@ -199,19 +199,3 @@ model:
 ```
 
 Here we instantiate the UNet model and keep the `dropout` hyperparameter blank for the tuning job to specify.
-
-### Command Line Usage
-
-```bash
-# Basic usage
-python -m floodmaps.script --config-name=my_config
-
-# Override parameters
-python -m floodmaps.script --config-name=my_config train.lr=0.01 data.size=128
-
-# Use different config groups
-python -m floodmaps.script --config-name=my_config sampling=sample_s2_s1
-
-# Multi-run sweeps
-python -m floodmaps.script --config-name=my_config --multirun train.lr=0.001,0.01,0.1
-```

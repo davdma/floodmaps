@@ -1,0 +1,35 @@
+defaults:
+  - _self_
+
+# Base directories
+base_dir: /lcrc/project/hydrosm/dma
+data_dir: ${.base_dir}/data
+output_dir: ${.base_dir}/outputs
+
+### Sampling data paths
+# data folders
+supplementary_dir: ${.data_dir}/supplementary
+imagery_dir: ${.data_dir}/imagery
+setup_dir: ${.data_dir}/setup
+shape_dir: ${.data_dir}/shapes
+labels_dir: ${.data_dir}/labels
+
+# supplementary files
+prism_data: ${.supplementary_dir}/prism/prismprecip_20160801_20241130.nc
+ceser_boundary: ${.supplementary_dir}/ceser/CESER_FM_potential_no-flow_boundary.shp
+prism_meshgrid: ${.supplementary_dir}/prism/meshgrid/prism_4km_mesh.shp
+nhd_wbd: ${.supplementary_dir}/nhd/WBD_National_GDB.gdb
+elevation_dir: ${.supplementary_dir}/elevation/
+nlcd_dir: ${.supplementary_dir}/nlcd/
+roads_dir: ${.supplementary_dir}/roads/
+nhd_dir: ${.supplementary_dir}/nhd/
+prism_dir: ${.supplementary_dir}/prism/
+
+### Preprocessing paths
+preprocess_dir: ${.data_dir}/preprocess
+
+### Training output paths
+checkpoint_dir: ${.output_dir}/chkpt
+experiment_dir: ${.output_dir}/experiments
+benchmarks_dir: ${.output_dir}/benchmarks
+tuning_dir: ${.output_dir}/tuning

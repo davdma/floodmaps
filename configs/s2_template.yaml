@@ -1,0 +1,56 @@
+seed: 831002
+save: False
+save_path:
+
+data:
+    size: 64 # pixel width of dataset patches
+    samples: 1000 # [250, 500, 1000]
+    channels: "11111111111" # (R, G, B, B08, NDWI, DEM, SlopeY, SlopeX, Water, Roads, Flowlines)
+    use_weak: False # Use s2_weak (machine labels) vs s2 (manual labels)
+    suffix: "" # Optional suffix for preprocessing variant datasets
+    random_flip: True
+
+model:
+    classifier: "unet" # ['unet', 'unet++']
+    discriminator:
+    weights:
+    unet:
+        dropout: 0.1
+    unetpp:
+        dropout: 0.1
+        deep_supervision: True
+    discriminator_weights:
+
+train:
+    epochs: 250
+    batch_size: 4096
+    loss: BCELoss # ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
+    tversky:
+      alpha: 0.4
+    clip: 1.0
+    lr: 0.0001
+    optimizer: Adam # ['Adam', 'SGD']
+    LR_scheduler: Constant # ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR']
+    LR_patience:
+    LR_T_max: 200
+    early_stopping: True
+    patience: 25
+    subset: 1.0
+    num_workers: 5
+    checkpoint:
+        load_chkpt: False # whether to train from a checkpoint specified in load_chkpt_path
+        load_chkpt_path:
+        save_chkpt: True # whether to enable checkpointing
+        save_chkpt_path:
+        save_chkpt_interval: 20 # save checkpoint every N epochs
+
+eval:
+    mode: val # ['val', 'test'],
+    
+wandb:
+    project: debug
+    group:
+    num_sample_predictions: 40
+
+logging:
+    grad_norm_freq: 10

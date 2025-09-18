@@ -1,0 +1,5 @@
+within_days: 2 # number of days surrounding S2 dates allowed for S1 download
+dir_path: None # specify a directory name for downloaded samples, format should end with backslash
+replace: False # whether to overwrite existing SAR files found in the S2 sample folder
+source: mpc # specify a provider (Microsoft Planetary Computer, AWS) for the ESA data ['mpc', 'aws']
+maxcoverpercentage: 30 # maximum SAR no data percentage

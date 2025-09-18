@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools >= 77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "floodmaps"
+version = "1.0.0"
+description = "Flood detection using satellite imagery and machine learning"
+dependencies = [
+    "hydra-core",
+    "wandb"
+]
+requires-python = ">= 3.11"
+authors = [{name = "David Ma", email = "dma@anl.gov"}]
+license = "MIT"
+
+[tool.setuptools.packages.find]
+# Look for packages in both src/ and repo root (so configs gets included)
+# The purpose here is to get rid hydra needing to take long relative paths to find configs
+where = ["src", "."]

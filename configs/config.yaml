@@ -2,7 +2,7 @@ defaults:
   - paths: default
   - inference: inference_s2
   - s2_unet_infer_v2 # for training
-  - __self__
+  - _self_
 
 # hydra config
 hydra:

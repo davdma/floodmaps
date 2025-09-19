@@ -141,7 +141,7 @@ def generate_prediction_sar(model, device, cfg, standardize, train_mean, event_p
                     pred = output.squeeze()
                 
                 # Convert to binary prediction
-                pred_binary = torch.where(torch.sigmoid(pred) > threshold, 1.0, 0.0).cpu().byte()
+                pred_binary = torch.where(torch.sigmoid(pred) >= threshold, 1.0, 0.0).cpu().byte()
                 
                 # Add to prediction map (average overlapping regions)
                 pred_map[y:y+patch_size, x:x+patch_size] += pred_binary
@@ -213,7 +213,7 @@ def main(cfg: DictConfig):
         if not cfg.inference.replace and (data_path / f'pred_sar_{dt}_{eid}.tif').exists():
             continue
 
-        pred = generate_prediction_sar(model, device, cfg, standardize, train_mean, data_path, dt, eid)
+        pred = generate_prediction_sar(model, device, cfg, standardize, train_mean, data_path, dt, eid, threshold=cfg.inference.threshold)
         if cfg.inference.format == "tif":
             # save result of prediction as .tif file
             # add transform

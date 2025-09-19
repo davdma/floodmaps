@@ -91,6 +91,10 @@ class PRISMData:
         """Get precipitation value for specific time index, y, x in PRISM data."""
         return self.precip_data[time_index, y, x]
     
+    def get_precip_shape(self) -> Tuple[int, int, int]:
+        """Get shape of precipitation data."""
+        return self.precip_data.shape
+    
     def get_bounding_box(self, x: int, y: int) -> Tuple[float, float, float, float]:
         """Get bounding box for grid coordinates (CRS=EPSG:4269)."""
         upper_left_x, x_size, x_rotation, upper_left_y, y_rotation, y_size = self.geotransform
@@ -561,7 +565,7 @@ def get_mask(cfg: DictConfig, shape: Tuple[int, int, int]) -> np.ndarray:
         Mask for PRISM data.
     """
     if cfg.sampling.region == 'ceser':
-        mask = get_ceser_mask(cfg.paths.ceser_boundary, cfg.paths.prism_meshgrid, shape)
+        mask = get_shape_mask(cfg.paths.ceser_boundary, cfg.paths.prism_meshgrid, shape)
     else:
         mask = None
     return mask
@@ -596,44 +600,6 @@ def get_shape_mask(shape_file: str, prism_meshgrid_file: str, shape: Tuple[int, 
     filtered_indices = list(zip(intersecting_shapes['row'], intersecting_shapes['col']))
 
     # filter our PRISM array by cells inside the shape
-    mask_2d = np.zeros((shape[1], shape[2]), dtype=bool)
-    for i, j in filtered_indices:
-        mask_2d[i, j] = True
-
-    # Broadcast the 2D mask to 3D to match precip_data shape
-    mask_3d = np.broadcast_to(mask_2d, shape)
-    return mask_3d
-
-def get_ceser_mask(ceser_boundary_file: str, prism_meshgrid_file: str, shape: Tuple[int, int, int]) -> np.ndarray:
-    """Get the mask for the CESER AOI in the PRISM meshgrid. 
-    Requires shapefiles of the CESER boundary and PRISM meshgrid.
-    
-    Parameters
-    ----------
-    ceser_boundary_file : str
-        Path to CESER boundary file.
-    prism_meshgrid_file : str
-        Path to PRISM meshgrid file.
-    shape : tuple
-        Shape of the PRISM data.
-
-    Returns
-    -------
-    numpy.ndarray
-        Mask for PRISM data.
-    """
-    ceser_boundary = gpd.read_file(ceser_boundary_file)
-    meshgrid = gpd.read_file(prism_meshgrid_file)
-    # Reproject ceser to prism grid
-    if ceser_boundary.crs != meshgrid.crs:
-        ceser_reprojected = ceser_boundary.to_crs(meshgrid.crs)
-        ref_shape = ceser_reprojected.geometry.iloc[0]
-    else:
-        ref_shape = ceser_boundary.geometry.iloc[0]
-    intersecting_shapes = meshgrid[meshgrid.geometry.intersects(ref_shape)]
-    filtered_indices = list(zip(intersecting_shapes['row'], intersecting_shapes['col']))
-
-    # filter our PRISM array by cells inside the CESER boundary
     mask_2d = np.zeros((shape[1], shape[2]), dtype=bool)
     for i, j in filtered_indices:
         mask_2d[i, j] = True

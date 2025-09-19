@@ -12,7 +12,7 @@ defaults:
   - paths: default          # Config group: paths/default.yaml
   - inference: inference_s2  # Config group: inference/inference_s2.yaml  
   - s2_unet_infer_v2        # Base config: s2_unet_infer_v2.yaml
-  - __self__                # Where to place this config's content
+  - _self_                # Where to place this config's content
 
 # This config's own parameters
 hydra:
@@ -66,18 +66,18 @@ Developer note: for maximum flexibility, the config files are not type checked o
 # inside config.yaml
 defaults:
   - s2_unet                 # Unet model training params
-  - __self__
+  - _self_
 ```
 
 ### The `__self__` Directive
 
-`__self__` controls merge order in the defaults list. Put it at the end so your main config overrides everything else:
+`_self_` controls merge order in the defaults list. Put it at the end so your main config overrides everything else:
 
 ```yaml
 defaults:
   - paths: default
   - sampling: sample_s2
-  - __self__              # Main config has final say
+  - _self_              # Main config has final say
 
 sampling:
   threshold: 150  # This overrides threshold from sample_s2.yaml

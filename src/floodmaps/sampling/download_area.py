@@ -178,7 +178,7 @@ def pipeline_SCL(stac_provider, dir_path, save_as, dst_shape, dst_crs, dst_trans
                         dtype=clouds.dtype, transform=dst_transform) as dst:
         dst.write(dest, 1)
 
-    if cfg.inference.include_cmap:
+    if cfg.sampling.include_cmap:
         rgb_clouds = np.zeros((3, h, w), dtype=np.uint8)
         rgb_clouds[0, :, :] = dest * 255
         rgb_clouds[1, :, :] = dest * 255
@@ -291,7 +291,7 @@ def pipeline_NDWI(stac_provider, dir_path, save_as, dst_crs, item, bbox, cfg):
     with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=1, height=ndwi.shape[-2], width=ndwi.shape[-1], crs=dst_crs, dtype=ndwi.dtype, transform=out_transform, nodata=-999999) as dst:
         dst.write(ndwi, 1)
 
-    if cfg.inference.include_cmap:
+    if cfg.sampling.include_cmap:
         # before writing to file, we will make matplotlib colormap!
         ndwi_colored = colormap_to_rgb(ndwi, cmap='seismic_r', r=(-1.0, 1.0), no_data=-999999)
 
@@ -392,7 +392,7 @@ def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, 
             rasterize_roads = band.ReadAsArray()
 
             # Create RGB raster
-            if cfg.inference.include_cmap:
+            if cfg.sampling.include_cmap:
                 rgb_roads = np.zeros((3, rasterize_roads.shape[0], rasterize_roads.shape[1]), dtype=np.uint8)
 
                 # Set values in the 3D array based on the binary_array
@@ -402,7 +402,7 @@ def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, 
         else:
             # if no shapes to rasterize
             rasterize_roads = np.zeros(dst_shape, dtype=np.uint8)
-            if cfg.inference.include_cmap:
+            if cfg.sampling.include_cmap:
                 rgb_roads = np.zeros((3, *dst_shape), dtype=np.uint8)
     except Exception as e:
         raise e
@@ -416,7 +416,7 @@ def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, 
                        crs=dst_crs, dtype=rasterize_roads.dtype, transform=dst_transform, nodata=0) as dst:
         dst.write(rasterize_roads, 1)
 
-    if cfg.inference.include_cmap:
+    if cfg.sampling.include_cmap:
         with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_roads.shape[-2], width=rgb_roads.shape[-1],
                         crs=dst_crs, dtype=rgb_roads.dtype, transform=dst_transform, nodata=None) as dst:
             dst.write(rgb_roads)
@@ -493,7 +493,7 @@ def pipeline_dem(dir_path, save_as, dst_shape, dst_crs, dst_transform, bounds, c
     with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=1, height=destination.shape[-2], width=destination.shape[-1], crs=dst_crs, dtype=destination.dtype, transform=dst_transform, nodata=no_data) as dst:
         dst.write(destination, 1)
 
-    if cfg.inference.include_cmap:
+    if cfg.sampling.include_cmap:
         # for DEM use grayscale!
         dem_cmap = colormap_to_rgb(destination, cmap='gray', no_data=no_data)
 
@@ -601,7 +601,7 @@ exact_fcodes=['46000', '46003', '46006', '46007', '55800', '33600', '33601', '33
             flowlines = band.ReadAsArray()
 
             # Create RGB raster
-            if cfg.inference.include_cmap:
+            if cfg.sampling.include_cmap:
                 rgb_flowlines = np.zeros((3, flowlines.shape[0], flowlines.shape[1]), dtype=np.uint8)
 
                 # Set values in the 3D array based on the binary_array
@@ -611,7 +611,7 @@ exact_fcodes=['46000', '46003', '46006', '46007', '55800', '33600', '33601', '33
         else:
             # if no shapes to rasterize
             flowlines = np.zeros(dst_shape, dtype=np.uint8)
-            if cfg.inference.include_cmap:
+            if cfg.sampling.include_cmap:
                 rgb_flowlines = np.zeros((3, *dst_shape), dtype=np.uint8)
     except Exception as e:
         raise e
@@ -627,7 +627,7 @@ exact_fcodes=['46000', '46003', '46006', '46007', '55800', '33600', '33601', '33
         dst.write(flowlines, 1)
 
     # flowlines cmap
-    if cfg.inference.include_cmap:
+    if cfg.sampling.include_cmap:
         with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_flowlines.shape[-2], width=rgb_flowlines.shape[-1], crs=dst_crs, dtype=rgb_flowlines.dtype, transform=dst_transform, nodata=None) as dst:
             dst.write(rgb_flowlines)
 
@@ -725,7 +725,7 @@ def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, pri
             # Read the rasterized data
             waterbody = band.ReadAsArray()
 
-            if cfg.inference.include_cmap:
+            if cfg.sampling.include_cmap:
                 # Create RGB raster
                 rgb_waterbody = np.zeros((3, waterbody.shape[0], waterbody.shape[1]), dtype=np.uint8)
 
@@ -737,7 +737,7 @@ def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, pri
             # if no shapes to rasterize
             waterbody = np.zeros(dst_shape, dtype=np.uint8)
 
-            if cfg.inference.include_cmap:
+            if cfg.sampling.include_cmap:
                 rgb_waterbody = np.zeros((3, *dst_shape), dtype=np.uint8)
     except Exception as e:
         raise e
@@ -752,7 +752,7 @@ def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, pri
         dst.write(waterbody, 1)
 
     # waterbody cmap
-    if cfg.inference.include_cmap:
+    if cfg.sampling.include_cmap:
         with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_waterbody.shape[-2], width=rgb_waterbody.shape[-1], crs=dst_crs, dtype=rgb_waterbody.dtype, transform=dst_transform, nodata=None) as dst:
             dst.write(rgb_waterbody)
 
@@ -820,7 +820,7 @@ def pipeline_NLCD(dir_path, save_as, year, dst_shape, dst_crs, dst_transform, cf
         dst.write(nlcd_arr, 1)
 
     # create NLCD colormap
-    if cfg.inference.include_cmap:
+    if cfg.sampling.include_cmap:
         H, W = nlcd_arr.shape
         rgb_img = np.zeros((H, W, 3), dtype=np.uint8)
 
@@ -880,7 +880,7 @@ def pipeline_S1(stac_provider, dir_path, save_as, dst_crs, item, bbox, cfg):
         dst.write(db_vh, 1)
 
     # color maps
-    if cfg.inference.include_cmap:
+    if cfg.sampling.include_cmap:
         img_vv_cmap = colormap_to_rgb(db_vv, cmap='gray', no_data=-9999)
         with rasterio.open(dir_path + save_as + '_vv_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vv_cmap.shape[-2], width=img_vv_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vv, nodata=None) as dst:
             # get color map
@@ -919,8 +919,8 @@ def download_area(stac_provider, bbox, cfg):
     # need to transform box from EPSG 4269 to EPSG 4326 for query
     conversion = transform(PRISM_CRS, SEARCH_CRS, (minx, maxx), (miny, maxy))
     search_bbox = (conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1])
-    time_of_interest = get_date_interval(cfg.inference.event_date, cfg.inference.before, cfg.inference.after)
-    eid = datetime.strptime(cfg.inference.event_date, '%Y-%m-%d').strftime('%Y%m%d')
+    time_of_interest = get_date_interval(cfg.sampling.event_date, cfg.sampling.before, cfg.sampling.after)
+    eid = datetime.strptime(cfg.sampling.event_date, '%Y-%m-%d').strftime('%Y%m%d')
 
     # STAC catalog search
     logger.info('Beginning catalog search...')
@@ -936,7 +936,7 @@ def download_area(stac_provider, bbox, cfg):
     try:
         state = get_state(minx, miny, maxx, maxy)
         if state is None:
-            raise Exception(f'State not found for {cfg.inference.event_date}, at {minx}, {miny}, {maxx}, {maxy}')
+            raise Exception(f'State not found for {cfg.sampling.event_date}, at {minx}, {miny}, {maxx}, {maxy}')
     except Exception as err:
         logger.exception(f'Error fetching state. Eid: {eid}.')
         return False
@@ -944,44 +944,44 @@ def download_area(stac_provider, bbox, cfg):
     # if product ID provided, look for match
     logger.info('Beginning download...')
     file_to_product = dict()
-    if cfg.inference.product_id:
-        logger.info(f'Checking for product ID: {cfg.inference.product_id}')
+    if cfg.sampling.product_id:
+        logger.info(f'Checking for product ID: {cfg.sampling.product_id}')
         product_id_item = None
         matched = None
         for item in items_s2:
             logger.info(f'Checking S2 product: {item.id}')
-            if cfg.inference.product_id in item.id:
+            if cfg.sampling.product_id in item.id:
                 logger.info(f'Matched S2 product: {item.id}')
                 product_id_item = item
                 matched = 's2'
                 break
         for item in items_s1:
             logger.info(f'Checking S1 product: {item.id}')
-            if cfg.inference.product_id in item.id:
+            if cfg.sampling.product_id in item.id:
                 logger.info(f'Matched S1 product: {item.id}')
                 product_id_item = item
                 matched = 's1'
                 break
 
         if not product_id_item:
-            logger.exception(f'No product found with ID that matches {cfg.inference.product_id}.')
+            logger.exception(f'No product found with ID that matches {cfg.sampling.product_id}.')
             return False
 
-        main_crs = pe.ext(product_id_item).crs_string if cfg.inference.crs is None else cfg.inference.crs
+        main_crs = pe.ext(product_id_item).crs_string if cfg.sampling.crs is None else cfg.sampling.crs
         conversion = transform(PRISM_CRS, main_crs, (minx, maxx), (miny, maxy))
         cbbox = conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]
 
         if matched == 's2':
             dt = product_id_item.datetime.strftime('%Y%m%d')
-            dst_shape, dst_transform = pipeline_TCI(stac_provider, cfg.inference.dir_path, f'tci_{dt}_{eid}', main_crs, product_id_item, cbbox)
+            dst_shape, dst_transform = pipeline_TCI(stac_provider, cfg.sampling.dir_path, f'tci_{dt}_{eid}', main_crs, product_id_item, cbbox)
             logger.debug(f'TCI raster completed for {product_id_item.id} on {dt}.')
-            pipeline_RGB(stac_provider, cfg.inference.dir_path, f'rgb_{dt}_{eid}', main_crs, product_id_item, cbbox)
+            pipeline_RGB(stac_provider, cfg.sampling.dir_path, f'rgb_{dt}_{eid}', main_crs, product_id_item, cbbox)
             logger.debug(f'RGB raster completed for {product_id_item.id} on {dt}.')
-            pipeline_B08(stac_provider, cfg.inference.dir_path, f'b08_{dt}_{eid}', main_crs, product_id_item, cbbox)
+            pipeline_B08(stac_provider, cfg.sampling.dir_path, f'b08_{dt}_{eid}', main_crs, product_id_item, cbbox)
             logger.debug(f'B08 raster completed for {product_id_item.id} on {dt}.')
-            pipeline_NDWI(stac_provider, cfg.inference.dir_path, f'ndwi_{dt}_{eid}', main_crs, product_id_item, cbbox, cfg)
+            pipeline_NDWI(stac_provider, cfg.sampling.dir_path, f'ndwi_{dt}_{eid}', main_crs, product_id_item, cbbox, cfg)
             logger.debug(f'NDWI raster completed for {product_id_item.id} on {dt}.')
-            pipeline_SCL(stac_provider, cfg.inference.dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, product_id_item, cbbox, cfg)
+            pipeline_SCL(stac_provider, cfg.sampling.dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, product_id_item, cbbox, cfg)
             logger.debug(f'SCL raster completed for {product_id_item.id} on {dt}.')
 
             # record product used to generate rasters
@@ -992,7 +992,7 @@ def download_area(stac_provider, bbox, cfg):
             file_to_product[f'clouds_{dt}_{eid}'] = product_id_item.id
         else:
             dt = product_id_item.datetime.strftime('%Y%m%d')
-            pipeline_S1(stac_provider, cfg.inference.dir_path, f'sar_{dt}_{eid}', main_crs, product_id_item, cbbox, cfg)
+            pipeline_S1(stac_provider, cfg.sampling.dir_path, f'sar_{dt}_{eid}', main_crs, product_id_item, cbbox, cfg)
             logger.debug(f'S1 raster completed for {product_id_item.id} on {dt}.')
 
             # record product used to generate rasters
@@ -1001,22 +1001,22 @@ def download_area(stac_provider, bbox, cfg):
         logger.info(f'Downloading {len(items_s2)} S2 products and {len(items_s1)} S1 products.')
         # try to download all in the interval
         all_items = items_s2 + items_s1
-        main_crs = pe.ext(all_items[0]).crs_string if cfg.inference.crs is None else cfg.inference.crs
+        main_crs = pe.ext(all_items[0]).crs_string if cfg.sampling.crs is None else cfg.sampling.crs
 
         conversion = transform(PRISM_CRS, main_crs, (minx, maxx), (miny, maxy))
         cbbox = conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]
 
         for item in items_s2:
             dt = item.datetime.strftime('%Y%m%d')
-            dst_shape, dst_transform = pipeline_TCI(stac_provider, cfg.inference.dir_path, f'tci_{dt}_{eid}', main_crs, item, cbbox)
+            dst_shape, dst_transform = pipeline_TCI(stac_provider, cfg.sampling.dir_path, f'tci_{dt}_{eid}', main_crs, item, cbbox)
             logger.debug(f'TCI raster completed for {item.id} on {dt}.')
-            pipeline_RGB(stac_provider, cfg.inference.dir_path, f'rgb_{dt}_{eid}', main_crs, item, cbbox)
+            pipeline_RGB(stac_provider, cfg.sampling.dir_path, f'rgb_{dt}_{eid}', main_crs, item, cbbox)
             logger.debug(f'RGB raster completed for {item.id} on {dt}.')
-            pipeline_B08(stac_provider, cfg.inference.dir_path, f'b08_{dt}_{eid}', main_crs, item, cbbox)
+            pipeline_B08(stac_provider, cfg.sampling.dir_path, f'b08_{dt}_{eid}', main_crs, item, cbbox)
             logger.debug(f'B08 raster completed for {item.id} on {dt}.')
-            pipeline_NDWI(stac_provider, cfg.inference.dir_path, f'ndwi_{dt}_{eid}', main_crs, item, cbbox, cfg)
+            pipeline_NDWI(stac_provider, cfg.sampling.dir_path, f'ndwi_{dt}_{eid}', main_crs, item, cbbox, cfg)
             logger.debug(f'NDWI raster completed for {item.id} on {dt}.')
-            pipeline_SCL(stac_provider, cfg.inference.dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox, cfg)
+            pipeline_SCL(stac_provider, cfg.sampling.dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox, cfg)
             logger.debug(f'SCL raster completed for {item.id} on {dt}.')
 
             # record product used to generate rasters
@@ -1028,7 +1028,7 @@ def download_area(stac_provider, bbox, cfg):
 
         for item in items_s1:
             dt = item.datetime.strftime('%Y%m%d')
-            pipeline_S1(stac_provider, cfg.inference.dir_path, f'sar_{dt}_{eid}', main_crs, item, cbbox, cfg)
+            pipeline_S1(stac_provider, cfg.sampling.dir_path, f'sar_{dt}_{eid}', main_crs, item, cbbox, cfg)
             logger.debug(f'S1 raster completed for {item.id} on {dt}.')
 
             # record product used to generate rasters
@@ -1036,19 +1036,19 @@ def download_area(stac_provider, bbox, cfg):
 
     # save all supplementary rasters in raw and rgb colormap
     logger.info('Processing supplementary rasters...')
-    pipeline_roads(cfg.inference.dir_path, f'roads_{eid}', dst_shape, main_crs, dst_transform, state, bbox, cfg)
+    pipeline_roads(cfg.sampling.dir_path, f'roads_{eid}', dst_shape, main_crs, dst_transform, state, bbox, cfg)
     logger.debug(f'Roads raster completed successfully.')
-    pipeline_dem(cfg.inference.dir_path, f'dem_{eid}', dst_shape, main_crs, dst_transform, bbox, cfg)
+    pipeline_dem(cfg.sampling.dir_path, f'dem_{eid}', dst_shape, main_crs, dst_transform, bbox, cfg)
     logger.debug(f'DEM raster completed successfully.')
-    pipeline_flowlines(cfg.inference.dir_path, f'flowlines_{eid}', dst_shape, main_crs, dst_transform, bbox, cfg)
+    pipeline_flowlines(cfg.sampling.dir_path, f'flowlines_{eid}', dst_shape, main_crs, dst_transform, bbox, cfg)
     logger.debug(f'Flowlines raster completed successfully.')
-    pipeline_waterbody(cfg.inference.dir_path, f'waterbody_{eid}', dst_shape, main_crs, dst_transform, bbox, cfg)
+    pipeline_waterbody(cfg.sampling.dir_path, f'waterbody_{eid}', dst_shape, main_crs, dst_transform, bbox, cfg)
     logger.debug(f'Waterbody raster completed successfully.')
-    pipeline_NLCD(cfg.inference.dir_path, f'nlcd_{eid}', int(eid[:4]), dst_shape, main_crs, dst_transform, cfg)
+    pipeline_NLCD(cfg.sampling.dir_path, f'nlcd_{eid}', int(eid[:4]), dst_shape, main_crs, dst_transform, cfg)
     logger.debug(f'NLCD raster completed successfully.')
 
     # validate raster shapes, CRS, transforms
-    result = validate_event_rasters(cfg.inference.dir_path, logger=logger)
+    result = validate_event_rasters(cfg.sampling.dir_path, logger=logger)
     if not result.is_valid:
         logger.error(f'Raster validation failed for event {eid}. Removing directory and contents.')
         # shutil.rmtree(dir_path) - for now do not delete!
@@ -1058,7 +1058,7 @@ def download_area(stac_provider, bbox, cfg):
     logger.info(f'Generating metadata file...')
     metadata = {
         "metadata": {
-            "Download Date": cfg.inference.event_date,
+            "Download Date": cfg.sampling.event_date,
             "CRS": main_crs,
             "State": state,
             "Bounding Box": {
@@ -1071,7 +1071,7 @@ def download_area(stac_provider, bbox, cfg):
         }
     }
 
-    metadata_path = Path(cfg.inference.dir_path) / 'metadata.json'
+    metadata_path = Path(cfg.sampling.dir_path) / 'metadata.json'
     if metadata_path.exists():
         # if metadata file already exists, update the item IDs
         with open(metadata_path, "r") as json_file:
@@ -1136,38 +1136,38 @@ def run_download_area(cfg: DictConfig) -> None:
     cfg : DictConfig
         Configuration object.
     """
-    if cfg.inference.dir_path is None:
+    if cfg.sampling.dir_path is None:
         raise ValueError('inference.dir_path config parameter is required to specify a directory for download.')
 
     # Create directory if it doesn't exist
-    Path(cfg.inference.dir_path).mkdir(parents=True, exist_ok=True)
+    Path(cfg.sampling.dir_path).mkdir(parents=True, exist_ok=True)
     
     # make sure dir_path ends with a slash
-    if not cfg.inference.dir_path.endswith('/'):
-        cfg.inference.dir_path += '/'
+    if not cfg.sampling.dir_path.endswith('/'):
+        cfg.sampling.dir_path += '/'
 
     # root logger
-    rootLogger = setup_logging(cfg.inference.dir_path, logger_name='main', log_level=logging.DEBUG, mode='w', include_console=False)
+    rootLogger = setup_logging(cfg.sampling.dir_path, logger_name='main', log_level=logging.DEBUG, mode='w', include_console=False)
 
     # log sampling parameters used
     rootLogger.info(
         "Download area parameters used:\n"
-        f"  Event date: {cfg.inference.event_date}\n"
-        f"  Days before flood event: {cfg.inference.before}\n"
-        f"  Days after flood event: {cfg.inference.after}\n"
-        f"  Product ID: {cfg.inference.product_id}\n"
-        f"  CRS: {cfg.inference.crs}\n"
-        f"  Include color maps: {cfg.inference.include_cmap}\n"
-        f"  Source: {cfg.inference.source}\n"
+        f"  Event date: {cfg.sampling.event_date}\n"
+        f"  Days before flood event: {cfg.sampling.before}\n"
+        f"  Days after flood event: {cfg.sampling.after}\n"
+        f"  Product ID: {cfg.sampling.product_id}\n"
+        f"  CRS: {cfg.sampling.crs}\n"
+        f"  Include color maps: {cfg.sampling.include_cmap}\n"
+        f"  Source: {cfg.sampling.source}\n"
     )
 
     rootLogger.info("Initializing area download...")
     try:
         # get bbox from shapefile - use PRISM CRS for easy use of pipeline functions
-        bbox = get_bbox_from_shapefile(cfg.inference.shapefile, crs=PRISM_CRS)
+        bbox = get_bbox_from_shapefile(cfg.sampling.shapefile, crs=PRISM_CRS)
 
         # get stac provider
-        stac_provider = get_stac_provider(cfg.inference.source, logger=rootLogger)
+        stac_provider = get_stac_provider(cfg.sampling.source, logger=rootLogger)
 
         # download imagery
         max_attempts = 3

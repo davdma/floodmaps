@@ -1,3 +1,4 @@
 format: tif # prediction label format: ['tif', 'npy']
 replace: true # whether to overwrite pre-existing predictions
 data_dir: ${paths.imagery_dir}/areas/safb_20240718/ # directory with rasters to make predictions in
+threshold: 0.3 # threshold for classifying a positive prediction

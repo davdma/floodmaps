@@ -12,7 +12,7 @@ from floodmaps.utils.utils import ChannelIndexer
 from floodmaps.models.model import S2WaterDetector
 
 
-def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_path, dt, eid):
+def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_path, dt, eid, threshold=0.5):
     """Generate new predictions on unseen data using water detector model.
     Predictions are made using a sliding window with 25% overlap.
 
@@ -143,7 +143,7 @@ def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_pa
                     pred = output.squeeze()
                 
                 # Convert to binary prediction
-                pred_binary = torch.where(torch.sigmoid(pred) > 0.5, 1.0, 0.0).cpu().byte()
+                pred_binary = torch.where(torch.sigmoid(pred) >= threshold, 1.0, 0.0).cpu().byte()
                 
                 # Add to prediction map (average overlapping regions)
                 pred_map[y:y+patch_size, x:x+patch_size] += pred_binary
@@ -210,7 +210,7 @@ def main(cfg: DictConfig):
         if not cfg.inference.replace and (data_path / f'pred_{dt}_{eid}.tif').exists():
             continue
 
-        pred = generate_prediction_s2(model, device, cfg, standardize, train_mean, data_path, dt, eid)
+        pred = generate_prediction_s2(model, device, cfg, standardize, train_mean, data_path, dt, eid, threshold=cfg.inference.threshold)
         if cfg.inference.format == "tif":
             # save result of prediction as .tif file
             # add transform

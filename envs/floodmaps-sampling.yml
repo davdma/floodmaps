@@ -22,4 +22,4 @@ dependencies:
     - tqdm
     - requests
     - geopy
-    - -e .
+    - -e ..

@@ -21,4 +21,4 @@ dependencies:
     - "deephyper[default]"
     - torcheval
     - Pillow
-    - -e .
+    - -e ..

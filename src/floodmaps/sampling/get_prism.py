@@ -15,12 +15,13 @@ import hydra
 from omegaconf import DictConfig
 from typing import List, Tuple
 
-from floodmaps.utils.sampling_utils import parse_date_string
+from floodmaps.utils.sampling_utils import parse_date_string, unzip_file
 
 def download_prism_zips(cfg: DictConfig, start_date=date(2024, 7, 31), end_date=date(2024, 11, 30)):
-    """Downloads prism precip zip files through HTTP.
+    """Downloads prism precip zip files through HTTP and then extracts the zip to bil file.
     Note that we use 2016/8/1 as the 0 point of the netcdf time dimension as S2 data
-    only becomes frequently available after that date.
+    only becomes frequently available after that date. This can however be changed as a setting,
+    but it is recommended to stick to one consistently.
     
     Parameters
     ----------
@@ -40,17 +41,21 @@ def download_prism_zips(cfg: DictConfig, start_date=date(2024, 7, 31), end_date=
     while (start_date <= end_date):
         dt = start_date.strftime("%Y%m%d")
         # skip if already exists
-        if (Path(cfg.paths.prism_dir) / f'PRISM_ppt_stable_4kmD2_{dt}_bil.zip').exists():
+        if (Path(cfg.paths.prism_dir) / f'PRISM_ppt_stable_4kmD2_{dt}_bil').exists():
+            print(f'BIL folder for date {dt} already exists, skipping')
             start_date += delta
             continue
         
         response = requests.get(f'http://services.nacse.org/prism/data/public/4km/ppt/{dt}')
         with open(Path(cfg.paths.prism_dir) / f'PRISM_ppt_stable_4kmD2_{dt}_bil.zip', 'wb') as p:
             p.write(response.content)
+        print(f'Downloaded zip file PRISM_ppt_stable_4kmD2_{dt}_bil.zip for date {dt}. Extracting...')
+
+        unzip_file(Path(cfg.paths.prism_dir) / f'PRISM_ppt_stable_4kmD2_{dt}_bil.zip', remove_zip=True)
 
         start_date += delta
 
-def load_prism_zips(cfg: DictConfig):
+def load_prism_bils(cfg: DictConfig):
     """Read all downloaded precip data from PRISM directory into python list.
 
     Parameters
@@ -64,19 +69,31 @@ def load_prism_zips(cfg: DictConfig):
         List of tuples containing date, precip data, and geotransform.
     """
     # alphabetical sorting is chronological here
-    _paths_prism_daily = np.sort(glob(str(Path(cfg.paths.prism_dir) / '*_bil.zip')))
-    def read_prism(_path_prism_zip):
+    _paths_prism_daily = sorted(Path(cfg.paths.prism_dir).glob('*_bil')) # this globs the extracted directories
+    def read_prism(_path_bil_dir):
+        """Read PRISM bil file into numpy array.
+        
+        Parameters
+        ----------
+        _path_bil_dir : Path
+            Path to folder containing PRISM bil file.
+
+        Returns
+        -------
+        tuple
+            Tuple containing date string YYYYMMDD, precip data, and geotransform.
+        """
         p = re.compile('\d{8}')
-        match = p.search(_path_prism_zip)
+        match = p.search(Path(_path_bil_dir).name)
         if match:
             date = match.group()
         else:
-            raise Exception('No formatted date found for file:', _path_prism_zip)
+            raise Exception('No formatted date found for file:', _path_bil_dir)
         
-        compressed_filename = os.path.basename(_path_prism_zip)[:-3] + 'bil'
+        bil_filename =  _path_bil_dir / f'{_path_bil_dir.name}.bil'
 
         # NOTE: For gdal path_to_file after vsizip can be relative or absolute
-        prism_file = gdal.Open('/vsizip/' + _path_prism_zip + '/' + compressed_filename)
+        prism_file = gdal.Open(bil_filename)
 
         prism_raw = prism_file.GetRasterBand(1).ReadAsArray()
 
@@ -103,7 +120,8 @@ def load_prism_zips(cfg: DictConfig):
     return daily_precip
 
 def store_netcdf(cfg: DictConfig, daily_precip: List[Tuple[str, np.ndarray, np.ndarray]],
-                filename: str = "prismprecip_20160801_20241130.nc") -> None:
+                filename: str = "prismprecip_20160801_20241130.nc",
+                start_date: date = date(2016, 8, 1)) -> None:
     """Store daily precip data into netcdf file.
     
     Parameters
@@ -120,6 +138,7 @@ def store_netcdf(cfg: DictConfig, daily_precip: List[Tuple[str, np.ndarray, np.n
         date, data, geo = entry
         arr[i, :, :] = data
 
+    print(f'Read into array. Storing as netcdf file {filename}...')
     with Dataset(Path(cfg.paths.prism_dir) / filename, "w", format="NETCDF4") as nc:
         nc.description = "PRISM Precipitation Dataset"
         time = nc.createDimension("time", len(daily_precip))
@@ -129,7 +148,7 @@ def store_netcdf(cfg: DictConfig, daily_precip: List[Tuple[str, np.ndarray, np.n
         precip_var = nc.createVariable("precip", "f4", ("time", "y", "x"), zlib=True)
         time_var = nc.createVariable("time", "u4", ("time",))
         time_var[:] = np.arange(0, len(daily_precip))
-        time_var.units = "days since 2016-08-01 00:00:00"
+        time_var.units = f"days since {start_date.strftime('%Y-%m-%d')} 00:00:00"
         time_var.calendar = "gregorian"
         geotransform = nc.createVariable("geotransform", "f8", ("coeff",), zlib=True)
         geotransform[:] = daily_precip[0][2]
@@ -161,8 +180,9 @@ def main(cfg: DictConfig):
     Path(cfg.paths.prism_dir).mkdir(parents=True, exist_ok=True)
     
     download_prism_zips(cfg, start_date=start_date_obj, end_date=end_date_obj)
-    daily_precip = load_prism_zips(cfg)
-    store_netcdf(cfg, daily_precip, filename=f"prismprecip_20160801_{end_date_obj.strftime('%Y%m%d')}.nc")
+    daily_precip = load_prism_bils(cfg)
+    store_netcdf(cfg, daily_precip, filename=f"prismprecip_{start_date_obj.strftime('%Y%m%d')}_{end_date_obj.strftime('%Y%m%d')}.nc",
+                 start_date=start_date_obj)
 
 if __name__ == "__main__":
     main()

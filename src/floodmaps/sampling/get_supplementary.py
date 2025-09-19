@@ -9,36 +9,13 @@ import hydra
 from omegaconf import DictConfig
 import zipfile
 
+from floodmaps.utils.sampling_utils import unzip_file
+
 def download_url(url, save_path, chunk_size=128) -> None:
     r = requests.get(url, stream=True)
     with open(save_path, 'wb') as fd:
         for chunk in r.iter_content(chunk_size=chunk_size):
             fd.write(chunk)
-
-def unzip_file(zip_path: Path, remove_zip: bool = True) -> None:
-    """Unzip a file to the same directory and optionally remove the original zip.
-    
-    Parameters
-    ----------
-    zip_path : Path
-        Path to the zip file to extract
-    remove_zip : bool, default=True
-        Whether to remove the zip file after successful extraction
-    """
-    extract_to = zip_path.parent
-    try:
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(extract_to)
-        print(f"Successfully extracted {zip_path.name}")
-        
-        if remove_zip:
-            zip_path.unlink()
-            print(f"Removed original zip file: {zip_path.name}")
-            
-    except zipfile.BadZipFile:
-        print(f"Warning: {zip_path} is not a valid zip file")
-    except Exception as e:
-        print(f"Error extracting {zip_path}: {e}")
 
 def download_roads(cfg: DictConfig) -> None:
     """Download all TIGER roads data and stitch together into one big file."""

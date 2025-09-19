@@ -25,6 +25,7 @@ from rasterio import windows
 from rasterio.vrt import WarpedVRT
 import rasterio
 from omegaconf import DictConfig
+import zipfile
 
 PRISM_CRS = "EPSG:4269"
 SEARCH_CRS = "EPSG:4326"
@@ -924,3 +925,28 @@ def crop_to_bounds(item_href, bounds, dst_crs, nodata=0, resampling=Resampling.n
                 out_image = vrt.read()
 
     return out_image, out_transform
+
+def unzip_file(zip_path: Path, remove_zip: bool = True) -> None:
+    """Unzip a file to the same directory and optionally remove the original zip.
+    
+    Parameters
+    ----------
+    zip_path : Path
+        Path to the zip file to extract
+    remove_zip : bool, default=True
+        Whether to remove the zip file after successful extraction
+    """
+    extract_to = zip_path.parent
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_to)
+        print(f"Successfully extracted {zip_path.name}")
+        
+        if remove_zip:
+            zip_path.unlink()
+            print(f"Removed original zip file: {zip_path.name}")
+            
+    except zipfile.BadZipFile:
+        print(f"Warning: {zip_path} is not a valid zip file")
+    except Exception as e:
+        print(f"Error extracting {zip_path}: {e}")

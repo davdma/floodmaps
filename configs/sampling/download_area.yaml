@@ -1,9 +1,9 @@
-shapefile: ${paths.shapefile_dir}/des_plaines_illinois.shp # path to shapefile of study area
-event_date: 2024-07-18 # date of flood event in format YYYY-MM-DD
+shapefile: ${paths.shape_dir}/Naperville_test_area_boundary.shp # path to shapefile of study area
+event_date: 2022-09-17 # date of flood event in format YYYY-MM-DD
 before: 2 # number of days allowed for download before flood event date
-after: 4 # number of days allowed for download following flood event date
-product_id: S2A_MSIL2A_20240718T105031_N0509_R137_T32UUL_20240718T135029 # if want a specific product id to match
-dir_path: ${paths.imagery_dir}/areas/desplaines_20240718/ # directory where downloaded imagery will be saved
+after: 2 # number of days allowed for download following flood event date
+product_id: S2B_MSIL2A_20220917T163839_R126_T16TCM_20240729 # if want a specific product id to match
+dir_path: ${paths.imagery_dir}/areas/naperville_20220917/ # directory where downloaded imagery will be saved
 crs: # optional CRS to force the imagery to
 include_cmap: false # whether to include color maps for the rasters
 source: mpc # source of the data ['mpc', 'aws']

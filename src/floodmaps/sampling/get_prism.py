@@ -132,6 +132,8 @@ def store_netcdf(cfg: DictConfig, daily_precip: List[Tuple[str, np.ndarray, np.n
         List of tuples containing date, precip data, and geotransform.
     filename : str
         Name of the netcdf file to store the data in.
+    start_date : date
+        Start date of the PRISM data.
     """
     arr = np.empty((len(daily_precip), len(daily_precip[0][1]), len(daily_precip[0][1][0])))
     for i, entry in tqdm(enumerate(daily_precip)):

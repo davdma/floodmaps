@@ -69,6 +69,17 @@ defaults:
   - _self_
 ```
 
+### API Keys
+
+Two options for satellite download API keys: set in `config.yaml` or pass via environment variable.
+
+Microsoft Planetary Computer:
+- Set in the `config.yaml` level with `mpc_api_key: ...`.
+- OR Set environment variable `PC_SDK_SUBSCRIPTION_KEY`.
+
+AWS:
+- Currently S3 requester pays bucket requires manual setup.
+
 ### The `__self__` Directive
 
 `_self_` controls merge order in the defaults list. Put it at the end so your main config overrides everything else:

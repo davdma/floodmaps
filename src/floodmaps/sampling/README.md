@@ -90,6 +90,17 @@ There are several sampling scripts:
    <br><br>
 </p>
 
+## Setup: API Keys
+
+Two options for satellite download API keys: set in `config.yaml` or pass via environment variable.
+
+Microsoft Planetary Computer:
+- Set in the `config.yaml` level with `mpc_api_key: ...`.
+- OR Set environment variable `PC_SDK_SUBSCRIPTION_KEY`.
+
+AWS:
+- Currently S3 requester pays bucket requires manual setup.
+
 ## Manual Download
 
 Manual files allow the user to download any geographic tiles in the US at a point in time provided there are S2 and S1 captures that meet the parameter requirements such as the search interval (within the `before` and `after` sampling config arguments) and cloud cover threshold. The manual text files must have lines formatted in the form: `YYYY-MM-DD, YCoord, XCoord` or `YYYY-MM-DD, YCoord, XCoord, EPSG:XXXX`. Lines leading with the hash tag symbol `#` will be treated as comments and ignored. For example:

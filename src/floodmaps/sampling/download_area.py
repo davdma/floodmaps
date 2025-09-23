@@ -545,7 +545,7 @@ exact_fcodes=['46000', '46003', '46006', '46007', '55800', '33600', '33601', '33
         field_defn = ogr.FieldDefn('burn_value', ogr.OFTInteger)
         mem_layer.CreateField(field_defn)
 
-        for code in GetHU4Codes(prism_bbox):
+        for code in GetHU4Codes(prism_bbox, cfg):
             with gdal.OpenEx(Path(cfg.paths.nhd_dir) / f'NHDPLUS_H_{code}_HU4_GDB.gdb') as ds:
                 layer = ds.GetLayerByName('NHDFlowline')
                 layer.SetSpatialFilterRect(minx, miny, maxx, maxy)
@@ -671,7 +671,7 @@ def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, pri
         field_defn = ogr.FieldDefn('burn_value', ogr.OFTInteger)
         mem_layer.CreateField(field_defn)
 
-        for code in GetHU4Codes(prism_bbox):
+        for code in GetHU4Codes(prism_bbox, cfg):
             with gdal.OpenEx(Path(cfg.paths.nhd_dir) / f'NHDPLUS_H_{code}_HU4_GDB.gdb') as ds:
                 layer = ds.GetLayerByName('NHDWaterbody')
                 layer.SetSpatialFilterRect(minx, miny, maxx, maxy)
@@ -1036,16 +1036,21 @@ def download_area(stac_provider, bbox, cfg):
 
     # save all supplementary rasters in raw and rgb colormap
     logger.info('Processing supplementary rasters...')
-    pipeline_roads(cfg.sampling.dir_path, f'roads_{eid}', dst_shape, main_crs, dst_transform, state, bbox, cfg)
-    logger.debug(f'Roads raster completed successfully.')
-    pipeline_dem(cfg.sampling.dir_path, f'dem_{eid}', dst_shape, main_crs, dst_transform, bbox, cfg)
-    logger.debug(f'DEM raster completed successfully.')
-    pipeline_flowlines(cfg.sampling.dir_path, f'flowlines_{eid}', dst_shape, main_crs, dst_transform, bbox, cfg)
-    logger.debug(f'Flowlines raster completed successfully.')
-    pipeline_waterbody(cfg.sampling.dir_path, f'waterbody_{eid}', dst_shape, main_crs, dst_transform, bbox, cfg)
-    logger.debug(f'Waterbody raster completed successfully.')
-    pipeline_NLCD(cfg.sampling.dir_path, f'nlcd_{eid}', int(eid[:4]), dst_shape, main_crs, dst_transform, cfg)
-    logger.debug(f'NLCD raster completed successfully.')
+    if not (Path(cfg.sampling.dir_path) / f'roads_{eid}.tif').exists():
+        pipeline_roads(cfg.sampling.dir_path, f'roads_{eid}', dst_shape, main_crs, dst_transform, state, bbox, cfg)
+        logger.debug(f'Roads raster completed successfully.')
+    if not (Path(cfg.sampling.dir_path) / f'dem_{eid}.tif').exists():
+        pipeline_dem(cfg.sampling.dir_path, f'dem_{eid}', dst_shape, main_crs, dst_transform, bbox, cfg)
+        logger.debug(f'DEM raster completed successfully.')
+    if not (Path(cfg.sampling.dir_path) / f'flowlines_{eid}.tif').exists():
+        pipeline_flowlines(cfg.sampling.dir_path, f'flowlines_{eid}', dst_shape, main_crs, dst_transform, bbox, cfg)
+        logger.debug(f'Flowlines raster completed successfully.')
+    if not (Path(cfg.sampling.dir_path) / f'waterbody_{eid}.tif').exists():
+        pipeline_waterbody(cfg.sampling.dir_path, f'waterbody_{eid}', dst_shape, main_crs, dst_transform, bbox, cfg)
+        logger.debug(f'Waterbody raster completed successfully.')
+    if not (Path(cfg.sampling.dir_path) / f'nlcd_{eid}.tif').exists():
+        pipeline_NLCD(cfg.sampling.dir_path, f'nlcd_{eid}', int(eid[:4]), dst_shape, main_crs, dst_transform, cfg)
+        logger.debug(f'NLCD raster completed successfully.')
 
     # validate raster shapes, CRS, transforms
     result = validate_event_rasters(cfg.sampling.dir_path, logger=logger)
@@ -1167,7 +1172,7 @@ def run_download_area(cfg: DictConfig) -> None:
         bbox = get_bbox_from_shapefile(cfg.sampling.shapefile, crs=PRISM_CRS)
 
         # get stac provider
-        stac_provider = get_stac_provider(cfg.sampling.source, logger=rootLogger)
+        stac_provider = get_stac_provider(cfg, logger=rootLogger)
 
         # download imagery
         max_attempts = 3

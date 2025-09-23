@@ -1156,7 +1156,7 @@ def main(cfg: DictConfig) -> None:
     try:
         rootLogger.info(f"Searching through {num_candidates} candidate indices/events...")
         # get stac provider
-        stac_provider = get_stac_provider(cfg.sampling.source, logger=logger)
+        stac_provider = get_stac_provider(cfg, logger=logger)
         for event_date, event_precip, prism_bbox, eid, indices, crs in events:
             if Path(cfg.sampling.dir_path + eid + '/').is_dir():
                 if event_completed(cfg.sampling.dir_path + eid + '/', regex_patterns, pattern_dict, logger=rootLogger):

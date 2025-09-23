@@ -600,7 +600,7 @@ exact_fcodes=['46000', '46003', '46006', '46007', '55800', '33600', '33601', '33
         field_defn = ogr.FieldDefn('burn_value', ogr.OFTInteger)
         mem_layer.CreateField(field_defn)
 
-        for code in GetHU4Codes(prism_bbox):
+        for code in GetHU4Codes(prism_bbox, cfg):
             with gdal.OpenEx(Path(cfg.paths.nhd_dir) / f'NHDPLUS_H_{code}_HU4_GDB.gdb') as ds:
                 layer = ds.GetLayerByName('NHDFlowline')
                 layer.SetSpatialFilterRect(minx, miny, maxx, maxy)
@@ -723,7 +723,7 @@ def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, pri
         field_defn = ogr.FieldDefn('burn_value', ogr.OFTInteger)
         mem_layer.CreateField(field_defn)
 
-        for code in GetHU4Codes(prism_bbox):
+        for code in GetHU4Codes(prism_bbox, cfg):
             with gdal.OpenEx(Path(cfg.paths.nhd_dir) / f'NHDPLUS_H_{code}_HU4_GDB.gdb') as ds:
                 layer = ds.GetLayerByName('NHDWaterbody')
                 layer.SetSpatialFilterRect(minx, miny, maxx, maxy)
@@ -1310,7 +1310,7 @@ def run_sample_s2_s1(cfg: DictConfig) -> None:
     try:
         rootLogger.info(f"Searching through {num_candidates} candidate indices/events...")
         # get stac provider
-        stac_provider = get_stac_provider(cfg.sampling.source, logger=logger)
+        stac_provider = get_stac_provider(cfg, logger=logger)
         for event_date, event_precip, prism_bbox, eid, indices, crs in events:
             if Path(cfg.sampling.dir_path + eid + '/').is_dir():
                 if event_completed(cfg.sampling.dir_path + eid + '/', regex_patterns, pattern_dict, logger=rootLogger):

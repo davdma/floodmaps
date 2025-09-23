@@ -14,6 +14,7 @@ import planetary_computer
 from pystac import Item, ItemCollection
 from pystac.extensions.projection import ProjectionExtension as pe
 import os
+from omegaconf import DictConfig
 
 
 class STACProvider(ABC):
@@ -201,27 +202,25 @@ class AWSProvider(STACProvider):
             raise ValueError(f"Unknown asset type: {asset_type}")
 
 
-def get_stac_provider(provider_name: str, logger: Optional[logging.Logger] = None, api_key: Optional[str] = None) -> STACProvider:
+def get_stac_provider(cfg: DictConfig, logger: Optional[logging.Logger] = None) -> STACProvider:
     """Factory function to get the appropriate STAC provider.
     
     Parameters
     ----------
-    provider_name : str
-        Name of the provider ('mpc', 'aws', etc.)
+    cfg: DictConfig
+        Configuration object.
     logger : Optional[logging.Logger]
         Logger instance
-    api_key : Optional[str]
-        API key for providers that require authentication (e.g., Microsoft Planetary Computer)
     
     Returns
     -------
     STACProvider
         Configured STAC provider instance
     """
-    provider_name = provider_name.lower()
+    provider_name = cfg.sampling.source.lower()
     
     if provider_name in ["mpc", "microsoft", "planetary_computer"]:
-        return MicrosoftPlanetaryComputerProvider(logger, api_key)
+        return MicrosoftPlanetaryComputerProvider(api_key=getattr(cfg, "mpc_api_key", None), logger=logger)
     elif provider_name in ["aws", "amazon"]:
         return AWSProvider(logger)
     else:

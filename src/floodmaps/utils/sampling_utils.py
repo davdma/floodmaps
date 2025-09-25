@@ -15,7 +15,6 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import geopandas as gpd
 from matplotlib.colors import to_rgb
-from pystac.item_collection import ItemCollection
 from geopy.geocoders import Nominatim
 import pickle
 from rasterio.warp import Resampling

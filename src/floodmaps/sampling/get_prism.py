@@ -5,12 +5,10 @@ import os
 from osgeo import gdal
 import multiprocessing
 from netCDF4 import Dataset
-from tqdm import tqdm
 from cftime import num2date, date2num
 from datetime import date, datetime, timedelta
 import requests
 from pathlib import Path
-import argparse
 import hydra
 from omegaconf import DictConfig
 from typing import List, Tuple
@@ -41,12 +39,24 @@ def download_prism_zips(cfg: DictConfig, start_date=date(2024, 7, 31), end_date=
     while (start_date <= end_date):
         dt = start_date.strftime("%Y%m%d")
         # skip if already exists
-        if (Path(cfg.paths.prism_dir) / f'PRISM_ppt_stable_4kmD2_{dt}_bil').exists():
-            print(f'BIL folder for date {dt} already exists, skipping')
+        if (Path(cfg.paths.prism_dir) / f'PRISM_ppt_stable_4kmD2_{dt}_bil.bil').exists():
+            print(f'BIL file for date {dt} already exists, skipping')
             start_date += delta
             continue
         
-        response = requests.get(f'http://services.nacse.org/prism/data/public/4km/ppt/{dt}')
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                response = requests.get(f'http://services.nacse.org/prism/data/public/4km/ppt/{dt}')
+                response.raise_for_status()
+                break
+            except requests.exceptions.RequestException as e:
+                if attempt == max_attempts - 1:
+                    raise Exception(f'Failed to download PRISM zip file for date {dt} from url: http://services.nacse.org/prism/data/public/4km/ppt/{dt}') from e
+                else:
+                    print(f'Failed to download PRISM zip file for date {dt} from url: http://services.nacse.org/prism/data/public/4km/ppt/{dt}. Retrying...')
+                    continue
+        
         with open(Path(cfg.paths.prism_dir) / f'PRISM_ppt_stable_4kmD2_{dt}_bil.zip', 'wb') as p:
             p.write(response.content)
         print(f'Downloaded zip file PRISM_ppt_stable_4kmD2_{dt}_bil.zip for date {dt}. Extracting...')
@@ -54,6 +64,38 @@ def download_prism_zips(cfg: DictConfig, start_date=date(2024, 7, 31), end_date=
         unzip_file(Path(cfg.paths.prism_dir) / f'PRISM_ppt_stable_4kmD2_{dt}_bil.zip', remove_zip=True)
 
         start_date += delta
+
+def read_prism(_path_bil_file):
+    """Helper to read PRISM bil file into numpy array.
+    
+    Parameters
+    ----------
+    _path_bil_file : Path
+        Path to PRISM bil file.
+
+    Returns
+    -------
+    tuple
+        Tuple containing date string YYYYMMDD, precip data, and geotransform.
+    """
+    p = re.compile('\d{8}')
+    match = p.search(_path_bil_file.name)
+    if match:
+        dt = match.group()
+    else:
+        raise Exception('No formatted date found for file:', _path_bil_file)
+
+    # NOTE: For gdal path_to_file after vsizip can be relative or absolute
+    with gdal.Open(_path_bil_file) as prism_file:
+        if prism_file is None:
+            raise Exception(f'Failed to open PRISM bil file: {_path_bil_file}')
+
+        prism_raw = prism_file.GetRasterBand(1).ReadAsArray()
+        geotransform = prism_file.GetGeoTransform()
+
+    prism_raw[prism_raw == -9999] = np.nan
+
+    return (dt, prism_raw, geotransform)
 
 def load_prism_bils(cfg: DictConfig):
     """Read all downloaded precip data from PRISM directory into python list.
@@ -69,52 +111,10 @@ def load_prism_bils(cfg: DictConfig):
         List of tuples containing date, precip data, and geotransform.
     """
     # alphabetical sorting is chronological here
-    _paths_prism_daily = sorted(Path(cfg.paths.prism_dir).glob('*_bil')) # this globs the extracted directories
-    def read_prism(_path_bil_dir):
-        """Read PRISM bil file into numpy array.
-        
-        Parameters
-        ----------
-        _path_bil_dir : Path
-            Path to folder containing PRISM bil file.
-
-        Returns
-        -------
-        tuple
-            Tuple containing date string YYYYMMDD, precip data, and geotransform.
-        """
-        p = re.compile('\d{8}')
-        match = p.search(Path(_path_bil_dir).name)
-        if match:
-            date = match.group()
-        else:
-            raise Exception('No formatted date found for file:', _path_bil_dir)
-        
-        bil_filename =  _path_bil_dir / f'{_path_bil_dir.name}.bil'
-
-        # NOTE: For gdal path_to_file after vsizip can be relative or absolute
-        prism_file = gdal.Open(bil_filename)
-
-        prism_raw = prism_file.GetRasterBand(1).ReadAsArray()
-
-        prism_raw[prism_raw == -9999] = np.nan
-
-        return (date, prism_raw, prism_file.GetGeoTransform())
-        
-    pbar = tqdm(range(len(_paths_prism_daily)))
+    _paths_prism_daily = sorted(Path(cfg.paths.prism_dir).glob('*_bil.bil')) # this globs the extracted files
 
     with multiprocessing.Pool(10) as pool:    
         tasks = [pool.apply_async(read_prism, args=(path,)) for path in _paths_prism_daily[:]]
-        
-        prev_ready = 0
-        num_ready = sum(task.ready() for task in tasks)
-        
-        while num_ready != len(tasks):
-            if num_ready > prev_ready:
-                pbar.update(num_ready - prev_ready)
-            prev_ready = num_ready
-            num_ready = sum(task.ready() for task in tasks)
-
         daily_precip = [task.get() for task in tasks]
 
     return daily_precip
@@ -135,9 +135,18 @@ def store_netcdf(cfg: DictConfig, daily_precip: List[Tuple[str, np.ndarray, np.n
     start_date : date
         Start date of the PRISM data.
     """
+    if len(daily_precip) == 0:
+        raise Exception('No daily precipitation data found')
+    
     arr = np.empty((len(daily_precip), len(daily_precip[0][1]), len(daily_precip[0][1][0])))
-    for i, entry in tqdm(enumerate(daily_precip)):
-        date, data, geo = entry
+    # validate that the dates are chronological and increments a day at a time
+    for i, entry in enumerate(daily_precip):
+        dt, data, geo = entry
+
+        ref_date = start_date + timedelta(days=i)
+        if datetime.strptime(dt, "%Y%m%d").date() != ref_date:
+            raise Exception(f'Dates are not chronological and increments a day at a time. Found date {dt} but expected {ref_date.strftime("%Y%m%d")}')
+        
         arr[i, :, :] = data
 
     print(f'Read into array. Storing as netcdf file {filename}...')
@@ -156,25 +165,26 @@ def store_netcdf(cfg: DictConfig, daily_precip: List[Tuple[str, np.ndarray, np.n
         geotransform[:] = daily_precip[0][2]
         precip_var[:, :, :] = arr
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        program='get_prism',
-        description="""This script
-        can be used to setup PRISM data or to update existing PRISM data to match
-        newly available dates. For setting up PRISM data from scratch, the start_date should be
-        20160801 as that is the 0 point of the netcdf time dimension used for the project dataset.
-        Otherwise to add more dates, set start_date as the date of the most recently downloaded
-        precipitation file.""")
-    parser.add_argument('--start_date', default='2016-08-01', help='start date to download PRISM precip data from (default: 2016-08-01)')
-    parser.add_argument('--end_date', default='2024-11-30', help='end date to download PRISM precip data to (default: 2024-11-30)')
-    return parser.parse_args()
 
 @hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig):
+    """
+    Main function to download PRISM precipitation data and store as NetCDF.
+    
+    Two hydra config args start_date and end_date of PRISM precip data can be provided via CLI:
+        python -m floodmaps.sampling.get_prism +start_date=2016-08-01 +end_date=2024-11-30
+    
+    For setting up PRISM data from scratch, the start_date should be
+    2016-08-01 as that is the 0 point of the netcdf time dimension used for the project dataset.
+    Otherwise to add more dates, set start_date as the date of the most recently downloaded
+    precipitation file.
+    """
+    # Get dates from config with defaults - raise error if not provided
+    start_date = cfg.get('start_date', '2016-08-01')
+    end_date = cfg.get('end_date', '2024-11-30')
+    print(f'Using start_date: {start_date}, end_date: {end_date}')
+    
     # Convert string dates to date objects
-    args = parse_args()
-    start_date = args.start_date
-    end_date = args.end_date
     start_date_obj = parse_date_string(start_date).date()
     end_date_obj = parse_date_string(end_date).date()
 

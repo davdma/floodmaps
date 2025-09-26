@@ -110,6 +110,11 @@ class PRISMData:
     def get_masked_precip(self, mask: np.ndarray) -> np.ndarray:
         """Get masked precipitation data. Sets values outside mask to nan."""
         return np.where(mask, self.precip_data, np.nan)
+    
+    @property
+    def shape(self) -> Tuple[int, int, int]:
+        """Get shape of precipitation data."""
+        return self.precip_data.shape
 
 class SamplingPathManager:
     """Configuration class for managing data file paths and settings for
@@ -319,8 +324,8 @@ class NoElevationError(Exception):
     """Exception raised when elevation data is not found."""
     pass
 
-def get_default_dir_path(threshold: int, days_before: int, days_after: int, maxcoverpercentage: int, region: str = None) -> str:
-    """Default directory path for sampling scripts."""
+def get_default_dir_name(threshold: int, days_before: int, days_after: int, maxcoverpercentage: int, region: str = None) -> str:
+    """Default directory name for sampling scripts."""
     if region is None:
         return f'samples_{threshold}_{days_before}_{days_after}_{maxcoverpercentage}/'
     else:
@@ -550,6 +555,8 @@ def read_manual_indices(manual_file: str) -> List[Tuple[datetime, int, int, str]
 def get_mask(cfg: DictConfig, shape: Tuple[int, int, int]) -> np.ndarray:
     """Get the mask for the region in the PRISM meshgrid.
 
+    Mask will be 3D array matching PRISM data shape.
+
     TO DO: Will want to add other regions of interest in the future.
     
     Parameters
@@ -731,6 +738,7 @@ def get_extreme_events(prism_data: PRISMData, history, threshold=300, mask=None,
     min_date = prism_data.get_reference_date()
     logger.debug(f"PRISM start date: {min_date.strftime('%Y-%m-%d')}")
     count = 0
+    filtered_count = 0
     for time, y, x in zip(events[0], events[1], events[2]):
         if n is not None and count >= n:
             break
@@ -740,8 +748,10 @@ def get_extreme_events(prism_data: PRISMData, history, threshold=300, mask=None,
 
         # must not be earlier than s2 launch, or previously queried in pipeline
         if event_date < min_date:
+            filtered_count += 1
             continue
         elif (time, y, x) in history:
+            filtered_count += 1
             continue
 
         event_dates.append(event_date_str)
@@ -752,7 +762,118 @@ def get_extreme_events(prism_data: PRISMData, history, threshold=300, mask=None,
         crs_list.append(None)
         count += 1
 
+    if filtered_count > 0:
+        logger.info(f"Filtered out {filtered_count} events (before min_date or already in history)")
+
     return count, zip(event_dates, event_precip, bbox, eid, indices, crs_list)
+
+def get_random_events(prism_data: PRISMData, history, mask=None, n=None, random_seed=None, logger=None):
+    """
+    Randomly samples PRISM cells across the US. Useful for increasing diversity of samples (and non flood tiles).
+    
+    Parameters
+    ----------
+    prism_data : PRISMData
+        PRISM data object.
+    history : set()
+        Set that holds all tuples of indices (from PRISM ndarray) of previously processed events.
+    mask : np.ndarray, optional
+        Mask to apply to PRISM data (e.g., CESER region mask).
+    n : int, optional
+        Maximum number of random events to find.
+    random_seed : int, optional
+        Random seed for reproducible sampling.
+    logger : logging.Logger, optional
+        Logger to use for logging.
+        
+    Returns
+    -------
+    int
+        Number of random events found.
+    Iterator
+        Iterator of random event data with each tuple containing date, precipitation value, 
+        bounding box, event id, indices, and crs.
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+        if not logger.handlers:
+            ch = logging.StreamHandler()
+            ch.setLevel(logging.INFO)
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            ch.setFormatter(formatter)
+            logger.addHandler(ch)
+    
+    # Set random seed for reproducibility
+    if random_seed is not None:
+        np.random.seed(random_seed)
+    
+    # Get PRISM data dimensions
+    time_dim, y_dim, x_dim = prism_data.get_precip_shape()
+    
+    # Create valid coordinate arrays
+    if mask is not None:
+        # Get valid coordinates from mask (only spatial dimensions)
+        mask_2d = mask[0, :, :]  # Take first time slice since mask is 3D
+        valid_coords = np.where(mask_2d)
+        valid_y_coords = valid_coords[0]
+        valid_x_coords = valid_coords[1]
+        logger.info(f"Using mask: {len(valid_y_coords)} valid PRISM cells available")
+    else:
+        # Use all non nan spatial coordinates in PRISM
+        valid_coords = np.where(~np.isnan(prism_data.precip_data[0]))
+        valid_y_coords = valid_coords[0]
+        valid_x_coords = valid_coords[1]
+        logger.info(f"No mask applied: {len(valid_y_coords)} PRISM cells available")
+    
+    # Randomly shuffle the coordinates
+    indices = np.arange(len(valid_y_coords))
+    np.random.shuffle(indices)
+    
+    # Lists for aggregating event data
+    event_dates = []
+    event_precip = []
+    bbox = []
+    eid = []
+    event_indices = []
+    crs_list = []
+    
+    min_date = prism_data.get_reference_date()
+    logger.debug(f"PRISM start date: {min_date.strftime('%Y-%m-%d')}")
+    count = 0
+    filtered_count = 0
+    
+    for idx in indices:
+        if n is not None and count >= n:
+            break
+            
+        y = valid_y_coords[idx]
+        x = valid_x_coords[idx]
+        
+        # Random time within reasonable range
+        time = np.random.randint(0, time_dim)
+        event_date = prism_data.get_event_cftime(time)
+        event_date_str = event_date.strftime("%Y%m%d")
+        
+        # Skip if already processed
+        if event_date < min_date:
+            filtered_count += 1
+            continue
+        elif (time, y, x) in history:
+            filtered_count += 1
+            continue
+            
+        event_dates.append(event_date_str)
+        event_precip.append(prism_data.get_precip(time, y, x))
+        bbox.append(prism_data.get_bounding_box(x, y))
+        eid.append(f'{event_date_str}_{y}_{x}')
+        event_indices.append((int(time), int(y), int(x)))
+        crs_list.append(None)
+        count += 1
+    
+    if filtered_count > 0:
+        logger.info(f"Filtered out {filtered_count} events (before min_date or already in history)")
+    
+    return count, zip(event_dates, event_precip, bbox, eid, event_indices, crs_list)
 
 def event_completed(dir_path: str, regex_patterns: list[str], pattern_dict: dict[str, str], logger: logging.Logger = None) -> bool:
     """Returns whether or not event directory contains all generated rasters by checking files with regex patterns."""
@@ -925,7 +1046,7 @@ def crop_to_bounds(item_href, bounds, dst_crs, nodata=0, resampling=Resampling.n
 
     return out_image, out_transform
 
-def unzip_file(zip_path: Path, remove_zip: bool = True) -> None:
+def unzip_file(zip_path: Path, remove_zip: bool = True, extract_to: Path = None) -> None:
     """Unzip a file to the same directory and optionally remove the original zip.
     
     Parameters
@@ -934,8 +1055,10 @@ def unzip_file(zip_path: Path, remove_zip: bool = True) -> None:
         Path to the zip file to extract
     remove_zip : bool, default=True
         Whether to remove the zip file after successful extraction
+    extract_to : Path, optional
+        Path to extract the zip file to. If not provided, will extract to the same directory as the zip file.
     """
-    extract_to = zip_path.parent
+    extract_to = zip_path.parent if extract_to is None else extract_to
     try:
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             zip_ref.extractall(extract_to)

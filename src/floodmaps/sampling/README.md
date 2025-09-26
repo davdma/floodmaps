@@ -77,6 +77,17 @@ prism_dir: ${.supplementary_dir}/prism/
 
 For the Illinois data sampling, the CESER boundary shapefile is downloaded from the ANL box folder. The PRISM 4km mesh grid shapefile is downloaded from the [PRISM website link](https://prism.oregonstate.edu/downloads/data/prism_4km_mesh.zip).
 
+## Setup: API Keys
+
+Two options for satellite download API keys: set in `config.yaml` or pass via environment variable.
+
+Microsoft Planetary Computer:
+- Set in the `config.yaml` level with `mpc_api_key: ...`.
+- OR Set environment variable `PC_SDK_SUBSCRIPTION_KEY`.
+
+AWS:
+- Currently S3 requester pays bucket requires manual setup.
+
 ## Sampling Scripts
 There are several sampling scripts:
 * `sample_s2.py` - this is for downloading tiles with the Sentinel-2 L2A layers alongside any ancillary data (DEM, roads, flowlines, waterbodies etc.). This should be run to produce the S2 dataset used for training the optical model.
@@ -89,17 +100,6 @@ There are several sampling scripts:
 <em>Figure 3: Example of a downloaded S2 event folder with its TCI image visualized.</em>
    <br><br>
 </p>
-
-## Setup: API Keys
-
-Two options for satellite download API keys: set in `config.yaml` or pass via environment variable.
-
-Microsoft Planetary Computer:
-- Set in the `config.yaml` level with `mpc_api_key: ...`.
-- OR Set environment variable `PC_SDK_SUBSCRIPTION_KEY`.
-
-AWS:
-- Currently S3 requester pays bucket requires manual setup.
 
 ## Manual Download
 

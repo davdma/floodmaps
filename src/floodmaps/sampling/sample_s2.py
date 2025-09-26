@@ -27,7 +27,7 @@ from floodmaps.utils.sampling_utils import (
     NLCD_CODE_TO_RGB,
     PRISMData,
     DateCRSOrganizer,
-    get_default_dir_path,
+    get_default_dir_name,
     get_date_interval,
     has_date_after_PRISM,
     setup_logging,
@@ -1073,9 +1073,14 @@ def main(cfg: DictConfig) -> None:
 
     Note: In the future if more L2A data become available, some previously processed and skipped events become viable.
     In that case do not use history object during run.
-    
+
     Parameters
     ----------
+    cfg : DictConfig
+        Configuration object.
+    
+    cfg.sampling parameters
+    -----------------------
     threshold : int
     days_before : int
         Number of days of interest before precipitation event.
@@ -1089,8 +1094,6 @@ def main(cfg: DictConfig) -> None:
         Path to directory where samples will be saved.
     region : str, optional
         Region to sample from.
-    config_file : str, optional
-        Path to custom configuration file.
     manual : str, optional
         Path to text file containing manual event indices in lines with format: time, y, x.
         
@@ -1100,7 +1103,7 @@ def main(cfg: DictConfig) -> None:
     """
     # make directory
     if cfg.sampling.dir_path is None:
-        cfg.sampling.dir_path = get_default_dir_path(cfg.sampling.threshold, cfg.sampling.before, cfg.sampling.after, cfg.sampling.maxcoverpercentage, cfg.sampling.region)
+        cfg.sampling.dir_path = str(Path(cfg.paths.imagery_dir) / get_default_dir_name(cfg.sampling.threshold, cfg.sampling.before, cfg.sampling.after, cfg.sampling.maxcoverpercentage, cfg.sampling.region))
         Path(cfg.sampling.dir_path).mkdir(parents=True, exist_ok=True)
     else:
         # Create directory if it doesn't exist
@@ -1108,7 +1111,7 @@ def main(cfg: DictConfig) -> None:
             Path(cfg.sampling.dir_path).mkdir(parents=True, exist_ok=True)
         except (OSError, ValueError) as e:
             print(f"Invalid directory path '{cfg.sampling.dir_path}'. Using default.", file=sys.stderr)
-            cfg.sampling.dir_path = get_default_dir_path(cfg.sampling.threshold, cfg.sampling.before, cfg.sampling.after, cfg.sampling.maxcoverpercentage, cfg.sampling.region)
+            cfg.sampling.dir_path = str(Path(cfg.paths.imagery_dir) / get_default_dir_name(cfg.sampling.threshold, cfg.sampling.before, cfg.sampling.after, cfg.sampling.maxcoverpercentage, cfg.sampling.region))
             Path(cfg.sampling.dir_path).mkdir(parents=True, exist_ok=True)
 
         # Ensure trailing slash

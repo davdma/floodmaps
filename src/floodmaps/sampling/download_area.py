@@ -94,14 +94,14 @@ def GetHU4Codes(prism_bbox, cfg):
 
 
 # we will choose a UTM zone CRS already given and stick to it for rest of sample data!
-def pipeline_TCI(stac_provider, dir_path, save_as, dst_crs, item, bbox):
+def pipeline_TCI(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
     """Generates TCI (True Color Image) raster of S2 multispectral file.
 
     Parameters
     ----------
     stac_provider : STACProvider
         STAC provider object.
-    dir_path : str
+    dir_path : Path
         Path for saving generated raster.
     save_as : str
         Name of file to be saved (do not include extension!)
@@ -125,19 +125,19 @@ def pipeline_TCI(stac_provider, dir_path, save_as, dst_crs, item, bbox):
 
     out_image, out_transform = crop_to_bounds(item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
 
-    with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=3, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=None) as dst:
+    with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=3, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=None) as dst:
         dst.write(out_image)
 
     return (out_image.shape[-2], out_image.shape[-1]), out_transform
 
-def pipeline_SCL(stac_provider, dir_path, save_as, dst_shape, dst_crs, dst_transform, item, bbox, cfg):
+def pipeline_SCL(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst_transform, item, bbox, cfg):
     """Generates Scene Classification Layer raster of S2 multispectral file and resamples to 10m resolution.
 
     Parameters
     ----------
     stac_provider : STACProvider
         STAC provider object.
-    dir_path : str
+    dir_path : Path
         Path for saving generated raster.
     save_as : str
         Name of file to be saved (do not include extension!).
@@ -174,7 +174,7 @@ def pipeline_SCL(stac_provider, dir_path, save_as, dst_shape, dst_crs, dst_trans
         resampling=Resampling.nearest)
 
     # only make cloud values (8, 9, 10) 1 everything else 0
-    with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=1, height=h, width=w, crs=dst_crs,
+    with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=h, width=w, crs=dst_crs,
                         dtype=clouds.dtype, transform=dst_transform) as dst:
         dst.write(dest, 1)
 
@@ -184,18 +184,18 @@ def pipeline_SCL(stac_provider, dir_path, save_as, dst_shape, dst_crs, dst_trans
         rgb_clouds[1, :, :] = dest * 255
         rgb_clouds[2, :, :] = dest * 255
 
-        with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_clouds.shape[-2], width=rgb_clouds.shape[-1],
+        with rasterio.open(dir_path / f'{save_as}_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_clouds.shape[-2], width=rgb_clouds.shape[-1],
                         crs=dst_crs, dtype=rgb_clouds.dtype, transform=dst_transform, nodata=None) as dst:
             dst.write(rgb_clouds)
 
-def pipeline_RGB(stac_provider, dir_path, save_as, dst_crs, item, bbox):
+def pipeline_RGB(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
     """Generates B02 (B), B03 (G), B04 (R) rasters of S2 multispectral file.
 
     Parameters
     ----------
     stac_provider : STACProvider
         STAC provider object.
-    dir_path : str
+    dir_path : Path
         Path for saving generated raster.
     save_as : str
         Name of file to be saved (do not include extension!).
@@ -221,17 +221,17 @@ def pipeline_RGB(stac_provider, dir_path, save_as, dst_crs, item, bbox):
 
     out_image = np.vstack((red_image, green_image, blue_image))
 
-    with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=3, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=0) as dst:
+    with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=3, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=0) as dst:
         dst.write(out_image)
 
-def pipeline_B08(stac_provider, dir_path, save_as, dst_crs, item, bbox):
+def pipeline_B08(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
     """Generates NIR B8 band raster of S2 multispectral file.
 
     Parameters
     ----------
     stac_provider : STACProvider
         STAC provider object.
-    dir_path : str
+    dir_path : Path
         Path for saving generated raster.
     save_as : str
         Name of file to be saved (do not include extension!).
@@ -248,17 +248,17 @@ def pipeline_B08(stac_provider, dir_path, save_as, dst_crs, item, bbox):
 
     out_image, out_transform = crop_to_bounds(item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
 
-    with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=1, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=0) as dst:
+    with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=0) as dst:
         dst.write(out_image)
 
-def pipeline_NDWI(stac_provider, dir_path, save_as, dst_crs, item, bbox, cfg):
+def pipeline_NDWI(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox, cfg):
     """Generates NDWI raster from S2 multispectral files.
 
     Parameters
     ----------
     stac_provider : STACProvider
         STAC provider object.
-    dir_path : str
+    dir_path : Path
         Path for saving generated raster.
     save_as : str
         Name of raw ndwi file to be saved (do not include extension!).
@@ -288,7 +288,7 @@ def pipeline_NDWI(stac_provider, dir_path, save_as, dst_crs, item, bbox, cfg):
     ndwi = np.where((green + nir) != 0, (green - nir)/(green + nir), -999999)
 
     # save raw
-    with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=1, height=ndwi.shape[-2], width=ndwi.shape[-1], crs=dst_crs, dtype=ndwi.dtype, transform=out_transform, nodata=-999999) as dst:
+    with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=ndwi.shape[-2], width=ndwi.shape[-1], crs=dst_crs, dtype=ndwi.dtype, transform=out_transform, nodata=-999999) as dst:
         dst.write(ndwi, 1)
 
     if cfg.sampling.include_cmap:
@@ -296,15 +296,15 @@ def pipeline_NDWI(stac_provider, dir_path, save_as, dst_crs, item, bbox, cfg):
         ndwi_colored = colormap_to_rgb(ndwi, cmap='seismic_r', r=(-1.0, 1.0), no_data=-999999)
 
         # nodata should not be set for cmap files
-        with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=ndwi_colored.shape[-2], width=ndwi_colored.shape[-1], crs=dst_crs, dtype=ndwi_colored.dtype, transform=out_transform, nodata=None) as dst:
+        with rasterio.open(dir_path / f'{save_as}_cmap.tif', 'w', driver='Gtiff', count=3, height=ndwi_colored.shape[-2], width=ndwi_colored.shape[-1], crs=dst_crs, dtype=ndwi_colored.dtype, transform=out_transform, nodata=None) as dst:
             dst.write(ndwi_colored)
 
-def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, prism_bbox, cfg):
+def pipeline_roads(dir_path: Path, save_as, dst_shape, dst_crs, dst_transform, state, prism_bbox, cfg):
     """Generates raster with burned in geometries of roads given destination raster properties.
 
     Parameters
     ----------
-    dir_path : str
+    dir_path : Path
         Path for saving generated raster.
     save_as : str
         Name of file to be saved (do not include extension!).
@@ -412,23 +412,23 @@ def pipeline_roads(dir_path, save_as, dst_shape, dst_crs, dst_transform, state, 
         if raster_ds:
             raster_ds = None
 
-    with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=1, height=rasterize_roads.shape[-2], width=rasterize_roads.shape[-1],
+    with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=rasterize_roads.shape[-2], width=rasterize_roads.shape[-1],
                        crs=dst_crs, dtype=rasterize_roads.dtype, transform=dst_transform, nodata=0) as dst:
         dst.write(rasterize_roads, 1)
 
     if cfg.sampling.include_cmap:
-        with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_roads.shape[-2], width=rgb_roads.shape[-1],
+        with rasterio.open(dir_path / f'{save_as}_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_roads.shape[-2], width=rgb_roads.shape[-1],
                         crs=dst_crs, dtype=rgb_roads.dtype, transform=dst_transform, nodata=None) as dst:
             dst.write(rgb_roads)
 
-def pipeline_dem(dir_path, save_as, dst_shape, dst_crs, dst_transform, bounds, cfg):
+def pipeline_dem(dir_path: Path, save_as, dst_shape, dst_crs, dst_transform, bounds, cfg):
     """Generates Digital Elevation Map raster given destination raster properties and bounding box.
 
     Note to developers: slope raster generation removed in favor of calling np.gradient on dem tile during preprocessing.
 
     Parameters
     ----------
-    dir_path : str
+    dir_path : Path
         Path for saving generated raster.
     save_as : str
         Name of file to be saved (do not include extension!).
@@ -490,7 +490,7 @@ def pipeline_dem(dir_path, save_as, dst_shape, dst_crs, dst_transform, bounds, c
         resampling=Resampling.bilinear)
 
     # save dem raw
-    with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=1, height=destination.shape[-2], width=destination.shape[-1], crs=dst_crs, dtype=destination.dtype, transform=dst_transform, nodata=no_data) as dst:
+    with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=destination.shape[-2], width=destination.shape[-1], crs=dst_crs, dtype=destination.dtype, transform=dst_transform, nodata=no_data) as dst:
         dst.write(destination, 1)
 
     if cfg.sampling.include_cmap:
@@ -498,10 +498,10 @@ def pipeline_dem(dir_path, save_as, dst_shape, dst_crs, dst_transform, bounds, c
         dem_cmap = colormap_to_rgb(destination, cmap='gray', no_data=no_data)
 
         # save dem cmap
-        with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=dem_cmap.shape[-2], width=dem_cmap.shape[-1], crs=dst_crs, dtype=dem_cmap.dtype, transform=dst_transform, nodata=None) as dst:
+        with rasterio.open(dir_path / f'{save_as}_cmap.tif', 'w', driver='Gtiff', count=3, height=dem_cmap.shape[-2], width=dem_cmap.shape[-1], crs=dst_crs, dtype=dem_cmap.dtype, transform=dst_transform, nodata=None) as dst:
             dst.write(dem_cmap)
 
-def pipeline_flowlines(dir_path, save_as, dst_shape, dst_crs, dst_transform, prism_bbox, cfg,
+def pipeline_flowlines(dir_path: Path, save_as, dst_shape, dst_crs, dst_transform, prism_bbox, cfg,
 exact_fcodes=['46000', '46003', '46006', '46007', '55800', '33600', '33601', '33603', '33400', '42801', '42802', '42805', '42806', '42809']):
     """Generates raster with burned in geometries of flowlines given destination raster properties.
 
@@ -509,7 +509,7 @@ exact_fcodes=['46000', '46003', '46006', '46007', '55800', '33600', '33601', '33
 
     Parameters
     ----------
-    dir_path : str
+    dir_path : Path
         Path for saving generated raster.
     save_as : str
         Name of file to be saved (no file extension!).
@@ -622,21 +622,21 @@ exact_fcodes=['46000', '46003', '46006', '46007', '55800', '33600', '33601', '33
             raster_ds = None
 
     # flowlines raw
-    with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=1, height=flowlines.shape[-2], width=flowlines.shape[-1],
+    with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=flowlines.shape[-2], width=flowlines.shape[-1],
                        crs=dst_crs, dtype=flowlines.dtype, transform=dst_transform, nodata=0) as dst:
         dst.write(flowlines, 1)
 
     # flowlines cmap
     if cfg.sampling.include_cmap:
-        with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_flowlines.shape[-2], width=rgb_flowlines.shape[-1], crs=dst_crs, dtype=rgb_flowlines.dtype, transform=dst_transform, nodata=None) as dst:
+        with rasterio.open(dir_path / f'{save_as}_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_flowlines.shape[-2], width=rgb_flowlines.shape[-1], crs=dst_crs, dtype=rgb_flowlines.dtype, transform=dst_transform, nodata=None) as dst:
             dst.write(rgb_flowlines)
 
-def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, prism_bbox, cfg):
+def pipeline_waterbody(dir_path: Path, save_as, dst_shape, dst_crs, dst_transform, prism_bbox, cfg):
     """Generates raster with burned in geometries of waterbodies given destination raster properties.
 
     Parameters
     ----------
-    dir_path : str
+    dir_path : Path
         Path for saving generated raster.
     save_as : str
         Name of file to be saved (no file extension!).
@@ -748,21 +748,21 @@ def pipeline_waterbody(dir_path, save_as, dst_shape, dst_crs, dst_transform, pri
             raster_ds = None
 
     # waterbody raw
-    with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=1, height=waterbody.shape[-2], width=waterbody.shape[-1], crs=dst_crs, dtype=waterbody.dtype, transform=dst_transform, nodata=0) as dst:
+    with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=waterbody.shape[-2], width=waterbody.shape[-1], crs=dst_crs, dtype=waterbody.dtype, transform=dst_transform, nodata=0) as dst:
         dst.write(waterbody, 1)
 
     # waterbody cmap
     if cfg.sampling.include_cmap:
-        with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_waterbody.shape[-2], width=rgb_waterbody.shape[-1], crs=dst_crs, dtype=rgb_waterbody.dtype, transform=dst_transform, nodata=None) as dst:
+        with rasterio.open(dir_path / f'{save_as}_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_waterbody.shape[-2], width=rgb_waterbody.shape[-1], crs=dst_crs, dtype=rgb_waterbody.dtype, transform=dst_transform, nodata=None) as dst:
             dst.write(rgb_waterbody)
 
-def pipeline_NLCD(dir_path, save_as, year, dst_shape, dst_crs, dst_transform, cfg):
+def pipeline_NLCD(dir_path: Path, save_as, year, dst_shape, dst_crs, dst_transform, cfg):
     """Generates raster with NLCD land cover classes. Uses windowed reading of NLCD raster
     for speed (NLCD files are large).
 
     Parameters
     ----------
-    dir_path : str
+    dir_path : Path
         Path for saving generated raster.
     save_as : str
         Name of file to be saved (no file extension!).
@@ -816,7 +816,7 @@ def pipeline_NLCD(dir_path, save_as, year, dst_shape, dst_crs, dst_transform, cf
     )
 
     # save NLCD raster
-    with rasterio.open(dir_path + save_as + '.tif', 'w', driver='Gtiff', count=1, height=nlcd_arr.shape[-2], width=nlcd_arr.shape[-1], crs=dst_crs, dtype=nlcd_arr.dtype, transform=dst_transform, nodata=250) as dst:
+    with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=nlcd_arr.shape[-2], width=nlcd_arr.shape[-1], crs=dst_crs, dtype=nlcd_arr.dtype, transform=dst_transform, nodata=250) as dst:
         dst.write(nlcd_arr, 1)
 
     # create NLCD colormap
@@ -831,18 +831,18 @@ def pipeline_NLCD(dir_path, save_as, year, dst_shape, dst_crs, dst_transform, cf
 
         rgb_img = np.transpose(rgb_img, (2, 0, 1))
 
-        with rasterio.open(dir_path + save_as + '_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_img.shape[-2], width=rgb_img.shape[-1], crs=dst_crs, dtype=rgb_img.dtype, transform=dst_transform, nodata=None) as dst:
+        with rasterio.open(dir_path / f'{save_as}_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_img.shape[-2], width=rgb_img.shape[-1], crs=dst_crs, dtype=rgb_img.dtype, transform=dst_transform, nodata=None) as dst:
             dst.write(rgb_img)
 
 
-def pipeline_S1(stac_provider, dir_path, save_as, dst_crs, item, bbox, cfg):
+def pipeline_S1(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox, cfg):
     """Generates dB scale raster of SAR data in VV and VH polarizations.
 
     Parameters
     ----------
     stac_provider : STACProvider
         STAC provider object.
-    dir_path : str
+    dir_path : Path
         Path for saving generated raster.
     save_as : str
         Name of file to be saved (do not include extension!)
@@ -871,23 +871,23 @@ def pipeline_S1(stac_provider, dir_path, save_as, dst_crs, item, bbox, cfg):
     out_image_vv, out_transform_vv = crop_to_bounds(item_hrefs_vv, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
     out_image_vh, out_transform_vh = crop_to_bounds(item_hrefs_vh, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
 
-    with rasterio.open(dir_path + save_as + '_vv.tif', 'w', driver='Gtiff', count=1, height=out_image_vv.shape[-2], width=out_image_vv.shape[-1], crs=dst_crs, dtype=out_image_vv.dtype, transform=out_transform_vv, nodata=-9999) as dst:
+    with rasterio.open(dir_path / f'{save_as}_vv.tif', 'w', driver='Gtiff', count=1, height=out_image_vv.shape[-2], width=out_image_vv.shape[-1], crs=dst_crs, dtype=out_image_vv.dtype, transform=out_transform_vv, nodata=-9999) as dst:
         db_vv = db_scale(out_image_vv[0])
         dst.write(db_vv, 1)
 
-    with rasterio.open(dir_path + save_as + '_vh.tif', 'w', driver='Gtiff', count=1, height=out_image_vh.shape[-2], width=out_image_vh.shape[-1], crs=dst_crs, dtype=out_image_vh.dtype, transform=out_transform_vh, nodata=-9999) as dst:
+    with rasterio.open(dir_path / f'{save_as}_vh.tif', 'w', driver='Gtiff', count=1, height=out_image_vh.shape[-2], width=out_image_vh.shape[-1], crs=dst_crs, dtype=out_image_vh.dtype, transform=out_transform_vh, nodata=-9999) as dst:
         db_vh = db_scale(out_image_vh[0])
         dst.write(db_vh, 1)
 
     # color maps
     if cfg.sampling.include_cmap:
         img_vv_cmap = colormap_to_rgb(db_vv, cmap='gray', no_data=-9999)
-        with rasterio.open(dir_path + save_as + '_vv_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vv_cmap.shape[-2], width=img_vv_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vv, nodata=None) as dst:
+        with rasterio.open(dir_path / f'{save_as}_vv_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vv_cmap.shape[-2], width=img_vv_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vv, nodata=None) as dst:
             # get color map
             dst.write(img_vv_cmap)
 
         img_vh_cmap = colormap_to_rgb(db_vh, cmap='gray', no_data=-9999)
-        with rasterio.open(dir_path + save_as + '_vh_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vh_cmap.shape[-2], width=img_vh_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vh, nodata=None) as dst:
+        with rasterio.open(dir_path / f'{save_as}_vh_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vh_cmap.shape[-2], width=img_vh_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vh, nodata=None) as dst:
             dst.write(img_vh_cmap)
 
 def download_area(stac_provider, bbox, cfg):
@@ -943,6 +943,7 @@ def download_area(stac_provider, bbox, cfg):
 
     # if product ID provided, look for match
     logger.info('Beginning download...')
+    area_dir_path = Path(cfg.sampling.dir_path)
     file_to_product = dict()
     if cfg.sampling.product_id:
         logger.info(f'Checking for product ID: {cfg.sampling.product_id}')
@@ -973,15 +974,15 @@ def download_area(stac_provider, bbox, cfg):
 
         if matched == 's2':
             dt = product_id_item.datetime.strftime('%Y%m%d')
-            dst_shape, dst_transform = pipeline_TCI(stac_provider, cfg.sampling.dir_path, f'tci_{dt}_{eid}', main_crs, product_id_item, cbbox)
+            dst_shape, dst_transform = pipeline_TCI(stac_provider, area_dir_path, f'tci_{dt}_{eid}', main_crs, product_id_item, cbbox)
             logger.debug(f'TCI raster completed for {product_id_item.id} on {dt}.')
-            pipeline_RGB(stac_provider, cfg.sampling.dir_path, f'rgb_{dt}_{eid}', main_crs, product_id_item, cbbox)
+            pipeline_RGB(stac_provider, area_dir_path, f'rgb_{dt}_{eid}', main_crs, product_id_item, cbbox)
             logger.debug(f'RGB raster completed for {product_id_item.id} on {dt}.')
-            pipeline_B08(stac_provider, cfg.sampling.dir_path, f'b08_{dt}_{eid}', main_crs, product_id_item, cbbox)
+            pipeline_B08(stac_provider, area_dir_path, f'b08_{dt}_{eid}', main_crs, product_id_item, cbbox)
             logger.debug(f'B08 raster completed for {product_id_item.id} on {dt}.')
-            pipeline_NDWI(stac_provider, cfg.sampling.dir_path, f'ndwi_{dt}_{eid}', main_crs, product_id_item, cbbox, cfg)
+            pipeline_NDWI(stac_provider, area_dir_path, f'ndwi_{dt}_{eid}', main_crs, product_id_item, cbbox, cfg)
             logger.debug(f'NDWI raster completed for {product_id_item.id} on {dt}.')
-            pipeline_SCL(stac_provider, cfg.sampling.dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, product_id_item, cbbox, cfg)
+            pipeline_SCL(stac_provider, area_dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, product_id_item, cbbox, cfg)
             logger.debug(f'SCL raster completed for {product_id_item.id} on {dt}.')
 
             # record product used to generate rasters
@@ -992,7 +993,7 @@ def download_area(stac_provider, bbox, cfg):
             file_to_product[f'clouds_{dt}_{eid}'] = product_id_item.id
         else:
             dt = product_id_item.datetime.strftime('%Y%m%d')
-            pipeline_S1(stac_provider, cfg.sampling.dir_path, f'sar_{dt}_{eid}', main_crs, product_id_item, cbbox, cfg)
+            pipeline_S1(stac_provider, area_dir_path, f'sar_{dt}_{eid}', main_crs, product_id_item, cbbox, cfg)
             logger.debug(f'S1 raster completed for {product_id_item.id} on {dt}.')
 
             # record product used to generate rasters
@@ -1008,15 +1009,15 @@ def download_area(stac_provider, bbox, cfg):
 
         for item in items_s2:
             dt = item.datetime.strftime('%Y%m%d')
-            dst_shape, dst_transform = pipeline_TCI(stac_provider, cfg.sampling.dir_path, f'tci_{dt}_{eid}', main_crs, item, cbbox)
+            dst_shape, dst_transform = pipeline_TCI(stac_provider, area_dir_path, f'tci_{dt}_{eid}', main_crs, item, cbbox)
             logger.debug(f'TCI raster completed for {item.id} on {dt}.')
-            pipeline_RGB(stac_provider, cfg.sampling.dir_path, f'rgb_{dt}_{eid}', main_crs, item, cbbox)
+            pipeline_RGB(stac_provider, area_dir_path, f'rgb_{dt}_{eid}', main_crs, item, cbbox)
             logger.debug(f'RGB raster completed for {item.id} on {dt}.')
-            pipeline_B08(stac_provider, cfg.sampling.dir_path, f'b08_{dt}_{eid}', main_crs, item, cbbox)
+            pipeline_B08(stac_provider, area_dir_path, f'b08_{dt}_{eid}', main_crs, item, cbbox)
             logger.debug(f'B08 raster completed for {item.id} on {dt}.')
-            pipeline_NDWI(stac_provider, cfg.sampling.dir_path, f'ndwi_{dt}_{eid}', main_crs, item, cbbox, cfg)
+            pipeline_NDWI(stac_provider, area_dir_path, f'ndwi_{dt}_{eid}', main_crs, item, cbbox, cfg)
             logger.debug(f'NDWI raster completed for {item.id} on {dt}.')
-            pipeline_SCL(stac_provider, cfg.sampling.dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox, cfg)
+            pipeline_SCL(stac_provider, area_dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox, cfg)
             logger.debug(f'SCL raster completed for {item.id} on {dt}.')
 
             # record product used to generate rasters
@@ -1028,7 +1029,7 @@ def download_area(stac_provider, bbox, cfg):
 
         for item in items_s1:
             dt = item.datetime.strftime('%Y%m%d')
-            pipeline_S1(stac_provider, cfg.sampling.dir_path, f'sar_{dt}_{eid}', main_crs, item, cbbox, cfg)
+            pipeline_S1(stac_provider, area_dir_path, f'sar_{dt}_{eid}', main_crs, item, cbbox, cfg)
             logger.debug(f'S1 raster completed for {item.id} on {dt}.')
 
             # record product used to generate rasters
@@ -1036,24 +1037,24 @@ def download_area(stac_provider, bbox, cfg):
 
     # save all supplementary rasters in raw and rgb colormap
     logger.info('Processing supplementary rasters...')
-    if not (Path(cfg.sampling.dir_path) / f'roads_{eid}.tif').exists():
-        pipeline_roads(cfg.sampling.dir_path, f'roads_{eid}', dst_shape, main_crs, dst_transform, state, bbox, cfg)
+    if not (area_dir_path / f'roads_{eid}.tif').exists():
+        pipeline_roads(area_dir_path, f'roads_{eid}', dst_shape, main_crs, dst_transform, state, bbox, cfg)
         logger.debug(f'Roads raster completed successfully.')
-    if not (Path(cfg.sampling.dir_path) / f'dem_{eid}.tif').exists():
-        pipeline_dem(cfg.sampling.dir_path, f'dem_{eid}', dst_shape, main_crs, dst_transform, bbox, cfg)
+    if not (area_dir_path / f'dem_{eid}.tif').exists():
+        pipeline_dem(area_dir_path, f'dem_{eid}', dst_shape, main_crs, dst_transform, bbox, cfg)
         logger.debug(f'DEM raster completed successfully.')
-    if not (Path(cfg.sampling.dir_path) / f'flowlines_{eid}.tif').exists():
-        pipeline_flowlines(cfg.sampling.dir_path, f'flowlines_{eid}', dst_shape, main_crs, dst_transform, bbox, cfg)
+    if not (area_dir_path / f'flowlines_{eid}.tif').exists():
+        pipeline_flowlines(area_dir_path, f'flowlines_{eid}', dst_shape, main_crs, dst_transform, bbox, cfg)
         logger.debug(f'Flowlines raster completed successfully.')
-    if not (Path(cfg.sampling.dir_path) / f'waterbody_{eid}.tif').exists():
-        pipeline_waterbody(cfg.sampling.dir_path, f'waterbody_{eid}', dst_shape, main_crs, dst_transform, bbox, cfg)
+    if not (area_dir_path / f'waterbody_{eid}.tif').exists():
+        pipeline_waterbody(area_dir_path, f'waterbody_{eid}', dst_shape, main_crs, dst_transform, bbox, cfg)
         logger.debug(f'Waterbody raster completed successfully.')
-    if not (Path(cfg.sampling.dir_path) / f'nlcd_{eid}.tif').exists():
-        pipeline_NLCD(cfg.sampling.dir_path, f'nlcd_{eid}', int(eid[:4]), dst_shape, main_crs, dst_transform, cfg)
+    if not (area_dir_path / f'nlcd_{eid}.tif').exists():
+        pipeline_NLCD(area_dir_path, f'nlcd_{eid}', int(eid[:4]), dst_shape, main_crs, dst_transform, cfg)
         logger.debug(f'NLCD raster completed successfully.')
 
     # validate raster shapes, CRS, transforms
-    result = validate_event_rasters(cfg.sampling.dir_path, logger=logger)
+    result = validate_event_rasters(area_dir_path, logger=logger)
     if not result.is_valid:
         logger.error(f'Raster validation failed for event {eid}. Removing directory and contents.')
         # shutil.rmtree(dir_path) - for now do not delete!
@@ -1076,7 +1077,7 @@ def download_area(stac_provider, bbox, cfg):
         }
     }
 
-    metadata_path = Path(cfg.sampling.dir_path) / 'metadata.json'
+    metadata_path = area_dir_path / 'metadata.json'
     if metadata_path.exists():
         # if metadata file already exists, update the item IDs
         with open(metadata_path, "r") as json_file:
@@ -1142,7 +1143,7 @@ def run_download_area(cfg: DictConfig) -> None:
         Configuration object.
     """
     if cfg.sampling.dir_path is None:
-        raise ValueError('inference.dir_path config parameter is required to specify a directory for download.')
+        raise ValueError('sampling.dir_path config parameter is required to specify a directory for download.')
 
     # Create directory if it doesn't exist
     Path(cfg.sampling.dir_path).mkdir(parents=True, exist_ok=True)

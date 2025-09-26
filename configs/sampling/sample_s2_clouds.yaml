@@ -1,0 +1,13 @@
+# Configuration for S2 cloud sampling script
+# This config is designed for collecting high cloud coverage tiles for training cloud-robust models
+
+min_cloud_percentage: 99 # minimum cloud cover percentage for filtering S2 tiles (99-100%)
+before: 0 # number of days allowed for download before event date
+after: 5 # number of days allowed for download following event date
+maxevents: 60 # maximum number of cloudy events to attempt downloading
+dir_path: # specify a directory name for downloaded samples, format should end with backslash
+region: # filter sampling only from supported regions: ["ceser"] or None for entire US
+manual: # text file for parsing manual event indices with format: time, y, x
+source: mpc # specify a provider (Microsoft Planetary Computer, AWS) for the ESA data ['mpc', 'aws']
+random_seed: 42 # random seed for reproducible sampling (set to None for random)
+

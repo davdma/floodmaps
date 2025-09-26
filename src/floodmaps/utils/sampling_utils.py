@@ -458,9 +458,18 @@ def setup_logging(
     
     return logger
 
-def get_history(file_path: str) -> set:
-    """Get the history of events from a file. History is a set of identifiers."""
-    if os.path.isfile(file_path):
+def get_history(file_path: Path) -> set:
+    """Get the history of events from a file. History is a set of identifiers.
+    
+    file_path : Path
+        Path to history file.
+
+    Returns
+    -------
+    set
+        History of events.
+    """
+    if file_path.is_file():
         with open(file_path, 'rb') as f:
             history = pickle.load(f)
         # check if it is a set
@@ -875,7 +884,7 @@ def get_random_events(prism_data: PRISMData, history, mask=None, n=None, random_
     
     return count, zip(event_dates, event_precip, bbox, eid, event_indices, crs_list)
 
-def event_completed(dir_path: str, regex_patterns: list[str], pattern_dict: dict[str, str], logger: logging.Logger = None) -> bool:
+def event_completed(dir_path: Path, regex_patterns: list[str], pattern_dict: dict[str, str], logger: logging.Logger = None) -> bool:
     """Returns whether or not event directory contains all generated rasters by checking files with regex patterns."""
     if logger is None:
         logger = logging.getLogger(__name__)
@@ -888,7 +897,7 @@ def event_completed(dir_path: str, regex_patterns: list[str], pattern_dict: dict
             logger.addHandler(ch)
     
     logger.info('Confirming whether event has already been successfully processed before...')
-    existing_files = os.listdir(dir_path)
+    existing_files = [f.name for f in dir_path.iterdir() if f.is_file()]
     
     # Check if each file name in the list exists in the directory
     missing_files = []
@@ -896,7 +905,8 @@ def event_completed(dir_path: str, regex_patterns: list[str], pattern_dict: dict
     for pattern in regex_patterns:
         pattern_matched = False
         for file_name in existing_files:
-            if re.match(pattern, file_name) and os.path.getsize(dir_path + file_name) > 0:
+            file_path = dir_path / file_name
+            if re.match(pattern, file_name) and file_path.stat().st_size > 0:
                 pattern_matched = True
                 break
         if not pattern_matched:

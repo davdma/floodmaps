@@ -36,7 +36,7 @@ class ValidationResult:
     total_files: int = 0
 
 def validate_event_rasters(
-        event_path: str,
+        event_path: Path | str,
         logger: Optional[logging.Logger] = None
 ) -> ValidationResult:
     """
@@ -45,7 +45,7 @@ def validate_event_rasters(
     
     Parameters
     ----------
-    event_path : str
+    event_path : Path or str
         Path to the event directory containing tiff files.
     logger : logging.Logger, optional
         Logger for detailed information. If None, validation proceeds silently.

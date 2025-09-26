@@ -20,12 +20,12 @@ from floodmaps.utils.sampling_utils import PRISM_CRS, SEARCH_CRS, db_scale, setu
 from floodmaps.utils.stac_providers import get_stac_provider
 from floodmaps.utils.validate import validate_event_rasters
 
-def get_metadata(sample):
+def get_metadata(sample: Path):
     """Returns event folder metadata.
     
     Parameters
     ----------
-    sample : str
+    sample : Path
         Path to event folder.
 
     Returns
@@ -39,7 +39,7 @@ def get_metadata(sample):
     bbox : tuple
         Bounding box of the event in PRISM CRS.
     """
-    with open(sample + 'metadata.json') as json_data:
+    with open(sample / 'metadata.json') as json_data:
         d = json.load(json_data)
         eid = d['metadata']['Sample ID']
         event_date = d['metadata']['Precipitation Event Date']
@@ -80,14 +80,14 @@ def sar_missing_percentage(stac_provider, item, item_crs, bbox):
     out_image, _ = rasterio.merge.merge([item_href], bounds=img_bbox)
     return int((np.sum(out_image <= 0) / out_image.size) * 100)
 
-def pipeline_S1(stac_provider, dir_path, save_as, dst_crs, item, bbox):
+def pipeline_S1(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
     """Generates dB scale raster of SAR data in VV and VH polarizations.
 
     Parameters
     ----------
     stac_provider : STACProvider
         STAC provider object.
-    dir_path : str
+    dir_path : Path
         Path for saving generated raster. 
     save_as : str
         Name of file to be saved (do not include extension!)
@@ -114,22 +114,22 @@ def pipeline_S1(stac_provider, dir_path, save_as, dst_crs, item, bbox):
     out_image_vv, out_transform_vv = crop_to_bounds(item_hrefs_vv, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
     out_image_vh, out_transform_vh = crop_to_bounds(item_hrefs_vh, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
 
-    with rasterio.open(dir_path + save_as + '_vv.tif', 'w', driver='Gtiff', count=1, height=out_image_vv.shape[-2], width=out_image_vv.shape[-1], crs=dst_crs, dtype=out_image_vv.dtype, transform=out_transform_vv, nodata=-9999) as dst:
+    with rasterio.open(dir_path / f'{save_as}_vv.tif', 'w', driver='Gtiff', count=1, height=out_image_vv.shape[-2], width=out_image_vv.shape[-1], crs=dst_crs, dtype=out_image_vv.dtype, transform=out_transform_vv, nodata=-9999) as dst:
         db_vv = db_scale(out_image_vv[0])
         dst.write(db_vv, 1)
 
-    with rasterio.open(dir_path + save_as + '_vh.tif', 'w', driver='Gtiff', count=1, height=out_image_vh.shape[-2], width=out_image_vh.shape[-1], crs=dst_crs, dtype=out_image_vh.dtype, transform=out_transform_vh, nodata=-9999) as dst:
+    with rasterio.open(dir_path / f'{save_as}_vh.tif', 'w', driver='Gtiff', count=1, height=out_image_vh.shape[-2], width=out_image_vh.shape[-1], crs=dst_crs, dtype=out_image_vh.dtype, transform=out_transform_vh, nodata=-9999) as dst:
         db_vh = db_scale(out_image_vh[0])
         dst.write(db_vh, 1)
 
     # color maps
     img_vv_cmap = colormap_to_rgb(db_vv, cmap='gray', no_data=-9999)
-    with rasterio.open(dir_path + save_as + '_vv_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vv_cmap.shape[-2], width=img_vv_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vv, nodata=None) as dst:
+    with rasterio.open(dir_path / f'{save_as}_vv_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vv_cmap.shape[-2], width=img_vv_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vv, nodata=None) as dst:
         # get color map
         dst.write(img_vv_cmap)
 
     img_vh_cmap = colormap_to_rgb(db_vh, cmap='gray', no_data=-9999)
-    with rasterio.open(dir_path + save_as + '_vh_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vh_cmap.shape[-2], width=img_vh_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vh, nodata=None) as dst:
+    with rasterio.open(dir_path / f'{save_as}_vh_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vh_cmap.shape[-2], width=img_vh_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vh, nodata=None) as dst:
         dst.write(img_vh_cmap)
 
 def coincident_days(s2_dts, s1_dt, within_days):
@@ -160,15 +160,15 @@ def coincident_days(s2_dts, s1_dt, within_days):
             break
     return coincident_dt
 
-def downloadS1(stac_provider, sample, cfg):
+def downloadS1(stac_provider, sample: Path, cfg):
     """Downloads S1 imagery for a given event.
     
     Parameters
     ----------
     stac_provider : STACProvider
         STAC provider object.
-    sample : str
-        Path string to event folder.
+    sample : Path
+        Path to event folder.
     cfg : DictConfig
         Configuration object.
     """
@@ -186,8 +186,8 @@ def downloadS1(stac_provider, sample, cfg):
     p = re.compile('\d{8}_\d{8}')
     tci_dates = []
     latest = dt
-    for tci_file in glob(sample + 'tci_*.tif'):
-        match = p.search(tci_file)
+    for tci_file in sample.glob('tci_*.tif'):
+        match = p.search(tci_file.name)
         if match:
             tci_date = match.group()[:8]
             tci_dt = datetime(int(tci_date[0:4]), int(tci_date[4:6]), int(tci_date[6:8]))
@@ -247,7 +247,7 @@ def downloadS1(stac_provider, sample, cfg):
         # coincident date
         cdt = date.strftime('%Y%m%d')
 
-        if not cfg.sampling.replace and any(Path(sample).glob(f'sar_{cdt}_*_{eid}_vv.tif')):
+        if not cfg.sampling.replace and any(sample.glob(f'sar_{cdt}_*_{eid}_vv.tif')):
             logger.debug(f'S1 raster sar_{cdt}_*_{eid}_vv.tif already exists, skipping due to replace=False.')
             continue
 
@@ -305,7 +305,7 @@ def main(cfg: DictConfig) -> None:
 
     # loop over samples in directory
     rootLogger.info("Initializing SAR event sampling...")
-    samples = glob(cfg.sampling.dir_path + '*_*_*/')
+    samples = Path(cfg.sampling.dir_path).glob('*_*_*/')
     stac_provider = get_stac_provider(cfg, logger=logger)
     for sample in samples:
         downloadS1(stac_provider, sample, cfg)

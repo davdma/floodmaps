@@ -409,18 +409,20 @@ def main(cfg: DictConfig) -> None:
         Samples per tile: {cfg.preprocess.samples}
         Sampling method: {cfg.preprocess.method}
         Random seed:     {cfg.preprocess.seed}
-        Sample dir(s):   {cfg.preprocess.sample_dirs}
+        Sample dir(s):   {cfg.preprocess.s2.sample_dirs}
+        Suffix:          {getattr(cfg.preprocess, 'suffix', None)}
     ''')
 
     # make our preprocess directory
-    if getattr(cfg, 'suffix', None):
+    if getattr(cfg.preprocess, 'suffix', None):
         pre_sample_dir = Path(cfg.paths.preprocess_dir) / 's2' / f'samples_{cfg.preprocess.size}_{cfg.preprocess.samples}_{cfg.preprocess.suffix}'
     else:
         pre_sample_dir = Path(cfg.paths.preprocess_dir) / 's2' / f'samples_{cfg.preprocess.size}_{cfg.preprocess.samples}'
     pre_sample_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f'Preprocess directory: {pre_sample_dir.name}')
 
     # Resolve splits and sample dirs
-    cfg_s2 = cfg.get('s2', {})
+    cfg_s2 = cfg.preprocess.get('s2', {})
     label_splits = cfg_s2.get('label_splits', {})
     train_labels = label_splits.get('train', [])
     val_labels = label_splits.get('val', [])

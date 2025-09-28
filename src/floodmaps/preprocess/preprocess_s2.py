@@ -11,6 +11,10 @@ import yaml
 import hydra
 from omegaconf import DictConfig
 from datetime import datetime
+import multiprocessing as mp
+import psutil
+import shutil
+from numpy.lib.format import open_memmap
 
 def _find_event_dir(img_dt: str, eid: str, sample_dirs: List[str], cfg: DictConfig) -> Optional[Path]:
     """Find the first dataset directory under the imagery_dir that contains the
@@ -25,150 +29,6 @@ def _find_event_dir(img_dt: str, eid: str, sample_dirs: List[str], cfg: DictConf
         return event_dir
     return None
 
-def random_crop(label_paths, size, num_samples, rng, pre_sample_dir, sample_dirs, cfg, typ="train"):
-    """Uniformly samples patches of dimension size x size across each dataset tile, and saves
-    all patches in train, val, test sets into respective npy files.
-
-    Parameters
-    ----------
-    label_paths : list[str]
-        List of label file paths relative to labels_dir.
-    size : int
-        Size of the sampled patches.
-    num_samples : int
-        Number of patches to sample per raw S2 tile.
-    rng : obj
-        Random number generator.
-    pre_sample_dir : Path
-        Directory to save the sampled patches.
-    sample_dirs : list[str]
-        One or more dataset directories under sampling/ that contain the S2 tiles.
-    cfg : DictConfig
-        Configuration object.
-    typ : str
-        Subset assigned to the saved patches: train, val, test.
-    """
-    logger = logging.getLogger('preprocessing')
-    
-    # 16 channels for 11 data + 1 label channel + 3 TCI + 1 NLCD
-    total_patches = num_samples * len(label_paths)
-    dataset = np.empty((total_patches, 16, size, size), dtype=np.float32)
-
-    tiles = []
-    for label_rel in label_paths:
-        p = re.compile('label_(\d{8})_(.+).tif')
-        m = p.search(label_rel)
-
-        if m:
-            tile_date = m.group(1)
-            eid = m.group(2)
-        else:
-            raise ValueError(f'Label file {label_rel} does not match expected format.')
-
-        with rasterio.open(Path(cfg.paths.labels_dir) / label_rel) as src:
-            label_raster = src.read([1, 2, 3])
-            # if label has any values != 0 or 255 then print to log!
-            if np.any((label_raster > 0) & (label_raster < 255)):
-                logger.debug(f'{label_rel} values are not 0 or 255.')
-                
-            label_binary = np.where(label_raster[0] != 0, 1, 0)
-            label_binary = np.expand_dims(label_binary, axis = 0)
-
-            HEIGHT = src.height
-            WIDTH = src.width
-
-        event_dir = _find_event_dir(tile_date, eid, sample_dirs, cfg)
-        if event_dir is None:
-            logger.info(f'No matching event assets found for label {label_rel}; skipping.')
-            continue
-
-        tci_file = event_dir / f'tci_{tile_date}_{eid}.tif'
-        rgb_file = event_dir / f'rgb_{tile_date}_{eid}.tif'
-        b08_file = event_dir / f'b08_{tile_date}_{eid}.tif'
-        ndwi_file = event_dir / f'ndwi_{tile_date}_{eid}.tif'
-        dem_file = event_dir / f'dem_{eid}.tif'
-        waterbody_file = event_dir / f'waterbody_{eid}.tif'
-        roads_file = event_dir / f'roads_{eid}.tif'
-        flowlines_file = event_dir / f'flowlines_{eid}.tif'
-        nlcd_file = event_dir / f'nlcd_{eid}.tif'
-
-        with rasterio.open(tci_file) as src:
-            tci_raster = src.read()
-            tci_floats = (tci_raster / 255).astype(np.float32)
-
-        with rasterio.open(rgb_file) as src:
-            rgb_raster = src.read()
-
-        with rasterio.open(b08_file) as src:
-            b08_raster = src.read()
-
-        with rasterio.open(ndwi_file) as src:
-            ndwi_raster = src.read()
-    
-        with rasterio.open(dem_file) as src:
-            dem_raster = src.read()
-
-        # calculate xy gradient with np.gradient
-        slope = np.gradient(dem_raster, axis=(1,2))
-        slope_y_raster, slope_x_raster = slope
-
-        with rasterio.open(waterbody_file) as src:
-            waterbody_raster = src.read()
-
-        with rasterio.open(roads_file) as src:
-            roads_raster = src.read()
-
-        with rasterio.open(flowlines_file) as src:
-            flowlines_raster = src.read()
-
-        with rasterio.open(nlcd_file) as src:
-            nlcd_raster = src.read()
-
-        # stack all tiles
-        try:
-            stacked_tile = np.vstack((rgb_raster, b08_raster, ndwi_raster, dem_raster, 
-                                        slope_y_raster, slope_x_raster, waterbody_raster, 
-                                        roads_raster, flowlines_raster, label_binary, tci_floats, nlcd_raster), dtype=np.float32)
-        except ValueError as e:
-            # print all the shapes for debugging
-            print(f'Shapes do not match!')
-            print(f'label file: {label_rel}')
-            print(f'rgb_raster shape: {rgb_raster.shape}')
-            print(f'b08_raster shape: {b08_raster.shape}')
-            print(f'ndwi_raster shape: {ndwi_raster.shape}')
-            print(f'dem_raster shape: {dem_raster.shape}')
-            print(f'slope_y_raster shape: {slope_y_raster.shape}')
-            print(f'slope_x_raster shape: {slope_x_raster.shape}')
-            print(f'waterbody_raster shape: {waterbody_raster.shape}')
-            print(f'label_binary shape: {label_binary.shape}')
-            print(f'tci_floats shape: {tci_floats.shape}')
-            print(f'nlcd_raster shape: {nlcd_raster.shape}')
-            raise e
-
-        tiles.append(stacked_tile)
-    logger.info('Tiles loaded.')
-
-    logger.info('Sampling random patches...')
-    # choose n random coordinates within each tile
-    for i, tile in enumerate(tiles):
-        patches_sampled = 0
-        _, HEIGHT, WIDTH = tile.shape
-
-        while patches_sampled < num_samples:
-            x = int(rng.uniform(0, HEIGHT - size))
-            y = int(rng.uniform(0, WIDTH - size))
-
-            patch = tile[:, x : x + size, y : y + size]
-
-            # if contains missing values in tci or ndwi, toss out and resample
-            if np.any(patch[0] == 0) or np.any(patch[4] == -999999):
-                continue
-
-            dataset[i * num_samples + patches_sampled] = patch[:16]
-            patches_sampled += 1
-
-    output_file = pre_sample_dir / f'{typ}_patches.npy'
-    np.save(output_file, dataset)
 
 def loadMaskedStack(img_dt, eid, sample_dirs: List[str], cfg: DictConfig):
     """Load and mask the stack of non-binary channels.
@@ -323,6 +183,351 @@ def extract_events_from_labels(label_paths: List[str]) -> List[str]:
     return list(sorted(events))
 
 
+def load_tile_for_sampling(tile_info: Tuple):
+    """Load a tile and return the stacked raster for patch sampling.
+    
+    Parameters
+    ----------
+    tile_info : Tuple
+        Tuple of (label_path, sample_dirs, cfg)
+        
+    Returns
+    -------
+    stacked_raster : np.ndarray
+        Stacked raster of the tile (16 channels)
+    """
+    label_rel, sample_dirs, cfg = tile_info
+    
+    p = re.compile('label_(\d{8})_(.+).tif')
+    m = p.search(label_rel)
+    
+    if m:
+        tile_date = m.group(1)
+        eid = m.group(2)
+    else:
+        raise ValueError(f'Label file {label_rel} does not match expected format.')
+
+    with rasterio.open(Path(cfg.paths.labels_dir) / label_rel) as src:
+        label_raster = src.read([1, 2, 3])
+        label_binary = np.where(label_raster[0] != 0, 1, 0)
+        label_binary = np.expand_dims(label_binary, axis = 0)
+
+    event_dir = _find_event_dir(tile_date, eid, sample_dirs, cfg)
+    if event_dir is None:
+        raise FileNotFoundError(f"Could not find assets for event {eid} across provided sample_dirs: {sample_dirs}")
+
+    tci_file = event_dir / f'tci_{tile_date}_{eid}.tif'
+    rgb_file = event_dir / f'rgb_{tile_date}_{eid}.tif'
+    b08_file = event_dir / f'b08_{tile_date}_{eid}.tif'
+    ndwi_file = event_dir / f'ndwi_{tile_date}_{eid}.tif'
+    dem_file = event_dir / f'dem_{eid}.tif'
+    waterbody_file = event_dir / f'waterbody_{eid}.tif'
+    roads_file = event_dir / f'roads_{eid}.tif'
+    flowlines_file = event_dir / f'flowlines_{eid}.tif'
+    nlcd_file = event_dir / f'nlcd_{eid}.tif'
+
+    with rasterio.open(tci_file) as src:
+        tci_raster = src.read()
+        tci_floats = (tci_raster / 255).astype(np.float32)
+
+    with rasterio.open(rgb_file) as src:
+        rgb_raster = src.read()
+
+    with rasterio.open(b08_file) as src:
+        b08_raster = src.read()
+
+    with rasterio.open(ndwi_file) as src:
+        ndwi_raster = src.read()
+
+    with rasterio.open(dem_file) as src:
+        dem_raster = src.read()
+
+    # calculate xy gradient with np.gradient
+    slope = np.gradient(dem_raster, axis=(1,2))
+    slope_y_raster, slope_x_raster = slope
+
+    with rasterio.open(waterbody_file) as src:
+        waterbody_raster = src.read()
+
+    with rasterio.open(roads_file) as src:
+        roads_raster = src.read()
+
+    with rasterio.open(flowlines_file) as src:
+        flowlines_raster = src.read()
+
+    with rasterio.open(nlcd_file) as src:
+        nlcd_raster = src.read()
+
+    # stack all tiles
+    stacked_tile = np.vstack((rgb_raster, b08_raster, ndwi_raster, dem_raster, 
+                                slope_y_raster, slope_x_raster, waterbody_raster, 
+                                roads_raster, flowlines_raster, label_binary, tci_floats, nlcd_raster), dtype=np.float32)
+    
+    return stacked_tile
+
+
+def sample_patches_in_mem(tile_infos: List[Tuple], size: int, num_samples: int, 
+                          seed: int, max_attempts: int = 10000) -> np.ndarray:
+    """Sample patches and stores them in memory.
+    
+    Parameters
+    ----------
+    tile_infos : List[Tuple]
+        List of tile info tuples to process
+    size : int
+        Patch size (e.g., 64)
+    num_samples : int
+        Number of patches to sample per tile
+    seed : int
+        Random seed for reproducibility
+    max_attempts : int
+        Maximum number of attempts to sample a patch before raising error
+
+    Returns
+    -------
+    dataset : np.ndarray
+        Array of sampled patches
+    """
+    rng = Random(seed)
+    total_patches = num_samples * len(tile_infos)
+    dataset = np.empty((total_patches, 16, size, size), dtype=np.float32)
+    
+    for i, tile_info in enumerate(tile_infos):
+        try:
+            tile_data = load_tile_for_sampling(tile_info)
+        except Exception as e:
+            label_rel, _, _ = tile_info
+            raise RuntimeError(f"Worker failed to load tile {i} ({label_rel}): {e}") from e
+        
+        patches_sampled = 0
+        _, HEIGHT, WIDTH = tile_data.shape
+        attempts = 0
+        while patches_sampled < num_samples and attempts < max_attempts:
+            attempts += 1
+            x = int(rng.uniform(0, HEIGHT - size))
+            y = int(rng.uniform(0, WIDTH - size))
+            patch = tile_data[:, x : x + size, y : y + size]
+            
+            # if contains missing values in tci or ndwi, toss out and resample
+            if np.any(patch[0] == 0) or np.any(patch[4] == -999999):
+                continue
+
+            dataset[i * num_samples + patches_sampled] = patch[:16]
+            patches_sampled += 1
+        
+        if patches_sampled < num_samples:
+            label_rel, _, _ = tile_info
+            raise RuntimeError(f"Worker exceeded max retries {max_attempts}, only sampled {patches_sampled}/{num_samples} patches for tile {i} ({label_rel})")
+
+    return dataset
+
+
+def sample_patches_in_disk(tile_infos: List[Tuple], size: int, num_samples: int, 
+                          seed: int, scratch_dir: Path, worker_id: int, max_attempts: int = 10000) -> Path:
+    """Sample patches and stores them in memory mapped file on disk.
+    
+    Parameters
+    ----------
+    tile_infos : List[Tuple]
+        List of tile info tuples to process
+    size : int
+        Patch size (e.g., 64)
+    num_samples : int
+        Number of patches to sample per tile
+    seed : int
+        Random seed for reproducibility
+    scratch_dir : Path
+        Path to scratch directory
+    worker_id : int
+        Worker ID
+    max_attempts : int
+        Maximum number of attempts to fail to sample a patch before giving up
+
+    Returns
+    -------
+    dataset_path : Path
+        Path to the memory mapped file of sampled patches
+    """
+    rng = Random(seed)
+    total_patches = num_samples * len(tile_infos)
+    tmp_file = scratch_dir / f"tmp_{worker_id}.dat"
+    dataset = np.memmap(tmp_file, dtype=np.float32, shape=(total_patches, 16, size, size), mode="w+")
+    
+    try:
+        for i, tile_info in enumerate(tile_infos):
+            try:
+                tile_data = load_tile_for_sampling(tile_info)
+            except Exception as e:
+                label_rel, _, _ = tile_info
+                raise RuntimeError(f"Worker {worker_id} failed to load tile {i} ({label_rel}): {e}") from e
+            
+            patches_sampled = 0
+            _, HEIGHT, WIDTH = tile_data.shape
+            attempts = 0
+            while patches_sampled < num_samples and attempts < max_attempts:
+                attempts += 1
+                x = int(rng.uniform(0, HEIGHT - size))
+                y = int(rng.uniform(0, WIDTH - size))
+                patch = tile_data[:, x : x + size, y : y + size]
+                
+                # if contains missing values in tci or ndwi, toss out and resample
+                if np.any(patch[0] == 0) or np.any(patch[4] == -999999):
+                    continue
+
+                dataset[i * num_samples + patches_sampled] = patch[:16]
+                patches_sampled += 1
+
+            if patches_sampled < num_samples:
+                label_rel, _, _ = tile_info
+                raise RuntimeError(f"Worker {worker_id} exceeded max retries {max_attempts}, only sampled {patches_sampled}/{num_samples} patches for tile {i} ({label_rel})")
+    finally:
+        # Ensure cleanup even if an error occurs
+        dataset.flush()
+        del dataset
+
+    return tmp_file
+
+
+def sample_patches_parallel(label_paths: List[str], size: int, num_samples: int, 
+                          output_file: Path, sample_dirs: List[str], cfg: DictConfig,
+                          seed: int, n_workers: int = None) -> None:
+    """Sample patches in parallel. Strategy will depend on the memory available. If
+    memory is comfortably below the total node memory (on improv you get ~230GB regardless
+    of how many cpus requested), then we can just have each worker fill out their own
+    array and then concatenate them in the parent.
+
+    If memory required for entire array is too close or exceeds total node memory,
+    then each worker will write to a memory mapped array and then combine them at the end.
+    
+    Parameters
+    ----------
+    label_paths : List[str]
+        List of label file paths to process
+    size : int
+        Patch size (e.g., 64)
+    num_samples : int
+        Number of patches to sample per tile
+    output_file : Path
+        Path to save the output .npy file
+    sample_dirs : List[str]
+        List of sample directories
+    cfg : DictConfig
+        Configuration object
+    seed : int
+        Random seed for reproducibility
+    n_workers : int, optional
+        Number of worker processes (defaults to 1)
+    """
+    logger = logging.getLogger('preprocessing')
+    
+    if n_workers is None:
+        n_workers = 1
+    
+    logger.info(f'Specified {n_workers} workers for patch sampling.')
+    n_workers = min(n_workers, len(label_paths))
+    logger.info(f'Using {n_workers} workers for {len(label_paths)} labels...')
+    
+    total_patches = len(label_paths) * num_samples
+    array_shape = (total_patches, 16, size, size)
+    array_dtype = np.float32
+
+    # calculate how much memory required for the entire array (factor of 2 for concatenation operation)
+    total_mem_required = array_shape[0] * array_shape[1] * array_shape[2] * array_shape[3] * np.dtype(array_dtype).itemsize * 2
+    total_mem_available = psutil.virtual_memory().available
+    logger.info(f'Total memory required for the entire array x2: {total_mem_required / 1024**3:.2f} GB')
+    logger.info(f'Total memory available: {total_mem_available / 1024**3:.2f} GB')
+    
+    # divide up the labels into n_workers chunks
+    worker_tile_infos = []
+    batch_sizes = []
+    start_idx = 0
+    labels_per_worker = len(label_paths) // n_workers
+    labels_remainder = len(label_paths) % n_workers
+    for worker_id in range(n_workers):
+        worker_label_count = labels_per_worker + (1 if worker_id < labels_remainder else 0)
+        end_idx = start_idx + worker_label_count
+        labels_chunk = label_paths[start_idx:end_idx]
+        # Convert to tile_info tuples
+        tile_infos_chunk = [(label_path, sample_dirs, cfg) for label_path in labels_chunk]
+        worker_tile_infos.append(tile_infos_chunk)
+        batch_sizes.append(worker_label_count)
+        start_idx += worker_label_count
+        
+    # Log batch distribution
+    logger.info(f'Label distribution per worker: {batch_sizes}')
+    
+    if total_mem_required < total_mem_available * 0.9:
+        # use simple concatenation strategy
+        logger.info('Total memory required is below available memory, using in-memory arrays and concatenation.')
+
+        try:
+            with mp.Pool(n_workers) as pool:
+                results = pool.starmap(sample_patches_in_mem, [(tile_infos, size, num_samples, seed+i*10000) for i, tile_infos in enumerate(worker_tile_infos)])
+        except Exception as e:
+            logger.error(f"Failed during parallel patch sampling (in-memory): {e}")
+            logger.error("One or more worker processes failed during patch sampling")
+            raise RuntimeError(f"Patch sampling failed: {e}") from e
+
+        try:
+            final_arr = np.concatenate(results, axis=0)
+            np.save(output_file, final_arr)
+            logger.info('Sampling complete.')
+        except Exception as e:
+            logger.exception(f"Failed to concatenate results or save output.")
+            raise RuntimeError(f"Failed to save final array: {e}") from e
+    else:
+        logger.info('Total memory required exceeds available memory, using memory mapping strategy.')
+
+        # Use scratch directory for temp files
+        scratch_dir = Path(f"/scratch/floodmapspre")
+        scratch_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Using scratch directory: {scratch_dir}")
+        
+        try:
+            # each worker writes to their own file
+            with mp.Pool(n_workers) as pool:
+                worker_files = pool.starmap(sample_patches_in_disk, [(tile_infos, size, num_samples, seed+i*10000, scratch_dir, i) for i, tile_infos in enumerate(worker_tile_infos)])
+        except Exception as e:
+            logger.error(f"Failed during parallel patch sampling (memory-mapped): {e}")
+            logger.error("One or more worker processes failed during patch sampling")
+            # Clean up any partial files before re-raising
+            if scratch_dir.exists():
+                try:
+                    shutil.rmtree(scratch_dir)
+                    logger.info("Cleaned up scratch directory after worker failure")
+                except Exception as cleanup_e:
+                    logger.warning(f"Failed to clean up scratch directory: {cleanup_e}")
+            raise RuntimeError(f"Patch sampling failed: {e}") from e
+        
+        try:
+            # combine files into one memory mapped array
+            final_npy = open_memmap(output_file, mode='w+', dtype='float32', shape=array_shape)
+            start_idx = 0
+            for i, f in enumerate(worker_files):
+                labels_in_worker = len(worker_tile_infos[i])
+                chunk_shape = (num_samples * labels_in_worker, 16, size, size)
+                worker_data = np.memmap(f, dtype=np.float32, shape=chunk_shape, mode="r")  # load worker memmap
+                end_idx = start_idx + worker_data.shape[0]
+                final_npy[start_idx:end_idx] = worker_data  # copy into final memmap
+                start_idx = end_idx
+
+            # Finalize and clean up
+            final_npy.flush()
+            del final_npy
+            logger.info('Memory-mapped sampling complete.')
+        except Exception as e:
+            logger.exception(f"Failed to combine worker files or save final output.")
+            raise RuntimeError(f"Failed to create final memory-mapped array: {e}") from e
+        finally:
+            # Always clean up scratch directory
+            if scratch_dir.exists():
+                try:
+                    shutil.rmtree(scratch_dir)
+                    logger.info("Cleaned up scratch directory")
+                except Exception as cleanup_e:
+                    logger.warning(f"Failed to clean up scratch directory: {cleanup_e}")
+
+
 def save_event_splits(train_labels: List[str], val_labels: List[str], test_labels: List[str],
                       output_dir: Path, seed: int, timestamp: str, data_type: str = "s2_manual") -> None:
     """Save event splits to a YAML file for reproducibility and reference.
@@ -401,14 +606,19 @@ def main(cfg: DictConfig) -> None:
     logger.addHandler(handler)
     logger.propagate = False
 
+    # Set default number of workers
+    if not hasattr(cfg.preprocess, 'n_workers'):
+        cfg.preprocess.n_workers = 1
+
     # Create timestamp for logging
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    logger.info(f'''Starting S2 weak labeling preprocessing:
+    logger.info(f'''Starting S2 manual labeling preprocessing:
         Date:            {timestamp}
         Patch size:      {cfg.preprocess.size}
         Samples per tile: {cfg.preprocess.samples}
         Sampling method: {cfg.preprocess.method}
         Random seed:     {cfg.preprocess.seed}
+        Workers:         {cfg.preprocess.n_workers}
         Sample dir(s):   {cfg.preprocess.s2.sample_dirs}
         Suffix:          {getattr(cfg.preprocess, 'suffix', None)}
     ''')
@@ -460,13 +670,25 @@ def main(cfg: DictConfig) -> None:
     logger.info('Training mean and std statistics saved.')
     
     if cfg.preprocess.method == 'random':
-        rng = Random(cfg.preprocess.seed)
-        random_crop(train_labels, cfg.preprocess.size, cfg.preprocess.samples, rng, pre_sample_dir, sample_dirs_list, cfg, typ="train")
-        random_crop(val_labels, cfg.preprocess.size, cfg.preprocess.samples, rng, pre_sample_dir, sample_dirs_list, cfg, typ="val")
-        random_crop(test_labels, cfg.preprocess.size, cfg.preprocess.samples, rng, pre_sample_dir, sample_dirs_list, cfg, typ="test")
-        logger.info('Random samples generated.')
+        # Process each split using parallel sampling
+        for split_name, labels in [('train', train_labels), ('val', val_labels), ('test', test_labels)]:
+            if len(labels) == 0:
+                logger.warning(f'No labels for {split_name} split, skipping...')
+                continue
+            
+            output_file = pre_sample_dir / f'{split_name}_patches.npy'
+            logger.info(f'Processing {split_name} split with {len(labels)} labels...')
+            
+            sample_patches_parallel(
+                labels, cfg.preprocess.size, cfg.preprocess.samples, output_file,
+                sample_dirs_list, cfg, cfg.preprocess.seed, cfg.preprocess.n_workers
+            )
+        
+        logger.info('Parallel patch sampling complete.')
+    else:
+        raise ValueError(f"Unsupported sampling method: {cfg.preprocess.method}")
 
-    logger.debug('Preprocessing complete.')
+    logger.info('Preprocessing complete.')
 
 if __name__ == '__main__':
     main()

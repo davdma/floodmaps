@@ -132,8 +132,19 @@ def GetHU4Codes(prism_bbox, cfg):
 
     return huc4_codes
 
-def cloud_null_percentage(stac_provider, item, item_crs, bbox):
-    """Calculates the percentage of pixels in the bounding box of the S2 image that are cloud or null."""
+def null_percentage(stac_provider, item, item_crs, bbox):
+    """Calculates the percentage of pixels in the bounding box of the S2 image that are missing."""
+    b02_name = stac_provider.get_asset_names("s2")["B02"]
+    item_href = stac_provider.sign_asset_href(item.assets[b02_name].href)
+
+    conversion = transform(PRISM_CRS, item_crs, (bbox[0], bbox[2]), (bbox[1], bbox[3]))
+    img_bbox = conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]
+
+    out_image, _ = rasterio.merge.merge([item_href], bounds=img_bbox)
+    return int(((out_image == 0).sum() / out_image.size) * 100)
+
+def cloud_percentage(stac_provider, item, item_crs, bbox):
+    """Calculates the percentage of pixels in the bounding box of the S2 image that are cloud."""
     scl_name = stac_provider.get_asset_names("s2")["SCL"]
     item_href = stac_provider.sign_asset_href(item.assets[scl_name].href)
 
@@ -141,7 +152,7 @@ def cloud_null_percentage(stac_provider, item, item_crs, bbox):
     img_bbox = conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]
 
     out_image, _ = rasterio.merge.merge([item_href], bounds=img_bbox)
-    return int((np.isin(out_image, [0, 8, 9]).sum() / out_image.size) * 100)
+    return int((np.isin(out_image, [8, 9]).sum() / out_image.size) * 100)
 
 # we will choose a UTM zone CRS already given and stick to it for rest of sample data!
 def pipeline_TCI(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
@@ -866,7 +877,8 @@ def pipeline_NLCD(dir_path: Path, save_as, year, dst_shape, dst_crs, dst_transfo
     with rasterio.open(dir_path / f'{save_as}_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_img.shape[-2], width=rgb_img.shape[-1], crs=dst_crs, dtype=rgb_img.dtype, transform=dst_transform, nodata=None) as dst:
         dst.write(rgb_img)
 
-def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_path: Path, cfg, manual_crs=None):
+def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_path: Path, cfg, manual_crs=None,
+                 max_null_percentage=0, min_cloud_percentage=99):
     """Samples S2 imagery for a high precipitation event based on parameters and generates accompanying rasters.
     
     Note to developers: the script simplifies normalization onto a consistent grid by finding any common CRS shared by S2 and S1 products.
@@ -934,14 +946,22 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
         # filter FOR high cloud coverage tiles (opposite of original logic)
         item_crs = pe.ext(item).crs_string
         try:
-            coverpercentage = cloud_null_percentage(stac_provider, item, item_crs, prism_bbox)
-            logger.info(f'Cloud null percentage for item {item.id}: {coverpercentage}')
+            nullpercentage = null_percentage(stac_provider, item, item_crs, prism_bbox)
+            coverpercentage = cloud_percentage(stac_provider, item, item_crs, prism_bbox)
+            logger.info(f'Null percentage for item {item.id}: {nullpercentage}')
+            logger.info(f'Cloud percentage for item {item.id}: {coverpercentage}')
         except Exception as err:
-            logger.exception(f'Cloud null percentage calculation error for item {item.id}.')
+            logger.exception(f'Cloud / null percentage calculation error for item {item.id}.')
             raise err
 
+        # Filter out tiles with high null percentage
+        max_null_pct = cfg.sampling.get('max_null_percentage', max_null_percentage)
+        if nullpercentage > max_null_pct:
+            logger.debug(f'Sample {item.id} near event {event_date}, at {minx}, {miny}, {maxx}, {maxy} rejected due to {nullpercentage}% > {max_null_pct}% null percentage.')
+            continue
+
         # Keep tiles with HIGH cloud coverage (reverse the original logic)
-        min_cloud_pct = cfg.sampling.get('min_cloud_percentage', 99)
+        min_cloud_pct = cfg.sampling.get('min_cloud_percentage', min_cloud_percentage)
         if coverpercentage < min_cloud_pct:
             logger.debug(f'Sample {item.id} near event {event_date}, at {minx}, {miny}, {maxx}, {maxy} rejected due to only {coverpercentage}% cloud cover (need >= {min_cloud_pct}%).')
             continue
@@ -1087,6 +1107,8 @@ def main(cfg: DictConfig) -> None:
     
     cfg.sampling parameters
     -----------------------
+    max_null_percentage : int, optional
+        Maximum null cover percentage for filtering S2 tiles (default: 0).
     min_cloud_percentage : int, optional
         Minimum cloud cover percentage for filtering S2 tiles (default: 99).
     days_before : int
@@ -1138,6 +1160,7 @@ def main(cfg: DictConfig) -> None:
     # log sampling parameters used
     rootLogger.info(
         "S2 cloudy tile sampling parameters used:\n"
+        f"  Max null coverage percentage: {cfg.sampling.get('max_null_percentage', 0)}\n"
         f"  Min cloud coverage percentage: {cfg.sampling.get('min_cloud_percentage', 99)}\n"
         f"  Days before event: {cfg.sampling.before}\n"
         f"  Days after event: {cfg.sampling.after}\n"

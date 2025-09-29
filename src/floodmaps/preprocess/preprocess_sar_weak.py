@@ -801,8 +801,7 @@ def main(cfg: DictConfig) -> None:
     logger.propagate = False
 
     # Set default number of workers
-    if not hasattr(cfg.preprocess, 'n_workers'):
-        cfg.preprocess.n_workers = 1
+    n_workers = getattr(cfg.preprocess, 'n_workers', 1)
 
     # Create timestamp for logging
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -815,7 +814,7 @@ def main(cfg: DictConfig) -> None:
         Patch cloud threshold: {cfg.preprocess.cloud_threshold}
         Tile cloud threshold: {getattr(cfg.preprocess, 'tile_cloud_threshold', 0.25)}
         Random seed:     {cfg.preprocess.seed}
-        Workers:         {cfg.preprocess.n_workers}
+        Workers:         {n_workers}
         Sample dir(s):   {cfg.preprocess.s1.sample_dirs}
         Label dir(s):    {cfg.preprocess.s1.label_dirs}
     ''')
@@ -871,7 +870,7 @@ def main(cfg: DictConfig) -> None:
 
     # filter cloudy tiles in parallel:
     tile_cloud_threshold = getattr(cfg.preprocess, 'tile_cloud_threshold', 0.25)
-    filtered_events = filter_cloud_tiles_parallel(selected_events, tile_cloud_threshold, cfg.preprocess.n_workers)
+    filtered_events = filter_cloud_tiles_parallel(selected_events, tile_cloud_threshold, n_workers)
     logger.info(f'# passed tile cloud threshold (<={tile_cloud_threshold}): {len(filtered_events)}/{len(selected_events)}')
 
     if len(filtered_events) == 0:
@@ -909,7 +908,7 @@ def main(cfg: DictConfig) -> None:
 
     # Compute statistics using parallel Welford's algorithm
     logger.info('Computing training statistics...')
-    mean_cont, std_cont = compute_statistics_parallel(train_tiles, filter_str, cfg.preprocess.n_workers)
+    mean_cont, std_cont = compute_statistics_parallel(train_tiles, filter_str, n_workers)
     
     # Add binary channel statistics (mean=0, std=1)
     bchannels = 3  # waterbody, roads, flowlines
@@ -937,7 +936,7 @@ def main(cfg: DictConfig) -> None:
             
             sample_patches_parallel(
                 tiles, cfg.preprocess.size, cfg.preprocess.samples, output_file, cfg.preprocess.cloud_threshold, 
-                filter_str, cfg.preprocess.seed, cfg.preprocess.n_workers
+                filter_str, cfg.preprocess.seed, n_workers
             )
         
         logger.info('Parallel patch sampling complete.')

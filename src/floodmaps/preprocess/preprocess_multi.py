@@ -514,8 +514,7 @@ def main(cfg: DictConfig) -> None:
     logger.propagate = False
 
     # Set default number of workers
-    if not hasattr(cfg.preprocess, 'n_workers'):
-        cfg.preprocess.n_workers = 1
+    n_workers = getattr(cfg.preprocess, 'n_workers', 1)
 
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     logger.info(f'''Starting S2 weak labeling preprocessing:
@@ -525,7 +524,7 @@ def main(cfg: DictConfig) -> None:
         Multitemporal slices: {cfg.preprocess.slices}
         Sampling method: {cfg.preprocess.method}
         Random seed:     {cfg.preprocess.seed}
-        Workers:         {cfg.preprocess.n_workers}
+        Workers:         {n_workers}
         Sample dir(s):   {cfg.preprocess.multi.sample_dirs}
         Suffix:          {getattr(cfg.preprocess, 'suffix', None)}
     ''')
@@ -601,7 +600,7 @@ def main(cfg: DictConfig) -> None:
 
     # calculate mean and std of train tiles
     logger.info('Calculating training statistics...')
-    mean, std = compute_statistics_parallel(train_multi, cfg.preprocess.n_workers)
+    mean, std = compute_statistics_parallel(train_multi, n_workers)
     logger.info('Mean and std of training tiles calculated.')
 
     # also store training vv, vh mean std statistics in file
@@ -622,7 +621,7 @@ def main(cfg: DictConfig) -> None:
             
             sample_patches_parallel(
                 events, cfg.preprocess.size, cfg.preprocess.samples, cfg.preprocess.slices, 
-                output_file, cfg.preprocess.seed, cfg.preprocess.n_workers
+                output_file, cfg.preprocess.seed, n_workers
             )
         
         logger.info('Parallel patch sampling complete.')

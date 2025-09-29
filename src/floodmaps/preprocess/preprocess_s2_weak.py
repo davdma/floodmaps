@@ -674,8 +674,7 @@ def main(cfg: DictConfig) -> None:
     logger.propagate = False
 
     # Set default number of workers
-    if not hasattr(cfg.preprocess, 'n_workers'):
-        cfg.preprocess.n_workers = 1
+    n_workers = getattr(cfg.preprocess, 'n_workers', 1)
 
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     logger.info(f'''Starting S2 weak labeling preprocessing:
@@ -684,7 +683,7 @@ def main(cfg: DictConfig) -> None:
         Samples per tile: {cfg.preprocess.samples}
         Sampling method: {cfg.preprocess.method}
         Random seed:     {cfg.preprocess.seed}
-        Workers:         {cfg.preprocess.n_workers}
+        Workers:         {n_workers}
         Sample dir(s):   {cfg.preprocess.s2.sample_dirs}
         Label dir(s):    {cfg.preprocess.s2.label_dirs}
         Suffix:          {getattr(cfg.preprocess, 'suffix', None)}
@@ -770,7 +769,7 @@ def main(cfg: DictConfig) -> None:
 
     # Compute statistics using parallel Welford's algorithm
     logger.info('Computing training statistics...')
-    mean_cont, std_cont = compute_statistics_parallel(train_tiles, cfg.preprocess.n_workers)
+    mean_cont, std_cont = compute_statistics_parallel(train_tiles, n_workers)
     
     # Add binary channel statistics (mean=0, std=1)
     bchannels = 3  # waterbody, roads, flowlines
@@ -798,7 +797,7 @@ def main(cfg: DictConfig) -> None:
             
             sample_patches_parallel(
                 tiles, cfg.preprocess.size, cfg.preprocess.samples, output_file, 
-                cfg.preprocess.seed, cfg.preprocess.n_workers
+                cfg.preprocess.seed, n_workers
             )
         
         logger.info('Parallel patch sampling complete.')

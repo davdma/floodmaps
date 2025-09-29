@@ -607,8 +607,7 @@ def main(cfg: DictConfig) -> None:
     logger.propagate = False
 
     # Set default number of workers
-    if not hasattr(cfg.preprocess, 'n_workers'):
-        cfg.preprocess.n_workers = 1
+    n_workers = getattr(cfg.preprocess, 'n_workers', 1)
 
     # Create timestamp for logging
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -618,7 +617,7 @@ def main(cfg: DictConfig) -> None:
         Samples per tile: {cfg.preprocess.samples}
         Sampling method: {cfg.preprocess.method}
         Random seed:     {cfg.preprocess.seed}
-        Workers:         {cfg.preprocess.n_workers}
+        Workers:         {n_workers}
         Sample dir(s):   {cfg.preprocess.s2.sample_dirs}
         Suffix:          {getattr(cfg.preprocess, 'suffix', None)}
     ''')
@@ -681,7 +680,7 @@ def main(cfg: DictConfig) -> None:
             
             sample_patches_parallel(
                 labels, cfg.preprocess.size, cfg.preprocess.samples, output_file,
-                sample_dirs_list, cfg, cfg.preprocess.seed, cfg.preprocess.n_workers
+                sample_dirs_list, cfg, cfg.preprocess.seed, n_workers
             )
         
         logger.info('Parallel patch sampling complete.')

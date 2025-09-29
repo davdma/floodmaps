@@ -430,8 +430,8 @@ def sample_patches_in_mem(tiles: List[Tuple], size: int, num_samples: int, cloud
             patches_sampled += 1
         
         if patches_sampled < num_samples:
-            _, _, _, eid, img_dt = tile
-            raise RuntimeError(f"Worker exceeded max sampling attempts {max_attempts}, only sampled {patches_sampled}/{num_samples} patches for tile {i} (eid: {eid}, dt: {img_dt})")
+            event_path, _, _, eid, img_dt = tile
+            raise RuntimeError(f"Worker exceeded max sampling attempts {max_attempts}, only sampled {patches_sampled}/{num_samples} patches for tile {i} (event_path: {event_path}, eid: {eid}, dt: {img_dt})")
 
     return dataset
 
@@ -504,8 +504,8 @@ def sample_patches_in_disk(tiles: List[Tuple], size: int, num_samples: int, clou
                 patches_sampled += 1
 
             if patches_sampled < num_samples:
-                _, _, _, eid, img_dt = tile
-                raise RuntimeError(f"Worker {worker_id} exceeded max sampling attempts {max_attempts}, only sampled {patches_sampled}/{num_samples} patches for tile {i} (eid: {eid}, dt: {img_dt})")
+                event_path, _, _, eid, img_dt = tile
+                raise RuntimeError(f"Worker {worker_id} exceeded max sampling attempts {max_attempts}, only sampled {patches_sampled}/{num_samples} patches for tile {i} (event_path: {event_path}, eid: {eid}, dt: {img_dt})")
     finally:
         # Ensure cleanup even if an error occurs
         dataset.flush()

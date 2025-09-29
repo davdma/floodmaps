@@ -51,6 +51,7 @@ wandb:
     project: debug
     group:
     num_sample_predictions: 40
+    percent_wet_patches: 0.5  # Percentage of wet patches in sample predictions (0.0 to 1.0)
 
 logging:
     grad_norm_freq: 10

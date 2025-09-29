@@ -33,3 +33,6 @@ checkpoint_dir: ${.output_dir}/chkpt
 experiment_dir: ${.output_dir}/experiments
 benchmarks_dir: ${.output_dir}/benchmarks
 tuning_dir: ${.output_dir}/tuning
+
+### Model paths
+model_dir: ${.data_dir}/models

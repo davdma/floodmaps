@@ -402,8 +402,8 @@ def sample_patches_in_mem(tiles: List[Tuple], size: int, num_samples: int, cloud
         try:
             tile_data, tile_mask = load_tile_for_sampling(tile, filter_type)
         except Exception as e:
-            _, _, _, eid, img_dt = tile
-            raise RuntimeError(f"Worker failed to load tile {i} (eid: {eid}, dt: {img_dt}): {e}") from e
+            event_path, _, _, eid, img_dt = tile
+            raise RuntimeError(f"Worker failed to load tile {i} (event_path: {event_path}, eid: {eid}, dt: {img_dt}): {e}") from e
         
         patches_sampled = 0
         _, HEIGHT, WIDTH = tile_data.shape
@@ -476,8 +476,8 @@ def sample_patches_in_disk(tiles: List[Tuple], size: int, num_samples: int, clou
             try:
                 tile_data, tile_mask = load_tile_for_sampling(tile, filter_type)
             except Exception as e:
-                _, _, _, eid, img_dt = tile
-                raise RuntimeError(f"Worker {worker_id} failed to load tile {i} (eid: {eid}, dt: {img_dt}): {e}") from e
+                event_path, _, _, eid, img_dt = tile
+                raise RuntimeError(f"Worker {worker_id} failed to load tile {i} (event_path: {event_path}, eid: {eid}, dt: {img_dt}): {e}") from e
             
             patches_sampled = 0
             _, HEIGHT, WIDTH = tile_data.shape

@@ -20,8 +20,8 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 
 from floodmaps.models.model import SARWaterDetector
-from floodmaps.utils.utils import (Metrics, EarlyStopper,
-                         SARChannelIndexer, get_model_params, nlcd_to_rgb)
+from floodmaps.utils.utils import (flatten_dict, Metrics, EarlyStopper,
+                         SARChannelIndexer, get_model_params, nlcd_to_rgb, get_samples_with_wet_percentage)
 from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
 from floodmaps.utils.metrics import compute_nlcd_metrics
 
@@ -540,7 +540,16 @@ def sample_predictions(model, sample_set, mean, std, loss_config, cfg, seed=2433
     model.to('cpu')
     model.eval()
     rng = Random(seed)
-    samples = rng.sample(range(0, len(sample_set)), cfg.wandb.num_sample_predictions)
+    
+    # Get samples with specified percentage of wet patches
+    percent_wet = cfg.wandb.get('percent_wet_patches', 0.5)  # Default to 0.5 if not specified
+    samples = get_samples_with_wet_percentage(sample_set,
+        cfg.wandb.num_sample_predictions,
+        cfg.train.batch_size,
+        cfg.train.num_workers,
+        percent_wet,
+        rng
+    )
 
     center_1 = (cfg.data.size - cfg.data.window) // 2
     center_2 = center_1 + cfg.data.window
@@ -754,12 +763,15 @@ def run_experiment_s1(cfg, ad_cfg=None):
 
     # initialize wandb run
     total_params, trainable_params, param_size_in_mb = get_model_params(model)
+    
+    # convert config to flat dict for logging
+    config_dict = flatten_dict(OmegaConf.to_container(cfg, resolve=True))
     run = wandb.init(
         project=cfg.wandb.project,
         group=cfg.wandb.group,
         config={
             "dataset": "Sentinel1",
-            **cfg.to_dict(),
+            **config_dict,
             "training_size": len(train_set),
             "validation_size": len(val_set),
             "test_size": len(test_set) if cfg.eval.mode == 'test' else None,

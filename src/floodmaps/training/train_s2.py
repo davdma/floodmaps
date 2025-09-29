@@ -22,7 +22,7 @@ from omegaconf import DictConfig, OmegaConf
 import hydra
 
 from floodmaps.models.model import S2WaterDetector
-from floodmaps.utils.utils import get_model_params, Metrics, EarlyStopper, ChannelIndexer, nlcd_to_rgb
+from floodmaps.utils.utils import flatten_dict, get_model_params, Metrics, EarlyStopper, ChannelIndexer, nlcd_to_rgb, get_samples_with_wet_percentage
 from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
 from floodmaps.utils.metrics import compute_nlcd_metrics
 
@@ -318,10 +318,28 @@ def save_experiment(cls_weights, disc_weights, metrics, cfg, run):
     with open(path / f"wandb_info.json", "w") as f:
         json.dump(wandb_info, f, indent=4)
 
-def sample_predictions(model, sample_set, mean, std, cfg, seed=24330):
+def sample_predictions(model, sample_set, mean, std, cfg, percent_wet_patches=0.5, seed=24330):
     """Generate predictions on a subset of images in the validation set for wandb logging.
     
-    TO DO: FIX CHANNEL INDEXING HARDCODING. Need more flexible way to handle channels."""
+    TODO: FIX CHANNEL INDEXING HARDCODING. Need more flexible way to handle channels.
+    
+    Parameters
+    ----------
+    model : torch.nn.Module
+        The model to evaluate
+    sample_set : torch.utils.data.Dataset
+        The dataset to sample predictions from
+    mean : torch.Tensor
+        The mean of the dataset
+    std : torch.Tensor
+        The standard deviation of the dataset
+    cfg : DictConfig
+        The configuration dictionary
+    percent_wet_patches : float, optional
+        The percentage of wet patches to visualize
+    seed : int, optional
+        The seed for the random number generator
+    """
     if cfg.wandb.num_sample_predictions <= 0:
         return None
 
@@ -355,7 +373,15 @@ def sample_predictions(model, sample_set, mean, std, cfg, seed=24330):
     model.to('cpu')
     model.eval()
     rng = Random(seed)
-    samples = rng.sample(range(0, len(sample_set)), cfg.wandb.num_sample_predictions)
+    
+    # Get samples with specified percentage of wet patches
+    samples = get_samples_with_wet_percentage(sample_set,
+        cfg.wandb.num_sample_predictions,
+        cfg.train.batch_size,
+        cfg.train.num_workers,
+        percent_wet_patches,
+        rng
+    )
 
     for id, k in enumerate(samples):
         # get all images to shape (H, W, C) with C = 1 or 3 (1 for grayscale, 3 for RGB)
@@ -534,12 +560,15 @@ def run_experiment_s2(cfg):
 
     # initialize wandb run
     total_params, trainable_params, param_size_in_mb = get_model_params(model)
+
+    # convert config to flat dict for logging
+    config_dict = flatten_dict(OmegaConf.to_container(cfg, resolve=True))
     run = wandb.init(
         project=cfg.wandb.project,
         group=cfg.wandb.group,
         config={
             "dataset": "Sentinel2",
-            **cfg.to_dict(),
+            **config_dict,
             "training_size": len(train_set),
             "validation_size": len(val_set),
             "test_size": len(test_set) if cfg.eval.mode == 'test' else None,
@@ -564,8 +593,9 @@ def run_experiment_s2(cfg):
             save_experiment(cls_weights, disc_weights, fmetrics, cfg, run)
 
         # log predictions on validation set using wandb
+        percent_wet = cfg.wandb.get('percent_wet_patches', 0.5)  # Default to 0.5 if not specified
         pred_table = sample_predictions(model, test_set if cfg.eval.mode == 'test' else val_set,
-                                        train_mean, train_std, cfg)
+                                        train_mean, train_std, cfg, percent_wet_patches=percent_wet)
         run.log({"model_val_predictions": pred_table})
     except Exception as e:
         print("An exception occurred during training!")

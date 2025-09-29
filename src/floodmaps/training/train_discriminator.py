@@ -20,7 +20,7 @@ from omegaconf import DictConfig, OmegaConf
 from floodmaps.training.loss import BCEDiceLoss, TverskyLoss
 from floodmaps.models.discriminator import Classifier1, Classifier2, Classifier3
 from floodmaps.training.dataset import FloodSampleDataset
-from floodmaps.utils.utils import trainMeanStd, wet_label, EarlyStopper, ChannelIndexer
+from floodmaps.utils.utils import trainMeanStd, wet_label, EarlyStopper, ChannelIndexer, get_samples_with_wet_percentage
 
 MODEL_NAMES = ['c1', 'c2', 'c3']
 LOSS_NAMES = ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
@@ -250,7 +250,16 @@ def sample_predictions(model, val_set, mean, std, config, seed=24330):
     
     model.to('cpu')
     rng = Random(seed)
-    samples = rng.sample(range(0, len(val_set)), config['num_sample_predictions'])
+    
+    # Get samples with specified percentage of wet patches
+    percent_wet = config.get('percent_wet_patches', 0.5)  # Default to 0.5 if not specified
+    samples = get_samples_with_wet_percentage(val_set,
+        config['num_sample_predictions'],
+        config['batch_size'],
+        config['num_workers'],
+        percent_wet,
+        rng
+    )
 
     for id, k in enumerate(samples):
         # get all images to shape (H, W, C) with C = 1 or 3 (1 for grayscale, 3 for RGB)

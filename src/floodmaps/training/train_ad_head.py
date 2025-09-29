@@ -24,7 +24,7 @@ from floodmaps.training.dataset import DespecklerSARDataset
 from floodmaps.training.optim import get_optimizer
 from floodmaps.training.scheduler import get_scheduler
 from floodmaps.training.loss import get_ad_loss
-from floodmaps.utils.utils import (ADEarlyStopper, Metrics, BetaScheduler, get_gradient_norm,
+from floodmaps.utils.utils import (flatten_dict, ADEarlyStopper, Metrics, BetaScheduler, get_gradient_norm,
                    get_model_params, print_model_params_and_grads)
 from floodmaps.utils.metrics import (denormalize, TV_loss, var_laplacian, ssi, get_random_batch,
                     enl, RIS, quality_m)
@@ -647,12 +647,15 @@ def run_experiment_ad(cfg):
 
     # initialize wandb run
     total_params, trainable_params, param_size_in_mb = get_model_params(model)
+    
+    # convert config to flat dict for logging
+    config_dict = flatten_dict(OmegaConf.to_container(cfg, resolve=True))
     run = wandb.init(
         project=cfg.wandb.project,
         group=cfg.wandb.group,
         config={
             "dataset": "Sentinel1",
-            **cfg.to_dict(),
+            **config_dict,
             "training_size": len(train_set),
             "validation_size": len(val_set),
             "test_size": len(test_set) if cfg.eval.mode == 'test' else None,

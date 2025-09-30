@@ -22,7 +22,7 @@ def run_s2(parameters, cfg: DictConfig):
     cfg.model.unet.dropout = parameters['dropout']
     fmetrics = run_experiment_s2(cfg)
     results = fmetrics.get_metrics(split='val')
-    return results['val f1']
+    return results['core metrics']['val f1']
 
 def tuning_s2(cfg: DictConfig) -> None:
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -98,7 +98,7 @@ def tuning_s2(cfg: DictConfig) -> None:
 def run_s1(parameters, cfg: DictConfig):
     """For setting the params in the cfg object make sure they are predeclared
     either as None or as some value to avoid error"""
-    cfg.wandb.project = 'Texas_S1_NoDEM_Tuning'
+    cfg.wandb.project = 'S1_NoDEM_All_Tuning'
     cfg.wandb.group = 'UNet'
     cfg.train.loss = parameters['loss']
     cfg.train.lr = parameters['learning_rate']
@@ -107,7 +107,7 @@ def run_s1(parameters, cfg: DictConfig):
     ad_cfg = getattr(cfg, 'ad', None)
     fmetrics = run_experiment_s1(cfg, ad_cfg=ad_cfg)
     results = fmetrics.get_metrics(split='val', partition='shift_invariant')
-    return results['val f1']
+    return results['core metrics']['val f1']
 
 def tuning_s1(cfg: DictConfig) -> None:
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -122,16 +122,17 @@ def tuning_s1(cfg: DictConfig) -> None:
     # define the variable you want to optimize
     # We want to create model w dem and model wo dem
     problem = HpProblem()
-    problem.add_hyperparameter((0.3, 0.45), "alpha")
+    # problem.add_hyperparameter((0.3, 0.45), "alpha")
     problem.add_hyperparameter((0.00001, 0.01), "learning_rate") # real parameter
-    problem.add_hyperparameter((0.10, 0.30), "dropout")
+    problem.add_hyperparameter((0.05, 0.40), "dropout")
     problem.add_hyperparameter(["BCELoss", "BCEDiceLoss", "TverskyLoss"], "loss")
+    problem.add_hyperparameter(['Constant', 'ReduceLROnPlateau'], 'LR_scheduler')
 
     # optional autodespeckler CNN first
-    problem.add_hyperparameter([1, 2, 3, 4, 5], "AD_num_layers")
-    problem.add_hyperparameter([3, 5, 7], "AD_kernel_size")
-    problem.add_hyperparameter((0.05, 0.30), "AD_dropout")
-    problem.add_hyperparameter(["leaky_relu", "relu"], "AD_activation_func")
+    # problem.add_hyperparameter([1, 2, 3, 4, 5], "AD_num_layers")
+    # problem.add_hyperparameter([3, 5, 7], "AD_kernel_size")
+    # problem.add_hyperparameter((0.05, 0.30), "AD_dropout")
+    # problem.add_hyperparameter(["leaky_relu", "relu"], "AD_activation_func")
 
     # save problem to json
     save_problem(problem, search_dir / 'problem.json')

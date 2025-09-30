@@ -224,8 +224,13 @@ class FloodSampleSARDataset(Dataset):
         self.transform = transform
         self.seed = seed
 
-        # first load data in
-        self.dataset = np.load(self.sample_dir / f"{typ}_patches.npy")
+        base = np.load(self.sample_dir / f"{typ}_patches.npy")
+
+        # One-time channel selection to avoid per-sample advanced indexing copies
+        if not all(self.channels):
+            base = np.ascontiguousarray(base[:, self.channels, :, :])
+        
+        self.dataset = base
 
         if random_flip:
             self.random = Random(seed)
@@ -234,7 +239,7 @@ class FloodSampleSARDataset(Dataset):
         return self.dataset.shape[0]
 
     def __getitem__(self, idx):
-        patch = self.dataset[idx, self.channels, :, :]
+        patch = self.dataset[idx]
         image = torch.from_numpy(patch[:-5, :, :])
         label = torch.from_numpy(patch[-5, :, :]).unsqueeze(0)
         supplementary = torch.from_numpy(patch[-4:, :, :])
@@ -319,8 +324,13 @@ class FloodSampleS2Dataset(Dataset):
         self.transform = transform
         self.seed = seed
 
-        # first load data in
-        self.dataset = np.load(self.sample_dir / f"{typ}_patches.npy")
+        base = np.load(self.sample_dir / f"{typ}_patches.npy")
+
+        # One-time channel selection to avoid per-sample advanced indexing copies
+        if not all(self.channels):
+            base = np.ascontiguousarray(base[:, self.channels, :, :])
+        
+        self.dataset = base
 
         if random_flip:
             self.random = Random(seed)
@@ -329,7 +339,7 @@ class FloodSampleS2Dataset(Dataset):
         return self.dataset.shape[0]
 
     def __getitem__(self, idx):
-        patch = self.dataset[idx, self.channels, :, :]
+        patch = self.dataset[idx]
         image = torch.from_numpy(patch[:-5, :, :])
         label = torch.from_numpy(patch[-5, :, :]).unsqueeze(0)
         supplementary = torch.from_numpy(patch[-4:, :, :])

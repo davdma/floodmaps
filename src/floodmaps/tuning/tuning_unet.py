@@ -68,7 +68,7 @@ def tuning_s2(cfg: DictConfig) -> None:
 
         if int(cfg.tuning.run_index) >= 1:
             # fit model from previous checkpointed search
-            search.fit_surrogate(search_dir / 'all.csv')
+            search.fit_surrogate(str(search_dir / 'all.csv'))
 
             # execute search
             results = search.search(max_evals=cfg.tuning.max_evals, timeout=23*3600)
@@ -157,7 +157,7 @@ def tuning_s1(cfg: DictConfig) -> None:
 
         if int(cfg.tuning.run_index) >= 1:
             # fit model from previous checkpointed search
-            search.fit_surrogate(search_dir / 'all.csv')
+            search.fit_surrogate(str(search_dir / 'all.csv'))
 
             # execute search
             results = search.search(max_evals=cfg.tuning.max_evals, timeout=23*3600)

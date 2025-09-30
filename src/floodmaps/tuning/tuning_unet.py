@@ -14,7 +14,7 @@ from floodmaps.training.train_sar import run_experiment_s1
 from floodmaps.utils.tuning_utils import load_stopper_info, save_stopper_info, print_save_best_params, save_problem
 
 def run_s2(parameters, cfg: DictConfig):
-    cfg.wandb.project = 'Texas_S2_NoDEM_Tuning'
+    cfg.wandb.project = 'S2_NoDEM_All_Clouds_Tuning'
     cfg.wandb.group = 'UNet'
     cfg.train.loss = parameters['loss']
     cfg.train.lr = parameters['learning_rate']
@@ -31,7 +31,9 @@ def tuning_s2(cfg: DictConfig) -> None:
     print("Running tuning script on:", hostname)
     print("Current timestamp:", timestamp)
     print(f'Beginning tuning for s2 experiment {cfg.tuning.experiment_name} for {cfg.tuning.max_evals} max evals using random seed {cfg.tuning.random_state}.')
-    search_dir = Path(cfg.paths.tuning_dir) / 's2' / cfg.tuning.experiment_name
+    use_weak = getattr(cfg.data, 'use_weak', False)
+    dataset_type = 's2_weak' if use_weak else 's2'
+    search_dir = Path(cfg.paths.tuning_dir) / dataset_type / cfg.tuning.experiment_name
     search_dir.mkdir(parents=True, exist_ok=True)
 
     # define the variable you want to optimize
@@ -46,6 +48,9 @@ def tuning_s2(cfg: DictConfig) -> None:
     # save problem to json
     save_problem(problem, search_dir / 'problem.json')
 
+    # pass in cfg object to run experiment
+    method_kwargs = {"run_function_kwargs": {"cfg": cfg}}
+
     # load in early stopping metrics if available
     if cfg.tuning.early_stopping:
         early_stopper = SearchEarlyStopping(patience=cfg.tuning.patience)
@@ -53,17 +58,10 @@ def tuning_s2(cfg: DictConfig) -> None:
             _best_objective, _n_lower = load_stopper_info(search_dir / 'stopper.json')
             early_stopper._best_objective = _best_objective
             early_stopper._n_lower = _n_lower
-        method_kwargs = {"callbacks": [early_stopper]}
-    else:
-        method_kwargs = dict()
-    
-    # pass in cfg object to run experiment
-    run_function_kwargs = {
-        'cfg': cfg
-    }
+        method_kwargs.update({"callbacks": [early_stopper]})
 
     # define the evaluator to distribute the computation
-    with Evaluator.create(run_s2, method="process", method_kwargs=method_kwargs, run_function_kwargs=run_function_kwargs) as evaluator:
+    with Evaluator.create(run_s2, method="process", method_kwargs=method_kwargs) as evaluator:
         print(f"Created new evaluator with {evaluator.num_workers} \
             worker{'s' if evaluator.num_workers > 1 else ''} and config: {method_kwargs}")
         search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=cfg.tuning.random_state)
@@ -118,7 +116,7 @@ def tuning_s1(cfg: DictConfig) -> None:
     print("Running tuning script on:", hostname)
     print("Current timestamp:", timestamp)
     print(f'Beginning tuning for s1 experiment {cfg.tuning.experiment_name} for {cfg.tuning.max_evals} max evals using random seed {cfg.tuning.random_state}.')
-    search_dir = Path(cfg.paths.tuning_dir) / 's1' / cfg.tuning.experiment_name
+    search_dir = Path(cfg.paths.tuning_dir) / 's1_weak' / cfg.tuning.experiment_name
     search_dir.mkdir(parents=True, exist_ok=True)
 
     # define the variable you want to optimize
@@ -138,6 +136,9 @@ def tuning_s1(cfg: DictConfig) -> None:
     # save problem to json
     save_problem(problem, search_dir / 'problem.json')
 
+    # pass in cfg object to run experiment
+    method_kwargs = {"run_function_kwargs": {"cfg": cfg}}
+
     # load in early stopping metrics if available
     if cfg.tuning.early_stopping:
         early_stopper = SearchEarlyStopping(patience=cfg.tuning.patience)
@@ -145,17 +146,10 @@ def tuning_s1(cfg: DictConfig) -> None:
             _best_objective, _n_lower = load_stopper_info(search_dir / 'stopper.json')
             early_stopper._best_objective = _best_objective
             early_stopper._n_lower = _n_lower
-        method_kwargs = {"callbacks": [early_stopper]}
-    else:
-        method_kwargs = dict()
-
-    # pass in cfg object to run experiment
-    run_function_kwargs = {
-        'cfg': cfg
-    }
+        method_kwargs.update({"callbacks": [early_stopper]})
 
     # define the evaluator to distribute the computation
-    with Evaluator.create(run_s1, method="process", method_kwargs=method_kwargs, run_function_kwargs=run_function_kwargs) as evaluator:
+    with Evaluator.create(run_s1, method="process", method_kwargs=method_kwargs) as evaluator:
         print(f"Created new evaluator with {evaluator.num_workers} \
             worker{'s' if evaluator.num_workers > 1 else ''} and config: {method_kwargs}")
         search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=cfg.tuning.random_state)
@@ -191,9 +185,9 @@ def tuning_s1(cfg: DictConfig) -> None:
 
 @hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig) -> None:
-    if cfg.dataset == 's2':
+    if cfg.tuning.dataset == 's2':
         tuning_s2(cfg)
-    elif cfg.dataset == 's1':
+    elif cfg.tuning.dataset == 's1':
         tuning_s1(cfg)
 
 if __name__ == "__main__":

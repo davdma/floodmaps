@@ -284,9 +284,6 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
         fmetrics.save_metrics('test', loss=test_loss, **test_set_metrics)
         run.summary.update({f'final model {key}': value for key, value in test_set_metrics['core metrics'].items()})
 
-    # final expensive metric computation
-    ### AUPRC, ROC-AUC (Leave PR-Curve, ROC-Curve for final model to benchmarking)
-
     return cls_weights, disc_weights, fmetrics
 
 def save_experiment(cls_weights, disc_weights, metrics, cfg, run):

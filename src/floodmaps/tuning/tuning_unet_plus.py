@@ -193,9 +193,9 @@ def tuning_s1(cfg: DictConfig) -> None:
 
 @hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig) -> None:
-    if cfg.dataset == 's2':
+    if cfg.tuning.dataset == 's2':
         tuning_s2(cfg)
-    elif cfg.dataset == 's1':
+    elif cfg.tuning.dataset == 's1':
         tuning_s1(cfg)
 
 if __name__ == "__main__":

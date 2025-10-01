@@ -88,7 +88,7 @@ def benchmark_sar(cfg: DictConfig) -> None:
             save_metrics(save_chkpt_path, [vacc_list, vpre_list, vrec_list, vf1_list])
             raise err
 
-        test_metrics = fmetrics.get_metrics(split='test', partition='shift_invariant')
+        test_metrics = fmetrics.get_metrics(split='test', partition='shift_invariant')['core_metrics']
         vacc_list.append(test_metrics['test accuracy'])
         vpre_list.append(test_metrics['test precision'])
         vrec_list.append(test_metrics['test recall'])

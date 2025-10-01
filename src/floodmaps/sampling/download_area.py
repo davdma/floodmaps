@@ -890,6 +890,26 @@ def pipeline_S1(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox, cfg
         with rasterio.open(dir_path / f'{save_as}_vh_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vh_cmap.shape[-2], width=img_vh_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vh, nodata=None) as dst:
             dst.write(img_vh_cmap)
 
+def deduplicate_items_by_date(items):
+    """Keep only one item per date, choosing the first one found for each date.
+    
+    Parameters
+    ----------
+    items : list
+        List of STAC items.
+    
+    Returns
+    -------
+    list
+        List of items with only one item per date.
+    """
+    date_to_item = {}
+    for item in items:
+        date_str = item.datetime.strftime('%Y%m%d')
+        if date_str not in date_to_item:
+            date_to_item[date_str] = item
+    return list(date_to_item.values())
+
 def download_area(stac_provider, bbox, cfg):
     """Downloads S2 and S1 imagery for a specific study area based on parameters and generates accompanying rasters.
 
@@ -999,7 +1019,11 @@ def download_area(stac_provider, bbox, cfg):
             # record product used to generate rasters
             file_to_product[f'sar_{dt}_{eid}'] = product_id_item.id
     else:
-        logger.info(f'Downloading {len(items_s2)} S2 products and {len(items_s1)} S1 products.')
+        # Deduplicate items by date - keep only one per date
+        items_s2 = deduplicate_items_by_date(items_s2)
+        items_s1 = deduplicate_items_by_date(items_s1)
+        
+        logger.info(f'Downloading {len(items_s2)} S2 products and {len(items_s1)} S1 products (deduplicated by date).')
         # try to download all in the interval
         all_items = items_s2 + items_s1
         main_crs = pe.ext(all_items[0]).crs_string if cfg.sampling.crs is None else cfg.sampling.crs

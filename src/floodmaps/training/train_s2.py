@@ -297,7 +297,8 @@ def save_experiment(cls_weights, disc_weights, metrics, cfg, run):
         torch.save(disc_weights, path / f"{cfg.model.discriminator}_disc.pth")
 
     # save config
-    cfg.save2yaml(path / "config.yaml")
+    with open(path / "config.yaml", "w") as f:
+        OmegaConf.save(cfg, f)
 
     # save metrics
     metrics.to_json(path / "metrics.json")

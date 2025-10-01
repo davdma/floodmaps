@@ -481,9 +481,12 @@ def save_experiment(cls_weights, ad_weights, metrics, cfg, ad_cfg, run):
         torch.save(ad_weights, path / f"{ad_cfg.model.autodespeckler}_ad.pth")
 
     # save config
-    cfg.save2yaml(path / "config.yaml")
+    with open(path / "config.yaml", "w") as f:
+        OmegaConf.save(cfg, f)
+
     if ad_cfg is not None:
-        ad_cfg.save2yaml(path / "ad_config.yaml")
+        with open(path / "ad_config.yaml", "w") as f:
+            OmegaConf.save(ad_cfg, f)
 
     # save metrics
     metrics.to_json(path / "metrics.json")

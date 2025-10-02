@@ -384,14 +384,15 @@ def calculate_metrics(dataloader, dataset, train_mean, train_std, model, \
 
 def save_experiment(weights, metrics, cfg, run):
     """Save experiment files to directory specified by config save_path."""
-    path = Path(cfg.paths.experiment_dir) / cfg.save_path
+    path = Path(cfg.save_path)
     path.mkdir(parents=True, exist_ok=True)
 
     if weights is not None:
         torch.save(weights, path / "model.pth")
 
     # save config
-    cfg.save2yaml(path / "config.yaml")
+    with open(path / "config.yaml", "w") as f:
+        OmegaConf.save(cfg, f)
 
     # save metrics
     metrics.to_json(path / "metrics.json")
@@ -678,7 +679,7 @@ def run_experiment_ad(cfg):
         # setup save path
         if cfg.save:
             if cfg.save_path is None:
-                cfg.save_path = f"{datetime.today().strftime('%Y-%m-%d')}_{cfg.model.autodespeckler}_{run.id}/"
+                cfg.save_path = str(Path(cfg.paths.experiment_dir) / f"{datetime.today().strftime('%Y-%m-%d')}_{cfg.model.autodespeckler}_{run.id}/")
                 run.config.update({"save_path": cfg.save_path}, allow_val_change=True)
             print(f'Save path set to: {cfg.save_path}')
 

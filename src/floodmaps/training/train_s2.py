@@ -288,7 +288,7 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
 
 def save_experiment(cls_weights, disc_weights, metrics, cfg, run):
     """Save experiment files to directory specified by config save_path."""
-    path = Path(cfg.paths.experiment_dir) / cfg.save_path
+    path = Path(cfg.save_path)
     path.mkdir(parents=True, exist_ok=True)
 
     if cls_weights is not None:
@@ -580,7 +580,7 @@ def run_experiment_s2(cfg):
     try:
         if cfg.save:
             if cfg.save_path is None:
-                cfg.save_path = f"{datetime.today().strftime('%Y-%m-%d')}_{cfg.model.classifier}_{run.id}/"
+                cfg.save_path = str(Path(cfg.paths.experiment_dir) / f"{datetime.today().strftime('%Y-%m-%d')}_{cfg.model.classifier}_{run.id}/")
                 run.config.update({"save_path": cfg.save_path}, allow_val_change=True)
             print(f'Save path set to: {cfg.save_path}')
         

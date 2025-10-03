@@ -594,7 +594,7 @@ def run_experiment_s2(cfg):
         percent_wet = cfg.wandb.get('percent_wet_patches', 0.5)  # Default to 0.5 if not specified
         pred_table = sample_predictions(model, test_set if cfg.eval.mode == 'test' else val_set,
                                         train_mean, train_std, cfg, percent_wet_patches=percent_wet)
-        run.log({"model_val_predictions": pred_table})
+        run.log({f"model_{cfg.eval.mode}_predictions": pred_table})
     except Exception as e:
         print("An exception occurred during training!")
 

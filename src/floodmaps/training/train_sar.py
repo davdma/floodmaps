@@ -805,7 +805,7 @@ def run_experiment_s1(cfg, ad_cfg=None):
         # log predictions on validation set using wandb
         pred_table = sample_predictions(model, test_set if cfg.eval.mode == 'test' else val_set,
                                         train_mean, train_std, loss_cfg, cfg)
-        run.log({"model_val_predictions": pred_table})
+        run.log({f"model_{cfg.eval.mode}_predictions": pred_table})
     except Exception as e:
         print("An exception occurred during training!")
 

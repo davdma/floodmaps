@@ -689,7 +689,7 @@ def run_experiment_ad(cfg):
 
         # pick 3 full res examples for closer look
         examples = sample_examples(model, test_set if cfg.eval.mode == 'test' else val_set, cfg)
-        run.log({"model_val_predictions": pred_table, "examples": examples})
+        run.log({f"model_{cfg.eval.mode}_predictions": pred_table, "examples": examples})
     except Exception as e:
         print("An exception occurred during training!")
 

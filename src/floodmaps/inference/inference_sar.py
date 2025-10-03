@@ -98,7 +98,7 @@ def generate_prediction_sar(model, device, cfg, standardize, train_mean, event_p
     X = standardize(X)
 
     # prediction done using sliding window with overlap
-    patch_size = cfg.data.size
+    patch_size = cfg.data.window  # Use window size (model input) not data size (training patch)
     overlap = patch_size // 4  # 25% overlap
     stride = patch_size - overlap
 
@@ -187,7 +187,7 @@ def main(cfg: DictConfig):
     # dataset and transforms
     size = cfg.data.size
     samples = cfg.data.samples
-    filter_type = cfg.data.filter
+    filter_type = 'lee' if cfg.data.use_lee else 'raw'
     suffix = getattr(cfg.data, 'suffix', '')
     if suffix:
         sample_dir = Path(cfg.paths.preprocess_dir) / 's1_weak' / f'samples_{size}_{samples}_{filter_type}_{suffix}/'
@@ -204,7 +204,7 @@ def main(cfg: DictConfig):
 
     # make prediction for each sar vv file in the data dir
     p = re.compile('sar_(\d{8})_(.+)_vv.tif')
-    data_path = Path(cfg.paths.data_dir)
+    data_path = Path(cfg.inference.data_dir)
     for sar_vv_file in data_path.glob('sar_*_vv.tif'):
         m = p.search(sar_vv_file.name)
         dt = m.group(1)
@@ -213,6 +213,7 @@ def main(cfg: DictConfig):
         if not cfg.inference.replace and (data_path / f'pred_sar_{dt}_{eid}.tif').exists():
             continue
 
+        print("Generating prediction for:", sar_vv_file.name)
         pred = generate_prediction_sar(model, device, cfg, standardize, train_mean, data_path, dt, eid, threshold=cfg.inference.threshold)
         if cfg.inference.format == "tif":
             # save result of prediction as .tif file

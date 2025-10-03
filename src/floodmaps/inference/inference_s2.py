@@ -201,7 +201,7 @@ def main(cfg: DictConfig):
 
     # make prediction for each rgb file in the data dir
     p = re.compile('rgb_(\d{8})_(.+).tif')
-    data_path = Path(cfg.paths.imagery_dir) / cfg.inference.data_dir
+    data_path = Path(cfg.inference.data_dir)
     for rgb_file in data_path.glob('rgb_*.tif'):
         m = p.search(rgb_file.name)
         dt = m.group(1)
@@ -210,6 +210,7 @@ def main(cfg: DictConfig):
         if not cfg.inference.replace and (data_path / f'pred_{dt}_{eid}.tif').exists():
             continue
 
+        print("Generating prediction for:", rgb_file.name)
         pred = generate_prediction_s2(model, device, cfg, standardize, train_mean, data_path, dt, eid, threshold=cfg.inference.threshold)
         if cfg.inference.format == "tif":
             # save result of prediction as .tif file

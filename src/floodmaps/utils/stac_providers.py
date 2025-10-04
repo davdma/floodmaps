@@ -202,13 +202,15 @@ class AWSProvider(STACProvider):
             raise ValueError(f"Unknown asset type: {asset_type}")
 
 
-def get_stac_provider(cfg: DictConfig, logger: Optional[logging.Logger] = None) -> STACProvider:
-    """Factory function to get the appropriate STAC provider.
+def get_stac_provider(provider_name: str, mpc_api_key: str = None, logger: Optional[logging.Logger] = None) -> STACProvider:
+    f"""Factory function to get the appropriate STAC provider.
     
     Parameters
     ----------
-    cfg: DictConfig
-        Configuration object.
+    provider_name: str
+        Name of the provider to use: "mpc" for Microsoft Planetary Computer, "aws" for AWS.
+    mpc_api_key: Optional[str]
+        API key for Microsoft Planetary Computer.
     logger : Optional[logging.Logger]
         Logger instance
     
@@ -217,10 +219,9 @@ def get_stac_provider(cfg: DictConfig, logger: Optional[logging.Logger] = None) 
     STACProvider
         Configured STAC provider instance
     """
-    provider_name = cfg.sampling.source.lower()
     
     if provider_name in ["mpc", "microsoft", "planetary_computer"]:
-        return MicrosoftPlanetaryComputerProvider(api_key=getattr(cfg, "mpc_api_key", None), logger=logger)
+        return MicrosoftPlanetaryComputerProvider(api_key=mpc_api_key, logger=logger)
     elif provider_name in ["aws", "amazon"]:
         return AWSProvider(logger)
     else:

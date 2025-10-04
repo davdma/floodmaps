@@ -1197,7 +1197,7 @@ def run_download_area(cfg: DictConfig) -> None:
         bbox = get_bbox_from_shapefile(cfg.sampling.shapefile, crs=PRISM_CRS)
 
         # get stac provider
-        stac_provider = get_stac_provider(cfg, logger=rootLogger)
+        stac_provider = get_stac_provider(cfg.sampling.source.lower(), mpc_api_key=getattr(cfg, "mpc_api_key", None), logger=rootLogger)
 
         # download imagery
         max_attempts = 3

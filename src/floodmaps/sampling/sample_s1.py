@@ -306,7 +306,7 @@ def main(cfg: DictConfig) -> None:
     # loop over samples in directory
     rootLogger.info("Initializing SAR event sampling...")
     samples = Path(cfg.sampling.dir_path).glob('*_*_*/')
-    stac_provider = get_stac_provider(cfg, logger=logger)
+    stac_provider = get_stac_provider(cfg.sampling.source.lower(), mpc_api_key=getattr(cfg, "mpc_api_key", None), logger=logger)
     for sample in samples:
         downloadS1(stac_provider, sample, cfg)
 

@@ -31,7 +31,9 @@ def _find_event_dir(img_dt: str, eid: str, sample_dirs: List[str], cfg: DictConf
 
 
 def loadMaskedStack(img_dt, eid, sample_dirs: List[str], cfg: DictConfig):
-    """Load and mask the stack of non-binary channels.
+    """Load and mask the stack of DEM and slope channels for statistics computation.
+    
+    RGB, NIR, and NDWI are scaled/normalized separately and do not need statistics.
 
     Parameters
     ----------
@@ -45,24 +47,20 @@ def loadMaskedStack(img_dt, eid, sample_dirs: List[str], cfg: DictConfig):
     Returns
     -------
     masked_stack : ndarray
-        Stack of channels with missing values masked out.
+        Stack of DEM and slope channels (3 channels) with missing values masked out.
     """
     event_dir = _find_event_dir(img_dt, eid, sample_dirs, cfg)
     if event_dir is None:
         raise FileNotFoundError(f"Could not find assets for event {eid} across provided sample_dirs: {sample_dirs}")
     rgb_file = event_dir / f'rgb_{img_dt}_{eid}.tif'
-    b08_file = event_dir / f'b08_{img_dt}_{eid}.tif'
     ndwi_file = event_dir / f'ndwi_{img_dt}_{eid}.tif'
     dem_file = event_dir / f'dem_{eid}.tif'
 
     with rasterio.open(rgb_file) as src:
-        rgb_raster = src.read().reshape((3, -1))
-    
-    with rasterio.open(b08_file) as src:
-        b08_raster = src.read().reshape((1, -1))
+        rgb_raster = src.read()
     
     with rasterio.open(ndwi_file) as src:
-        ndwi_raster = src.read().reshape((1, -1))
+        ndwi_raster = src.read()
 
     with rasterio.open(dem_file) as src:
         dem_raster = src.read()
@@ -75,15 +73,20 @@ def loadMaskedStack(img_dt, eid, sample_dirs: List[str], cfg: DictConfig):
     slope_x_raster = slope_x_raster.reshape((1, -1))
 
     mask = (rgb_raster[0] != 0) & (ndwi_raster[0] != -999999)
+    mask = mask.flatten()
 
-    stack = np.vstack((rgb_raster, b08_raster, ndwi_raster, dem_raster, slope_y_raster, slope_x_raster), dtype=np.float32)
+    # Only stack DEM and slopes for statistics computation
+    stack = np.vstack((dem_raster, slope_y_raster, slope_x_raster), dtype=np.float32)
 
     masked_stack = stack[:, mask]
 
     return masked_stack
 
 def trainMean(train_events, sample_dirs: List[str], cfg: DictConfig):
-    """Calculate mean and std of non-binary channels.
+    """Calculate mean of DEM and slope channels only.
+    
+    RGB/NIR are scaled by 10000, NDWI is already normalized, so we only compute
+    statistics for DEM and slopes (3 channels).
 
     Parameters
     ----------
@@ -96,11 +99,11 @@ def trainMean(train_events, sample_dirs: List[str], cfg: DictConfig):
     Returns
     -------
     overall_channel_mean : ndarray
-        Channel means.
+        Channel means for DEM and slopes (3 channels).
     """
     logger = logging.getLogger('preprocessing')
     count = 0
-    total_sum = np.zeros(8, dtype=np.float64) # 8 non-binary channels for original s2 data
+    total_sum = np.zeros(3, dtype=np.float64)  # 3 channels: DEM, slope_y, slope_x
 
     for img_dt, eid in train_events:
         masked_stack = loadMaskedStack(img_dt, eid, sample_dirs, cfg)
@@ -117,7 +120,10 @@ def trainMean(train_events, sample_dirs: List[str], cfg: DictConfig):
     return overall_channel_mean
 
 def trainStd(train_events, train_means, sample_dirs: List[str], cfg: DictConfig):
-    """Calculate std of non-binary channels.
+    """Calculate std of DEM and slope channels only.
+    
+    RGB/NIR are scaled by 10000, NDWI is already normalized, so we only compute
+    statistics for DEM and slopes (3 channels).
 
     Parameters
     ----------
@@ -125,18 +131,18 @@ def trainStd(train_events, train_means, sample_dirs: List[str], cfg: DictConfig)
         List of training flood event folders where raw data tiles are stored.
         First element is the image date, second element is the event id.
     train_means : ndarray
-        Channel means.
+        Channel means for DEM and slopes (3 channels).
     sample_dirs : list[str]
         Dataset directories containing S2 tiles for patch sampling.
 
     Returns
     -------
     overall_channel_std : ndarray
-        Channel stds.
+        Channel stds for DEM and slopes (3 channels).
     """
     logger = logging.getLogger('preprocessing')
     count = 0
-    variances = np.zeros(8, dtype=np.float64) # 8 non-binary channels for original s2 data
+    variances = np.zeros(3, dtype=np.float64)  # 3 channels: DEM, slope_y, slope_x
 
     for img_dt, eid in train_events:
         masked_stack = loadMaskedStack(img_dt, eid, sample_dirs, cfg)
@@ -231,32 +237,34 @@ def load_tile_for_sampling(tile_info: Tuple):
         tci_floats = (tci_raster / 255).astype(np.float32)
 
     with rasterio.open(rgb_file) as src:
-        rgb_raster = src.read()
+        rgb_raster = src.read().astype(np.float32)
+        rgb_raster = rgb_raster / 10000.0  # Scale reflectance to [0, 1]
 
     with rasterio.open(b08_file) as src:
-        b08_raster = src.read()
+        b08_raster = src.read().astype(np.float32)
+        b08_raster = b08_raster / 10000.0  # Scale reflectance to [0, 1]
 
     with rasterio.open(ndwi_file) as src:
-        ndwi_raster = src.read()
+        ndwi_raster = src.read().astype(np.float32)  # Keep as-is (already in [-1, 1])
 
     with rasterio.open(dem_file) as src:
-        dem_raster = src.read()
+        dem_raster = src.read().astype(np.float32)
 
     # calculate xy gradient with np.gradient
     slope = np.gradient(dem_raster, axis=(1,2))
     slope_y_raster, slope_x_raster = slope
 
     with rasterio.open(waterbody_file) as src:
-        waterbody_raster = src.read()
+        waterbody_raster = src.read().astype(np.float32)
 
     with rasterio.open(roads_file) as src:
-        roads_raster = src.read()
+        roads_raster = src.read().astype(np.float32)
 
     with rasterio.open(flowlines_file) as src:
-        flowlines_raster = src.read()
+        flowlines_raster = src.read().astype(np.float32)
 
     with rasterio.open(nlcd_file) as src:
-        nlcd_raster = src.read()
+        nlcd_raster = src.read().astype(np.float32)
 
     # stack all tiles
     stacked_tile = np.vstack((rgb_raster, b08_raster, ndwi_raster, dem_raster, 
@@ -649,18 +657,26 @@ def main(cfg: DictConfig) -> None:
     p = re.compile('label_(\d{8})_(.+).tif')
     train_events = [(p.search(label).group(1), p.search(label).group(2)) for label in train_labels]
 
-    # calculate mean and std of train tiles
-    logger.info('Calculating mean and std of training tiles...')
-    mean_cont = trainMean(train_events, sample_dirs_list, cfg)
-    std_cont = trainStd(train_events, mean_cont, sample_dirs_list, cfg)
-    logger.info('Mean and std of training tiles calculated.')
+    # calculate mean and std of train tiles (only for DEM and slopes)
+    logger.info('Calculating mean and std of DEM and slope channels...')
+    mean_dem_slopes = trainMean(train_events, sample_dirs_list, cfg)
+    std_dem_slopes = trainStd(train_events, mean_dem_slopes, sample_dirs_list, cfg)
+    logger.info('Mean and std of DEM and slopes calculated.')
 
-    # set mean and std of binary channels at the end to 0 and 1
-    bchannels = 3 # waterbody, roads, flowlines
-    mean_bin = np.zeros(bchannels)
-    std_bin = np.ones(bchannels)
-    mean = np.concatenate([mean_cont, mean_bin])
-    std = np.concatenate([std_cont, std_bin])
+    # Construct final mean and std arrays:
+    # Channels 0-3 (RGB, NIR): mean=0, std=1 (already scaled by 10000)
+    # Channel 4 (NDWI): mean=0, std=1 (already in [-1, 1])
+    # Channels 5-7 (DEM, slopes): computed mean/std
+    # Channels 8-10 (waterbody, roads, flowlines): mean=0, std=1
+    mean_reflectance = np.zeros(4, dtype=np.float32)  # RGB + NIR
+    std_reflectance = np.ones(4, dtype=np.float32)
+    mean_ndwi = np.zeros(1, dtype=np.float32)  # NDWI
+    std_ndwi = np.ones(1, dtype=np.float32)
+    mean_binary = np.zeros(3, dtype=np.float32)  # waterbody, roads, flowlines
+    std_binary = np.ones(3, dtype=np.float32)
+    
+    mean = np.concatenate([mean_reflectance, mean_ndwi, mean_dem_slopes, mean_binary])
+    std = np.concatenate([std_reflectance, std_ndwi, std_dem_slopes, std_binary])
 
     # also store training mean std statistics in file
     stats_file = pre_sample_dir / f'mean_std_{cfg.preprocess.size}_{cfg.preprocess.samples}.pkl'

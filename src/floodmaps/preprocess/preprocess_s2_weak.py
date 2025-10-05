@@ -95,24 +95,24 @@ def discover_all_tiles(events: List[Path], label_idx: Optional[Dict[Tuple[str, s
 
 
 def load_tile_for_stats(tile_info: Tuple[Path, Path, Path, str, str]) -> Tuple[np.ndarray, np.ndarray]:
-    """Load the tile data and return the array and mask.
+    """Load the tile data and return the array and mask for DEM and slopes only.
+    
+    RGB/NIR are scaled by 10000, NDWI is already normalized, so we only compute
+    statistics for DEM and slopes (3 channels).
     
     Args:
         tile_info: Tuple of (event_path, rgb_file, label_file, eid, img_dt)
         
     Returns:
-        Tuple of (arr, mask) for the 8 non-binary channels
+        Tuple of (arr, mask) for the 3 channels (DEM, slope_y, slope_x)
     """
     event, rgb_file, label_file, eid, img_dt = tile_info
     
-    # Load S2 data
-    b08_file = event / f'b08_{img_dt}_{eid}.tif'
+    # Load S2 data for masking
     ndwi_file = event / f'ndwi_{img_dt}_{eid}.tif'
     
     with rasterio.open(rgb_file) as src:
         rgb_raster = src.read()
-    with rasterio.open(b08_file) as src:
-        b08_raster = src.read()
     with rasterio.open(ndwi_file) as src:
         ndwi_raster = src.read()
     
@@ -126,11 +126,8 @@ def load_tile_for_stats(tile_info: Tuple[Path, Path, Path, str, str]) -> Tuple[n
     slope = np.gradient(dem_raster, axis=(1, 2))
     slope_y_raster, slope_x_raster = slope
     
-    # Stack the 8 non-binary channels (RGB, B08, NDWI, DEM, slopes)
-    stack = np.vstack((
-        rgb_raster, b08_raster, ndwi_raster, dem_raster, 
-        slope_y_raster, slope_x_raster
-    )).astype(np.float32)
+    # Stack only DEM and slopes for statistics computation
+    stack = np.vstack((dem_raster, slope_y_raster, slope_x_raster)).astype(np.float32)
     
     # Create mask for valid pixels (based on S2 criteria)
     mask = ((rgb_raster[0] != 0) & (ndwi_raster[0] != -999999))
@@ -147,7 +144,7 @@ def process_tiles_batch_for_stats(tiles_batch: List[Tuple]) -> WelfordAccumulato
     Returns:
         WelfordAccumulator with accumulated statistics from all tiles in batch
     """
-    accumulator = WelfordAccumulator(8)  # 8 non-binary channels for S2
+    accumulator = WelfordAccumulator(3)  # 3 channels: DEM, slope_y, slope_x
     
     for tile_info in tiles_batch:
         try:
@@ -163,6 +160,9 @@ def process_tiles_batch_for_stats(tiles_batch: List[Tuple]) -> WelfordAccumulato
 
 def compute_statistics_parallel(train_tiles: List[Tuple], n_workers: int = None) -> Tuple[np.ndarray, np.ndarray]:
     """Compute mean and std using optimized parallel Welford's algorithm.
+    
+    RGB/NIR are scaled by 10000, NDWI is already normalized, so we only compute
+    statistics for DEM and slopes (3 channels).
     
     This implementation:
     1. Distributes tiles in batches to workers for better load balancing
@@ -180,9 +180,9 @@ def compute_statistics_parallel(train_tiles: List[Tuple], n_workers: int = None)
     Returns
     -------
     mean : np.ndarray
-        Mean of the 8 non-binary channels
+        Mean of the 3 channels (DEM, slope_y, slope_x)
     std : np.ndarray
-        Standard deviation of the 8 non-binary channels
+        Standard deviation of the 3 channels (DEM, slope_y, slope_x)
     """
     logger = logging.getLogger('preprocessing')
     
@@ -228,7 +228,7 @@ def compute_statistics_parallel(train_tiles: List[Tuple], n_workers: int = None)
         raise RuntimeError(f"Statistics computation failed: {e}") from e
     
     # Merge worker accumulators (much fewer merge operations)
-    final_accumulator = WelfordAccumulator(8)
+    final_accumulator = WelfordAccumulator(3)  # 3 channels: DEM, slope_y, slope_x
     total_pixels = 0
     
     for worker_acc in worker_accumulators:
@@ -279,31 +279,33 @@ def load_tile_for_sampling(tile_info: Tuple):
     tci_floats = (tci_raster / 255).astype(np.float32)
 
     with rasterio.open(rgb_file) as src:
-        rgb_raster = src.read()
+        rgb_raster = src.read().astype(np.float32)
+        rgb_raster = rgb_raster / 10000.0  # Scale reflectance to [0, 1]
 
     with rasterio.open(b08_file) as src:
-        b08_raster = src.read()
+        b08_raster = src.read().astype(np.float32)
+        b08_raster = b08_raster / 10000.0  # Scale reflectance to [0, 1]
     
     with rasterio.open(ndwi_file) as src:
-        ndwi_raster = src.read()
+        ndwi_raster = src.read().astype(np.float32)  # Keep as-is (already in [-1, 1])
 
     with rasterio.open(dem_file) as src:
-        dem_raster = src.read()
+        dem_raster = src.read().astype(np.float32)
 
     slope = np.gradient(dem_raster, axis=(1,2))
     slope_y_raster, slope_x_raster = slope
 
     with rasterio.open(waterbody_file) as src:
-        waterbody_raster = src.read()
+        waterbody_raster = src.read().astype(np.float32)
 
     with rasterio.open(roads_file) as src:
-        roads_raster = src.read()
+        roads_raster = src.read().astype(np.float32)
     
     with rasterio.open(flowlines_file) as src:
-        flowlines_raster = src.read()
+        flowlines_raster = src.read().astype(np.float32)
     
     with rasterio.open(nlcd_file) as src:
-        nlcd_raster = src.read()
+        nlcd_raster = src.read().astype(np.float32)
 
     # Stack 16 channels: RGB(3), B08(1), NDWI(1), DEM(1), slopes(2), binary(3), label(1), TCI(3), NLCD(1)
     stacked_tile = np.vstack((rgb_raster, b08_raster, ndwi_raster, dem_raster, 
@@ -767,16 +769,24 @@ def main(cfg: DictConfig) -> None:
     
     logger.info(f'Tiles: {len(train_tiles)} train, {len(val_tiles)} val, {len(test_tiles)} test')
 
-    # Compute statistics using parallel Welford's algorithm
-    logger.info('Computing training statistics...')
-    mean_cont, std_cont = compute_statistics_parallel(train_tiles, n_workers)
+    # Compute statistics using parallel Welford's algorithm (only for DEM and slopes)
+    logger.info('Computing training statistics for DEM and slope channels...')
+    mean_dem_slopes, std_dem_slopes = compute_statistics_parallel(train_tiles, n_workers)
     
-    # Add binary channel statistics (mean=0, std=1)
-    bchannels = 3  # waterbody, roads, flowlines
-    mean_bin = np.zeros(bchannels, dtype=np.float32)
-    std_bin = np.ones(bchannels, dtype=np.float32)
-    mean = np.concatenate([mean_cont, mean_bin])
-    std = np.concatenate([std_cont, std_bin])
+    # Construct final mean and std arrays:
+    # Channels 0-3 (RGB, NIR): mean=0, std=1 (already scaled by 10000)
+    # Channel 4 (NDWI): mean=0, std=1 (already in [-1, 1])
+    # Channels 5-7 (DEM, slopes): computed mean/std
+    # Channels 8-10 (waterbody, roads, flowlines): mean=0, std=1
+    mean_reflectance = np.zeros(4, dtype=np.float32)  # RGB + NIR
+    std_reflectance = np.ones(4, dtype=np.float32)
+    mean_ndwi = np.zeros(1, dtype=np.float32)  # NDWI
+    std_ndwi = np.ones(1, dtype=np.float32)
+    mean_binary = np.zeros(3, dtype=np.float32)  # waterbody, roads, flowlines
+    std_binary = np.ones(3, dtype=np.float32)
+    
+    mean = np.concatenate([mean_reflectance, mean_ndwi, mean_dem_slopes, mean_binary])
+    std = np.concatenate([std_reflectance, std_ndwi, std_dem_slopes, std_binary])
     
     # Save statistics
     stats_file = pre_sample_dir / f'mean_std_{cfg.preprocess.size}_{cfg.preprocess.samples}.pkl'

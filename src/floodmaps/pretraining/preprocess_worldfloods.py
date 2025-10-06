@@ -6,11 +6,13 @@ from typing import Dict, Any, Tuple, Callable, List
 from glob import glob
 import rasterio
 import concurrent.futures
+import multiprocessing
 from pathlib import Path
 import json
 import os
 import logging
 import sys
+import traceback
 from datetime import datetime
 
 from floodmaps.pretraining.utils import WindowSize, WindowSlices, get_list_of_window_slices, filter_windows_v2
@@ -70,7 +72,8 @@ def preprocess(split:str,
                 image_prefix:str = "S2",
                 gt_prefix:str = "gt",
                 dir_path:str = None):
-    """Channels 3, 2, 1, 7 correspond to rgb+nir"""
+    """Deprecated window based preprocessing. Very slow so use batch preprocess instead.
+    Note: Channels 3, 2, 1, 7 correspond to rgb+nir"""
     filenames = filenames_train_test[split][image_prefix]
     window_size = WindowSize(height=window_size[0], width=window_size[1])
 
@@ -107,7 +110,7 @@ def process_window(
                 image_prefix:str = "S2",
                 gt_prefix:str = "gt"
     ):
-    """For parallel processing of windows"""
+    """For parallel processing of windows. Deprecated so use batch preprocess instead."""
     # read in image
     # get filename
     image_name = window.file_name
@@ -130,7 +133,9 @@ def process_window(
         green = all_channels_img[2].astype(np.float32)
         nir = all_channels_img[7].astype(np.float32)
         denominator = green + nir
-        ndwi = np.where(denominator != 0, (green - nir) / denominator, -999999)
+        ndwi = np.full_like(green, -999999.0, dtype=np.float32)
+        valid = (denominator != 0) & np.isfinite(green) & np.isfinite(nir)
+        np.divide(green - nir, denominator, out=ndwi, where=valid)
         ndwi = np.expand_dims(ndwi, axis=0)
         selected_channels = np.vstack([selected_channels, ndwi])
 
@@ -144,6 +149,195 @@ def process_window(
     
     result = np.vstack([selected_channels, labels])
     arr[idx] = result
+
+def _tile_nchw(img: np.ndarray, tile_size: int) -> np.ndarray:
+    """Tile an image in NCHW format into (num_tiles, C, tile, tile) without Python loops.
+
+    Discards remainder edges for speed.
+    """
+    C, H, W = img.shape
+    h_tiles = H // tile_size
+    w_tiles = W // tile_size
+    if h_tiles == 0 or w_tiles == 0:
+        return np.empty((0, C, tile_size, tile_size), dtype=img.dtype)
+    Hc = h_tiles * tile_size
+    Wc = w_tiles * tile_size
+    img_cropped = img[:, :Hc, :Wc]
+    # reshape and permute to tiles
+    tiles = img_cropped.reshape(C, h_tiles, tile_size, w_tiles, tile_size)
+    tiles = tiles.swapaxes(2, 3)  # C, h_tiles, w_tiles, tile, tile
+    tiles = tiles.reshape(C, h_tiles * w_tiles, tile_size, tile_size)
+    tiles = tiles.transpose(1, 0, 2, 3)  # (num_tiles, C, tile, tile)
+    return tiles
+
+def _process_files_worker(
+        file_batch: List[str],
+        channels: List[int],
+        add_ndwi: bool,
+        tile_size: int,
+        image_prefix: str,
+        gt_prefix: str,
+        do_filter: bool,
+        threshold_missing: float
+    ) -> np.ndarray:
+    """Worker that processes a batch of files: reads full rasters, tiles, filters, and concatenates.
+
+    Returns a numpy array shaped (N_tiles, C_out, tile_size, tile_size).
+    """
+    tiles_accum: List[np.ndarray] = []
+    for image_name in file_batch:
+        try:
+            # Read image and labels fully
+            with rasterio.open(image_name) as src:
+                img_all = src.read()  # (B, H, W)
+            y_name = image_name.replace(image_prefix, gt_prefix, 1)
+            with rasterio.open(y_name) as src:
+                label_all = src.read()  # assume 2 bands
+
+            # Select channels and scale
+            img_selected = img_all[channels].astype(np.float32) / 10000.0  # (Cx, H, W)
+
+            # NDWI over full image if requested (computed before tiling)
+            if add_ndwi:
+                green = img_all[2].astype(np.float32)
+                nir = img_all[7].astype(np.float32)
+                denom = green + nir
+                ndwi = np.full_like(green, -999999.0, dtype=np.float32)
+                valid = (denom != 0) & np.isfinite(green) & np.isfinite(nir)
+                np.divide(green - nir, denom, out=ndwi, where=valid)
+                x_full = np.concatenate([img_selected, ndwi[None, :, :]], axis=0)  # (Cx+1, H, W)
+            else:
+                x_full = img_selected  # (Cx, H, W)
+
+            # Tile inputs once
+            x_tiles = _tile_nchw(x_full, tile_size)  # (N, Cx(+1), t, t)
+
+            # If there are no tiles, continue
+            if x_tiles.shape[0] == 0:
+                continue
+
+            # Labels: compute invalid mask fraction using first two bands like previous filter
+            # label_all expected shape (C, H, W)
+            # Build filter mask if requested
+            tile_mask = None
+            # Tile labels once as a 2-channel stack
+            lbl_full = label_all[:2]  # (2, H, W)
+            lbl_tiles = _tile_nchw(lbl_full, tile_size)  # (N, 2, t, t)
+            if do_filter:
+                # invalid pixel where both bands == 0
+                invalid_counts = ((lbl_tiles[:, 0] == 0) & (lbl_tiles[:, 1] == 0)).sum(axis=(1, 2)).astype(np.float32)
+                frac_invalid = invalid_counts / (tile_size * tile_size)
+                tile_mask = frac_invalid <= threshold_missing
+            else:
+                tile_mask = np.ones((x_tiles.shape[0],), dtype=bool)
+
+            # Water label from second band == 2, as in previous implementation
+            water_tiles_bin = (lbl_tiles[:, 1] == 2).astype(np.float32)  # (N, t, t)
+            water_tiles_bin = water_tiles_bin[:, None, :, :]  # (N, 1, t, t)
+
+            # Assemble output channels: selected + optional ndwi + label
+            out_tiles = np.concatenate([x_tiles, water_tiles_bin], axis=1)
+
+            # Apply mask
+            out_tiles = out_tiles[tile_mask]
+
+            if out_tiles.shape[0] > 0:
+                tiles_accum.append(out_tiles)
+        except Exception as e:
+            # Capture and return detailed traceback through the raised exception
+            tb = traceback.format_exc()
+            print(f"Worker error in file {image_name}: {e}\n{tb}", file=sys.stderr, flush=True)
+            raise
+
+    if len(tiles_accum) == 0:
+        C_out = len(channels) + (1 if add_ndwi else 0) + 1
+        return np.empty((0, C_out, tile_size, tile_size), dtype=np.float32)
+
+    return np.concatenate(tiles_accum, axis=0)
+
+def preprocess_batch(
+                split: str,
+                filenames_train_test: Dict[str, Any],
+                window_size: Tuple[int, int] = (64, 64),
+                channels: List[int] = [3, 2, 1, 7],
+                add_ndwi: bool = True,
+                workers: int = 10,
+                filter_windows: Callable = None,
+                threshold_missing: float = 0.0,
+                image_prefix: str = "S2",
+                gt_prefix: str = "gt",
+                dir_path: str = None
+    ) -> None:
+    """Efficient preprocessing: assign files to workers, tile in memory, filter, and concatenate.
+
+    Saves a single NPY file per split with shape (N, C, tile, tile).
+    """
+    logger = logging.getLogger('preprocessing')
+    filenames = filenames_train_test[split][image_prefix]
+    total_files = len(filenames)
+    tile_size = window_size[0]
+
+    if total_files == 0:
+        logger.warning(f"No files found for split {split}")
+        np.save(Path(dir_path) / f"{split}_patches.npy", np.empty((0, len(channels) + int(add_ndwi) + 1, tile_size, tile_size), dtype=np.float32))
+        return
+
+    # Split files into roughly equal chunks per worker
+    num_workers = max(1, workers)
+    # Do not create more chunks than files
+    num_chunks = min(num_workers, total_files)
+    chunks = np.array_split(np.array(filenames, dtype=object), num_chunks)
+    chunks = [list(c) for c in chunks if len(c) > 0]
+
+    logger.info(f"Batch preprocessing {split}: {total_files} files across {len(chunks)} workers")
+
+    # Progress printing every 1%
+    next_pct = 1
+    processed_files = 0
+
+    results: List[np.ndarray] = []
+
+    def _update_progress(delta: int):
+        nonlocal processed_files, next_pct
+        processed_files += delta
+        pct = int((processed_files * 100) / total_files)
+        while pct >= next_pct and next_pct <= 100:
+            logger.info(f"{split}: {processed_files}/{total_files} files ({next_pct}%) processed")
+            next_pct += 1
+
+    # Use 'spawn' start method to avoid issues with forking GDAL/rasterio, and recycle workers
+    mp_ctx = multiprocessing.get_context("spawn")
+    with concurrent.futures.ProcessPoolExecutor(max_workers=len(chunks), mp_context=mp_ctx, max_tasks_per_child=1) as executor:
+        futures = [
+            executor.submit(
+                _process_files_worker,
+                chunk,
+                channels,
+                add_ndwi,
+                tile_size,
+                image_prefix,
+                gt_prefix,
+                filter_windows is not None,
+                threshold_missing,
+            )
+            for chunk in chunks
+        ]
+
+        for fut, chunk in zip(concurrent.futures.as_completed(futures), chunks):
+            try:
+                arr = fut.result()
+                results.append(arr)
+            finally:
+                _update_progress(len(chunk))
+
+    # Final concatenate and save
+    if len(results) == 0:
+        raise Exception("Result is empty.")
+    else:
+        out = np.concatenate(results, axis=0)
+
+    logger.info(f"{split}: produced {out.shape[0]} tiles with tensor shape {out.shape}")
+    np.save(Path(dir_path) / f"{split}_patches.npy", out)
 
 def run_preprocess(cfg: DictConfig) -> None:
     logger = logging.getLogger('preprocessing')
@@ -208,8 +402,8 @@ def run_preprocess(cfg: DictConfig) -> None:
 
     filter_windows = filter_windows_v2 if cfg.pretraining.filter_windows else None
 
-    logger.info("Preprocessing train set")
-    preprocess("train",
+    logger.info("Preprocessing train set (batch mode)")
+    preprocess_batch("train",
                 filenames_train_test,
                 window_size=cfg.pretraining.window_size,
                 channels=cfg.pretraining.channels,
@@ -221,8 +415,8 @@ def run_preprocess(cfg: DictConfig) -> None:
                 gt_prefix=cfg.pretraining.gt_prefix,
                 dir_path=cfg.pretraining.dir_path)
     
-    logger.info("Preprocessing val set")
-    preprocess("val",
+    logger.info("Preprocessing val set (batch mode)")
+    preprocess_batch("val",
                 filenames_train_test,
                 window_size=cfg.pretraining.window_size,
                 channels=cfg.pretraining.channels,
@@ -234,8 +428,8 @@ def run_preprocess(cfg: DictConfig) -> None:
                 gt_prefix=cfg.pretraining.gt_prefix,
                 dir_path=cfg.pretraining.dir_path)
     
-    logger.info("Preprocessing test set")
-    preprocess("test",
+    logger.info("Preprocessing test set (batch mode)")
+    preprocess_batch("test",
                 filenames_train_test,
                 window_size=cfg.pretraining.window_size,
                 channels=cfg.pretraining.channels,

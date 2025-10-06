@@ -1,0 +1,10 @@
+dataset_path: /lcrc/project/hydrosm/dma/data/WorldFloodsv2
+dir_path: ${paths.preprocess_dir}/worldfloodsv2/test
+window_size: [64, 64]
+channels: [3, 2, 1, 7]
+add_ndwi: true
+workers: 32
+filter_windows: true
+threshold_missing: 0.0
+image_prefix: S2
+gt_prefix: gt

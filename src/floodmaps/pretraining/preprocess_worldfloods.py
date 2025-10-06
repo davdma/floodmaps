@@ -15,7 +15,7 @@ import sys
 import traceback
 from datetime import datetime
 
-from floodmaps.pretraining.utils import WindowSize, WindowSlices, get_list_of_window_slices, filter_windows_v2
+from floodmaps.pretraining.data_utils import WindowSize, WindowSlices, get_list_of_window_slices, filter_windows_v2
 
 BANDS_S2 = ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B9", "B10", "B11", "B12"]
 BANDS_GT1 = ["Invalid", "Clear", "Cloud"]

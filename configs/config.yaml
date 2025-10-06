@@ -1,7 +1,10 @@
 defaults:
   - paths: default
-  - inference: inference_s2
-  - s2_unet_infer_v2 # for training
+  - inference: # inference_s2
+  - pretraining: # default
+  - preprocess: # preprocess_manual_experiment
+  # - pretrain_s2_unet # s2_unet_infer_v2 # for training
+  - s2_unet_ns_exp
   - _self_
 
 # hydra config

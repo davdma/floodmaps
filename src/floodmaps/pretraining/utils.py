@@ -1,148 +1,137 @@
-from typing import List, Callable
-from tqdm import tqdm
-import numpy as np
-import concurrent.futures
-from itertools import product
-import rasterio
-from rasterio import windows
-import json
-from collections import namedtuple
-from typing import Dict
+import torch
+from torch.utils.data import DataLoader
 
-WindowSize = namedtuple("WindowSize", ["height", "width"])
-WindowSlices = namedtuple("WindowSlices", ["file_name", "window"])
+class WFChannelIndexer:
+    """Abstract class for wrapping list of WorldFloodsS2 dataset channels used for input.
 
-def load_windows(filename:str) -> List[WindowSlices]:
-    with open(filename, "r") as fh:
-        list_of_windows = [Dict_to_WindowSlices(dictio) for dictio in json.load(fh)["slices"]]
-    return list_of_windows
+    The 5 available channels in order:
 
-def WindowSlices_to_Dict(ws: WindowSlices) -> Dict:
-    return {
-        "file_name" : ws.file_name,
-        "window": {
-            "col_off" : ws.window.col_off,
-            "row_off": ws.window.row_off,
-            "width": ws.window.width,
-            "height": ws.window.height,
-        }
-    }
+    1. B04 Red Reflectance
+    2. B03 Green Reflectance
+    3. B02 Blue Reflectance
+    4. B08 Near Infrared
+    5. NDWI
 
-def Dict_to_WindowSlices(ds: Dict) -> WindowSlices:
-    return WindowSlices(file_name=ds["file_name"],
-                        window=windows.Window(col_off=ds["window"]["col_off"],
-                                              row_off=ds["window"]["row_off"],
-                                              width=ds["window"]["width"],
-                                              height=ds["window"]["height"]))
-
-def get_window_tiles(
-    ds: rasterio.io.DatasetReader, height: int = 64, width: int = 64, **kwargs
-) -> List[rasterio.windows.Window]:
-    """a generator for rasterio specific slices given a rasterio dataset
-
-    Args:
-        ds (rasterio.io.DatasetReader): a rasterio dataset object
-        height (int): the height for the slice
-        width (int): the width for the slice
-
-    Yields:
-        window (rasterio.windows.Window): slicing
+    Parameters
+    ----------
+    channels : list[bool]
+        List of 5 booleans corresponding to the 11 input channels.
     """
-    # extract the row height from the dataset
-    n_columns, n_rows = ds.meta["width"], ds.meta["height"]
+    def __init__(self, channels):
+        self.channels = channels
+        self.names = ["rgb", "nir", "ndwi"]
 
-    # create the offsets
-    offsets = product(range(0, n_columns, width), range(0, n_rows, height)) # discrete tiling!
-    list_of_windows = []
-    for col_offset, row_offset in offsets:
-        iwindow = windows.Window(
-            col_off=col_offset, row_off=row_offset, width=width, height=height, **kwargs
-        )
-        list_of_windows.append(iwindow)
+    def has_rgb(self):
+        return all(self.channels[:3])
 
-    return list_of_windows
+    def has_b08(self):
+        return self.channels[3]
+    
+    def has_nir(self):
+        """Alias for has_b08() for consistency with visualization code."""
+        return self.has_b08()
 
-def get_list_of_window_slices(
-    file_names: List[str], window_size: WindowSize
-) -> List[WindowSlices]:
-    """Function to return the list of window slices for the all the
-    input images and the given window size.
+    def has_ndwi(self):
+        return self.channels[4]
 
-    Args:
-        file_names (List[str]): List of filenames that are to be sliced.
-        window_size (WindowSize): Window size of the tiles.
+    def get_channel_names(self):
+        return self.names
 
-    Returns:
-        List[WindowSlices]: List of window slices for the each tile
-        corresponding to each input image.
+    def get_display_channels(self):
+        """Channels specifically for sampling predictions."""
+        # need to fix this hardcoding later
+        display_names = []
+        if self.has_rgb():
+            display_names.append("rgb")
+        if self.has_nir():
+            display_names.append("nir")
+        if self.has_ndwi():
+            display_names.append("ndwi")
+        return display_names
+
+def wf_get_samples_with_wet_percentage(sample_set, num_samples, batch_size, num_workers, percent_wet_patches, rng):
     """
-
-    accumulated_list_of_windows = []
-    for ifilename in file_names:
-
-        with rasterio.open(ifilename) as dataset:
-            # get list of windows
-            list_of_windows = get_window_tiles(
-                dataset, height=window_size.height, width=window_size.width
-            )
-            # create a list of filenames
-            list_of_windows = [
-                WindowSlices(file_name=ifilename, window=iwindow)
-                for iwindow in list_of_windows
-            ]
-
-        accumulated_list_of_windows += list_of_windows
-
-    return accumulated_list_of_windows
-
-def _filter_windows(
-    fun_frac_invalids: Callable,
-    list_of_windows: List[WindowSlices],
-    threshold_missing: float = 0.5,
-    image_prefix: str = "S2",
-    gt_prefix: str = "gt",
-    num_workers: int = 8,
-) -> List[WindowSlices]:
-    """Filter windows from the dataset with more than threshold_missing * 100 of missing pixels, in parallel."""
-
-    def check_valid(sub_window: WindowSlices) -> bool:
-        y_name = sub_window.file_name.replace(image_prefix, gt_prefix, 1)
-        try:
-            with rasterio.open(y_name) as src:
-                label = src.read(window=sub_window.window, boundless=True, fill_value=0)
-            frac_invalids = fun_frac_invalids(label)
-            return frac_invalids <= threshold_missing
-        except Exception as e:
-            # Optionally log the error here
-            return False
-
-    valid_slices = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-        results = list(
-            tqdm(
-                executor.map(check_valid, list_of_windows),
-                total=len(list_of_windows),
-                desc="Filtering invalid and cloudy windows (parallel)",
-            )
-        )
-    valid_slices = [win for win, is_valid in zip(list_of_windows, results) if is_valid]
-    return valid_slices
-
-def filter_windows_v2(
-    list_of_windows: List[WindowSlices],
-    threshold_missing: float = 0.5,
-    image_prefix: str = "S2",
-    gt_prefix: str = "gt",
-    num_workers: int = 8,
-) -> List[WindowSlices]:
-    """Filter windows from the dataset with more than threshold_missing * 100 of missing pixels, in parallel."""
-
-    # Assumes first channel is cloud, second channel is water
-    return _filter_windows(
-        lambda label: ((label[0] == 0) & (label[1] == 0)).sum() / np.prod(label.shape[1:]),
-        list_of_windows,
-        threshold_missing=threshold_missing,
-        image_prefix=image_prefix,
-        gt_prefix=gt_prefix,
-        num_workers=num_workers,
-    )
+    Get a list of sample indices where a specified percentage has wet patches (y.sum() > 0).
+    Uses vectorized operations for much faster performance than Python loops.
+    
+    Parameters
+    ----------
+    sample_set : torch.utils.data.Dataset
+        The dataset to sample from
+    num_samples : int
+        Total number of samples to return
+    batch_size : int
+        Batch size for the DataLoader
+    num_workers : int
+        Number of workers for the DataLoader
+    percent_wet_patches : float
+        Percentage of samples that should have wet patches (0.0 to 1.0)
+    rng : Random
+        Random number generator instance
+        
+    Returns
+    -------
+    list
+        List of sample indices
+    """
+    # Use DataLoader with batch processing for vectorized operations
+    batch_size = min(batch_size, len(sample_set))  # Process in batches to avoid memory issues
+    dataloader = DataLoader(sample_set, batch_size=batch_size, num_workers=num_workers, shuffle=False)
+    wet_indices = []
+    dry_indices = []
+    
+    current_idx = 0
+    for batch_x, batch_y in dataloader:  # Unpack 2 values (image, label)
+        # Vectorized operation: check which samples have any positive pixels
+        # batch_y shape: (batch_size, channels, height, width)
+        # Sum over spatial dimensions (last 2 dims) and channels to get total water pixels per sample
+        water_pixels_per_sample = batch_y.sum(dim=(1, 2, 3))  # Shape: (batch_size,)
+        
+        # Get boolean mask for wet patches (samples with water_pixels > 0)
+        is_wet = water_pixels_per_sample > 0  # Shape: (batch_size,)
+        
+        # Convert to indices in the original dataset
+        batch_indices = torch.arange(current_idx, current_idx + batch_y.size(0))
+        wet_batch_indices = batch_indices[is_wet].tolist()
+        dry_batch_indices = batch_indices[~is_wet].tolist()
+        
+        wet_indices.extend(wet_batch_indices)
+        dry_indices.extend(dry_batch_indices)
+        
+        current_idx += batch_y.size(0)
+    
+    # Calculate number of wet and dry samples needed
+    num_wet_needed = int(num_samples * percent_wet_patches)
+    num_dry_needed = num_samples - num_wet_needed
+    
+    # Sample wet patches (with replacement if needed)
+    if len(wet_indices) >= num_wet_needed:
+        wet_samples = rng.sample(wet_indices, num_wet_needed)
+    else:
+        # If not enough wet patches, take all and sample with replacement
+        if len(wet_indices) > 0:
+            wet_samples = wet_indices + rng.choices(wet_indices, k=num_wet_needed - len(wet_indices))
+        else:
+            # No wet patches available, sample from dry patches instead
+            wet_samples = []
+            num_dry_needed = num_samples
+    
+    # Sample dry patches (with replacement if needed)
+    if len(dry_indices) >= num_dry_needed:
+        dry_samples = rng.sample(dry_indices, num_dry_needed)
+    else:
+        # If not enough dry patches, take all and sample with replacement
+        if len(dry_indices) > 0:
+            dry_samples = dry_indices + rng.choices(dry_indices, k=num_dry_needed - len(dry_indices))
+        else:
+            # No dry patches available, sample from wet patches instead
+            dry_samples = []
+            if len(wet_indices) > 0:
+                additional_wet_needed = num_dry_needed
+                wet_samples.extend(rng.choices(wet_indices, k=additional_wet_needed))
+    
+    # Combine and shuffle the samples
+    all_samples = wet_samples + dry_samples
+    rng.shuffle(all_samples)
+    
+    return all_samples

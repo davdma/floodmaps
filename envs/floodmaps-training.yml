@@ -21,4 +21,5 @@ dependencies:
     - rasterio
     - torcheval
     - Pillow
+    - albumentationsx
     - -e ..

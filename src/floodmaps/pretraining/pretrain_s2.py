@@ -1,14 +1,9 @@
-from floodmaps.pretraining.dataset import WorldFloodsS2Dataset
-
 import wandb
 import torch
 import logging
-import argparse
-import torch
 from torch import nn
 from torch.utils.data import DataLoader
 from datetime import datetime
-from torchvision import transforms
 from torchmetrics import MetricCollection
 from torchmetrics.classification import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score, BinaryConfusionMatrix, BinaryJaccardIndex
 from matplotlib.cm import ScalarMappable
@@ -17,21 +12,22 @@ import random
 from random import Random
 from PIL import Image
 import numpy as np
-import pickle
 from pathlib import Path
 import json
 from omegaconf import DictConfig, OmegaConf
 import hydra
 
 from floodmaps.models.model import S2WaterDetector
-from floodmaps.utils.utils import flatten_dict, get_model_params, Metrics, EarlyStopper, ChannelIndexer, nlcd_to_rgb, get_samples_with_wet_percentage
+from floodmaps.utils.utils import flatten_dict, get_model_params, Metrics, EarlyStopper
 from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
-from floodmaps.utils.metrics import compute_nlcd_metrics
 
 from floodmaps.training.loss import BCEDiceLoss, TverskyLoss
-from floodmaps.training.dataset import FloodSampleS2Dataset
 from floodmaps.training.optim import get_optimizer
 from floodmaps.training.scheduler import get_scheduler
+
+from floodmaps.pretraining.dataset  import WorldFloodsS2Dataset
+from floodmaps.pretraining.utils import WFChannelIndexer, wf_get_samples_with_wet_percentage
+import albumentations as A
 
 # TO IMPLEMENT: WITH DISCRIMINATOR, ADDITIONAL TRACKING OF DISCRIMINATOR OUTPUTS
 # COULD ALSO CONSIDER REMOVING DISCRIMINATOR, ONLY ATTACHING FOR TEST SET EVALUATION
@@ -61,11 +57,9 @@ def train_loop(model, dataloader, device, optimizer, loss_fn, run, epoch):
         BinaryF1Score(threshold=0.5),
         BinaryJaccardIndex(threshold=0.5)
     ]).to(device)
-    all_preds = []
-    all_targets = []
 
     model.train()
-    for X, y, _ in dataloader:
+    for X, y in dataloader:
         X = X.to(device)
         y = y.to(device)
 
@@ -78,15 +72,10 @@ def train_loop(model, dataloader, device, optimizer, loss_fn, run, epoch):
 
         y_pred = nn.functional.sigmoid(logits).flatten() > 0.5
         target = y.flatten() > 0.5
-        all_preds.append(y_pred)
-        all_targets.append(target)
+        metric_collection.update(y_pred, target)
         running_loss += loss.detach()
 
     # calculate metrics
-    all_preds = torch.cat(all_preds)
-    all_targets = torch.cat(all_targets)
-
-    metric_collection.update(all_preds, all_targets)
     metric_results = metric_collection.compute()
     epoch_loss = running_loss.item() / len(dataloader)
 
@@ -136,33 +125,22 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
         BinaryConfusionMatrix(threshold=0.5),
         BinaryJaccardIndex(threshold=0.5)
     ]).to(device)
-    all_preds = []
-    all_targets = []
-    all_nlcd_classes = []
     
     model.eval()
     with torch.no_grad():
-        for X, y, supplementary in dataloader:
+        for X, y in dataloader:  # WorldFloods doesn't use supplementary data
             X = X.to(device)
             y = y.to(device)
-            nlcd_classes = supplementary[:, 3, :, :].to(device)
 
             logits = model(X)
             loss = loss_fn(logits, y.float())
             
             y_pred = nn.functional.sigmoid(logits).flatten() > 0.5
             target = y.flatten() > 0.5
-            all_preds.append(y_pred)
-            all_targets.append(target)
-            all_nlcd_classes.append(nlcd_classes.flatten())
+            metric_collection.update(y_pred, target)
             running_vloss += loss.detach()
 
     # calculate metrics
-    all_preds = torch.cat(all_preds)
-    all_targets = torch.cat(all_targets)
-    all_nlcd_classes = torch.cat(all_nlcd_classes)
-
-    metric_collection.update(all_preds, all_targets)
     metric_results = metric_collection.compute()
     epoch_vloss = running_vloss.item() / len(dataloader)
 
@@ -180,7 +158,7 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
         log_dict.update({f'{typ} loss': epoch_vloss})
         run.log(log_dict, step=epoch)
 
-    # calculate confusion matrix + NLCD class metrics
+    # calculate confusion matrix (skip NLCD metrics - not available in WorldFloods)
     confusion_matrix = metric_results['BinaryConfusionMatrix'].tolist()
     confusion_matrix_dict = {
         "tn": confusion_matrix[0][0],
@@ -188,15 +166,16 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
         "fn": confusion_matrix[1][0],
         "tp": confusion_matrix[1][1]
     }
-    nlcd_metrics_dict = compute_nlcd_metrics(all_preds, all_targets, all_nlcd_classes)
     metric_collection.reset()
+
+    # DEBUG PRINT CONFUSION MATRIX:
+    print(f"Confusion matrix epoch {epoch}: {confusion_matrix_dict}")
 
     # separate the core loggable metrics from the nested dictionaries
     # for easier management downstream
     metrics_dict = {
         'core metrics': core_metrics_dict,
-        'confusion matrix': confusion_matrix_dict,
-        'nlcd metrics': nlcd_metrics_dict
+        'confusion matrix': confusion_matrix_dict
     }
 
     return epoch_vloss, metrics_dict
@@ -318,7 +297,7 @@ def save_experiment(cls_weights, disc_weights, metrics, cfg, run):
     with open(path / f"wandb_info.json", "w") as f:
         json.dump(wandb_info, f, indent=4)
 
-def sample_predictions(model, sample_set, mean, std, cfg, percent_wet_patches=0.5, seed=24330):
+def sample_predictions(model, sample_set, cfg, percent_wet_patches=0.5, seed=24330):
     """Generate predictions on a subset of images in the validation set for wandb logging.
     
     TODO: FIX CHANNEL INDEXING HARDCODING. Need more flexible way to handle channels.
@@ -329,10 +308,6 @@ def sample_predictions(model, sample_set, mean, std, cfg, percent_wet_patches=0.
         The model to evaluate
     sample_set : torch.utils.data.Dataset
         The dataset to sample predictions from
-    mean : torch.Tensor
-        The mean of the dataset
-    std : torch.Tensor
-        The standard deviation of the dataset
     cfg : DictConfig
         The configuration dictionary
     percent_wet_patches : float, optional
@@ -343,28 +318,33 @@ def sample_predictions(model, sample_set, mean, std, cfg, percent_wet_patches=0.
     if cfg.wandb.num_sample_predictions <= 0:
         return None
 
-    columns = ["id", "tci", "nlcd"] # TCI, NLCD always included
+    columns = ["id"]
     channels = [bool(int(x)) for x in cfg.data.channels]
-    my_channels = ChannelIndexer(channels) # ndwi, dem, slope_y, slope_x, waterbody, roads, flowlines
+    my_channels = WFChannelIndexer(channels) # ndwi, dem, slope_y, slope_x, waterbody, roads, flowlines
     # initialize wandb table given the channel settings
     columns += my_channels.get_display_channels()
     columns += ["truth", "prediction", "false positive", "false negative"] # added residual binary map
     table = wandb.Table(columns=columns)
+
+    def to_rgb_image_gamma_corrected(s2_rgb, gamma=1/2.2):
+        """Stretch Sentinel-2 RGB using percentile normalization."""
+        rgb = np.clip(s2_rgb, 0, 1)
+        rgb = np.power(rgb, gamma)
+        return (rgb * 255).astype(np.uint8)
+
+    if my_channels.has_nir():
+        # initialize mappable objects
+        nir_norm = Normalize(vmin=0, vmax=1)
+        nir_map = ScalarMappable(norm=nir_norm, cmap='gray')
     
     if my_channels.has_ndwi():
         # initialize mappable objects
         ndwi_norm = Normalize(vmin=-1, vmax=1)
         ndwi_map = ScalarMappable(norm=ndwi_norm, cmap='seismic_r')
-    if my_channels.has_dem():
-        dem_map = ScalarMappable(norm=None, cmap='gray')
-    if my_channels.has_slope_y():
-        slope_y_map = ScalarMappable(norm=None, cmap='RdBu')
-    if my_channels.has_slope_x():
-        slope_x_map = ScalarMappable(norm=None, cmap='RdBu')
-
-    # get map of each channel to index of resulting tensor
+    
+    # Build mapping from original channel index to position in filtered tensor
     n = 0
-    channel_indices = [-1] * 11
+    channel_indices = [-1] * 5
     for i, channel in enumerate(channels):
         if channel:
             channel_indices[i] = n
@@ -375,7 +355,8 @@ def sample_predictions(model, sample_set, mean, std, cfg, percent_wet_patches=0.
     rng = Random(seed)
     
     # Get samples with specified percentage of wet patches
-    samples = get_samples_with_wet_percentage(sample_set,
+    samples = wf_get_samples_with_wet_percentage(
+        sample_set,
         cfg.wandb.num_sample_predictions,
         cfg.train.batch_size,
         cfg.train.num_workers,
@@ -385,7 +366,7 @@ def sample_predictions(model, sample_set, mean, std, cfg, percent_wet_patches=0.
 
     for id, k in enumerate(samples):
         # get all images to shape (H, W, C) with C = 1 or 3 (1 for grayscale, 3 for RGB)
-        X, y, supplementary = sample_set[k]
+        X, y = sample_set[k]  # supplementary is dummy data for WorldFloods
         
         with torch.no_grad():
             logits = model(X.unsqueeze(0))
@@ -400,60 +381,32 @@ def sample_predictions(model, sample_set, mean, std, cfg, percent_wet_patches=0.
 
         # Channels are descaled using linear variance scaling
         X = X.permute(1, 2, 0)
-        X = std * X + mean
-
         row = [k]
 
-        # tci reference
-        tci = supplementary[:3, :, :].permute(1, 2, 0).mul(255).clamp(0, 255).byte().numpy()
-        tci_img = Image.fromarray(tci, mode="RGB")
-        row.append(wandb.Image(tci_img))
+        if my_channels.has_rgb():
+            rgb_arr = to_rgb_image_gamma_corrected(X[:, :, :3].numpy())
+            rgb_img = Image.fromarray(rgb_arr, mode="RGB")
+            row.append(wandb.Image(rgb_img))
 
-        # NLCD land cover visualization
-        nlcd = supplementary[3, :, :].byte().numpy()
-        nlcd_rgb = nlcd_to_rgb(nlcd)
-        nlcd_img = Image.fromarray(nlcd_rgb, mode="RGB")
-        row.append(wandb.Image(nlcd_img))
+        if my_channels.has_nir():
+            nir_idx = channel_indices[3]
+            if nir_idx == -1:
+                raise ValueError("NIR channel requested but not available in filtered tensor")
+            nir = X[:, :, nir_idx]
+            nir = nir_map.to_rgba(nir.numpy(), bytes=True)
+            nir = np.clip(nir, 0, 255).astype(np.uint8)
+            nir_img = Image.fromarray(nir, mode="RGBA")
+            row.append(wandb.Image(nir_img))
 
         if my_channels.has_ndwi():
-            ndwi = X[:, :, channel_indices[4]]
+            ndwi_idx = channel_indices[4]
+            if ndwi_idx == -1:
+                raise ValueError("NDWI channel requested but not available in filtered tensor")
+            ndwi = X[:, :, ndwi_idx]
             ndwi = ndwi_map.to_rgba(ndwi.numpy(), bytes=True)
             ndwi = np.clip(ndwi, 0, 255).astype(np.uint8)
             ndwi_img = Image.fromarray(ndwi, mode="RGBA")
             row.append(wandb.Image(ndwi_img))
-        if my_channels.has_dem():
-            dem = X[:, :, channel_indices[5]].numpy()
-            dem_map.set_norm(Normalize(vmin=np.min(dem), vmax=np.max(dem)))
-            dem = dem_map.to_rgba(dem, bytes=True)
-            dem = np.clip(dem, 0, 255).astype(np.uint8)
-            dem_img = Image.fromarray(dem, mode="RGBA")
-            row.append(wandb.Image(dem_img))
-        if my_channels.has_slope_y():
-            slope_y = X[:, :, channel_indices[6]].numpy()
-            slope_y_map.set_norm(Normalize(vmin=np.min(slope_y), vmax=np.max(slope_y)))
-            slope_y = slope_y_map.to_rgba(slope_y, bytes=True)
-            slope_y = np.clip(slope_y, 0, 255).astype(np.uint8)
-            slope_y_img = Image.fromarray(slope_y, mode="RGBA")
-            row.append(wandb.Image(slope_y_img))
-        if my_channels.has_slope_x():
-            slope_x = X[:, :, channel_indices[7]].numpy()
-            slope_x_map.set_norm(Normalize(vmin=np.min(slope_x), vmax=np.max(slope_x)))
-            slope_x = slope_x_map.to_rgba(slope_x, bytes=True)
-            slope_x = np.clip(slope_x, 0, 255).astype(np.uint8)
-            slope_x_img = Image.fromarray(slope_x, mode="RGBA")
-            row.append(wandb.Image(slope_x_img))
-        if my_channels.has_waterbody():
-            waterbody = X[:, :, channel_indices[8]].mul(255).clamp(0, 255).byte().numpy()
-            waterbody_img = Image.fromarray(waterbody, mode="L")
-            row.append(wandb.Image(waterbody_img))
-        if my_channels.has_roads():
-            roads = X[:, :, channel_indices[9]].mul(255).clamp(0, 255).byte().numpy()
-            roads_img = Image.fromarray(roads, mode="L")
-            row.append(wandb.Image(roads_img))
-        if my_channels.has_flowlines():
-            flowlines = X[:, :, channel_indices[10]].mul(255).clamp(0, 255).byte().numpy()
-            flowlines_img = Image.fromarray(flowlines, mode="L")
-            row.append(wandb.Image(flowlines_img))
 
         y = y.squeeze(0).mul(255).clamp(0, 255).byte().numpy()
         y_pred = y_pred.squeeze(0).mul(255).clamp(0, 255).byte().numpy()
@@ -502,36 +455,22 @@ def run_pretrain_s2(cfg):
 
     # dataset and transforms
     print(f"Using {device} device")
-    model_name = cfg.model.classifier
-    size = cfg.data.size
-    samples = cfg.data.samples
-    suffix = getattr(cfg.data, 'suffix', '')
-    # Use weak labeled dataset if specified, otherwise use manual labeled dataset
-    use_weak = getattr(cfg.data, 'use_weak', False)
-    dataset_type = 's2_weak' if use_weak else 's2'
-    if suffix:
-        sample_dir = Path(cfg.paths.preprocess_dir) / dataset_type / f'samples_{size}_{samples}_{suffix}/'
-    else:
-        sample_dir = Path(cfg.paths.preprocess_dir) / dataset_type / f'samples_{size}_{samples}/'
+    sample_dir = Path(cfg.paths.preprocess_dir) / 'worldfloodsv2' / 'test' # temporary name
 
-    # load in mean and std
     channels = [bool(int(x)) for x in cfg.data.channels]
-    with open(sample_dir / f'mean_std_{size}_{samples}.pkl', 'rb') as f:
-        train_mean, train_std = pickle.load(f)
-
-        train_mean = torch.from_numpy(train_mean[channels])
-        train_std = torch.from_numpy(train_std[channels])
-
-    standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
+    train_transform = A.Compose([
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p=0.5),
+        A.RandomRotate90(p=0.5),
+    ], seed=cfg.seed)
 
     # datasets
-    train_set = FloodSampleS2Dataset(sample_dir, channels=channels,
-                                        typ="train", transform=standardize, random_flip=cfg.data.random_flip,
-                                        seed=cfg.seed+1)
-    val_set = FloodSampleS2Dataset(sample_dir, channels=channels,
-                                    typ="val", transform=standardize)
-    test_set = FloodSampleS2Dataset(sample_dir, channels=channels,
-                                        typ="test", transform=standardize) if cfg.eval.mode == 'test' else None
+    train_set = WorldFloodsS2Dataset(sample_dir, channels=channels,
+                                        typ="train", transform=train_transform)
+    val_set = WorldFloodsS2Dataset(sample_dir, channels=channels,
+                                    typ="val", transform=None)
+    test_set = WorldFloodsS2Dataset(sample_dir, channels=channels,
+                                        typ="test", transform=None) if cfg.eval.mode == 'test' else None
 
     # dataloaders
     train_loader = DataLoader(train_set,
@@ -547,7 +486,7 @@ def run_pretrain_s2(cfg):
                             num_workers=cfg.train.num_workers,
                             persistent_workers=cfg.train.num_workers>0,
                             pin_memory=True,
-                            shuffle=True,
+                            shuffle=False,
                             drop_last=False)
 
     test_loader = DataLoader(test_set,
@@ -555,7 +494,7 @@ def run_pretrain_s2(cfg):
                             num_workers=cfg.train.num_workers,
                             persistent_workers=cfg.train.num_workers>0,
                             pin_memory=True,
-                            shuffle=True,
+                            shuffle=False,
                             drop_last=False) if cfg.eval.mode == 'test' else None
 
     # initialize wandb run
@@ -567,7 +506,7 @@ def run_pretrain_s2(cfg):
         project=cfg.wandb.project,
         group=cfg.wandb.group,
         config={
-            "dataset": "Sentinel2",
+            "dataset": "WorldFloodsS2",
             **config_dict,
             "training_size": len(train_set),
             "validation_size": len(val_set),
@@ -594,8 +533,7 @@ def run_pretrain_s2(cfg):
 
         # log predictions on validation set using wandb
         percent_wet = cfg.wandb.get('percent_wet_patches', 0.5)  # Default to 0.5 if not specified
-        pred_table = sample_predictions(model, test_set if cfg.eval.mode == 'test' else val_set,
-                                        train_mean, train_std, cfg, percent_wet_patches=percent_wet)
+        pred_table = sample_predictions(model, test_set if cfg.eval.mode == 'test' else val_set, cfg, percent_wet_patches=percent_wet)
         run.log({f"model_{cfg.eval.mode}_predictions": pred_table})
     except Exception as e:
         print("An exception occurred during training!")
@@ -618,7 +556,7 @@ def run_pretrain_s2(cfg):
 
 def validate_config(cfg):
     def validate_channels(s):
-        return type(s) == str and len(s) == 11 and all(c in '01' for c in s)
+        return type(s) == str and len(s) == 5 and all(c in '01' for c in s)
 
     # Add checks
     assert cfg.save in [True, False], "Save must be a boolean"
@@ -632,10 +570,9 @@ def validate_config(cfg):
     assert cfg.train.early_stopping in [True, False], "Early stopping must be a boolean"
     assert not cfg.train.early_stopping or cfg.train.patience is not None, "Patience must be set if early stopping is enabled"
     assert cfg.model.classifier in MODEL_NAMES, f"Model must be one of {MODEL_NAMES}"
-    assert cfg.data.random_flip in [True, False], "Random flip must be a boolean"
     assert cfg.eval.mode in ['val', 'test'], f"Evaluation mode must be one of {['val', 'test']}"
     assert cfg.wandb.project is not None, "Wandb project must be specified"
-    assert validate_channels(cfg.data.channels), "Channels must be a binary string of length 11"
+    assert validate_channels(cfg.data.channels), "Channels must be a binary string of length 5"
 
 @hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig):

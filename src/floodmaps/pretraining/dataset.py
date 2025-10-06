@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-from random import Random
 from torch.utils.data import Dataset
 from pathlib import Path
 
@@ -28,25 +27,20 @@ class WorldFloodsS2Dataset(Dataset):
         The subset of the dataset to load: train, val, test.
     transform : obj
         PyTorch transform.
-    random_flip : bool
-        Randomly flip patches (vertically or horizontally) for augmentation.
     seed : int
         Random seed.
 
     Returns
     -------
     image : torch.Tensor
-        The input image (11 channels).
+        The input image (filtered based on channels parameter).
     label : torch.Tensor
         The binary label (1 channel).
-    supplementary : torch.Tensor
-        The TCI (3 channels) + NLCD (1 channel).
     """
-    def __init__(self, sample_dir, channels=[True] * 5, typ="train", random_flip=False, transform=None, seed=3200):
+    def __init__(self, sample_dir, channels=[True] * 5, typ="train", transform=None, seed=3200):
         self.sample_dir = Path(sample_dir)
         self.channels = channels + [True] # always keep label
         self.typ = typ
-        self.random_flip = random_flip
         self.transform = transform
         self.seed = seed
 
@@ -58,35 +52,22 @@ class WorldFloodsS2Dataset(Dataset):
         
         self.dataset = base
 
-        if random_flip:
-            self.random = Random(seed)
-
     def __len__(self):
         return self.dataset.shape[0]
 
     def __getitem__(self, idx):
         patch = self.dataset[idx]
-        image = torch.from_numpy(patch[:-1, :, :])
-        label = torch.from_numpy(patch[-1, :, :]).unsqueeze(0)
-
+        image = np.transpose(patch[:-1, :, :], (1, 2, 0))
+        label = patch[-1, :, :]
+        
         if self.transform:
-            image = self.transform(image)
+            # For albumentations, pass both image and mask in HWC format
+            augmented = self.transform(image=image, mask=label)
+            # Extract results
+            image = augmented['image']
+            label = augmented['mask']
 
-        # add random flips and rotations? Could help prevent learning constant shift...
-        if self.random_flip and self.typ == "train":
-            image, label = self.hv_random_flip(image, label)
+        image = torch.from_numpy(np.transpose(image, (2, 0, 1)))
+        label = torch.from_numpy(label).unsqueeze(0)
 
         return image, label
-
-    def hv_random_flip(self, x, y):
-        # Random horizontal flipping
-        if self.random.random() > 0.5:
-            x = torch.flip(x, [2])
-            y = torch.flip(y, [2])
-
-        # Random vertical flipping
-        if self.random.random() > 0.5:
-            x = torch.flip(x, [1])
-            y = torch.flip(y, [1])
-
-        return x, y

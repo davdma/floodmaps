@@ -24,6 +24,8 @@ from omegaconf import DictConfig
 from floodmaps.utils.sampling_utils import (
     PRISM_CRS,
     SEARCH_CRS,
+    BOA_ADD_OFFSET,
+    PROCESSING_BASELINE,
     NLCD_CODE_TO_RGB,
     PRISMData,
     DateCRSOrganizer,
@@ -328,9 +330,14 @@ def pipeline_NDWI(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
 
     out_image2, out_transform = crop_to_bounds(b08_item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
     nir = out_image2[0].astype(np.int32)
-    
-    # calculate ndwi
-    ndwi = np.where((green + nir) != 0, (green - nir)/(green + nir), -999999)
+
+    # calculate ndwi with BOA offset for baseline-or-later captures
+    if item.datetime >= PROCESSING_BASELINE:
+        green_corrected = green.astype(np.float32) + BOA_ADD_OFFSET
+        nir_corrected = nir.astype(np.float32) + BOA_ADD_OFFSET
+        ndwi = np.where((green_corrected + nir_corrected) != 0, (green_corrected - nir_corrected) / (green_corrected + nir_corrected), -999999)
+    else:
+        ndwi = np.where((green + nir) != 0, (green - nir) / (green + nir), -999999)
 
     # save raw
     with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=ndwi.shape[-2], width=ndwi.shape[-1], crs=dst_crs, dtype=ndwi.dtype, transform=out_transform, nodata=-999999) as dst:

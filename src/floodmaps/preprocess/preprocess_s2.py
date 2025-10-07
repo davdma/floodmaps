@@ -16,6 +16,11 @@ import psutil
 import shutil
 from numpy.lib.format import open_memmap
 
+from floodmaps.utils.sampling_utils import (
+    PROCESSING_BASELINE,
+    BOA_ADD_OFFSET,
+)
+
 def _find_event_dir(img_dt: str, eid: str, sample_dirs: List[str], cfg: DictConfig) -> Optional[Path]:
     """Find the first dataset directory under the imagery_dir that contains the
     eid directory.
@@ -210,6 +215,7 @@ def load_tile_for_sampling(tile_info: Tuple):
     if m:
         tile_date = m.group(1)
         eid = m.group(2)
+        tile_dt_obj = datetime.strptime(tile_date, '%Y%m%d')
     else:
         raise ValueError(f'Label file {label_rel} does not match expected format.')
 
@@ -238,14 +244,32 @@ def load_tile_for_sampling(tile_info: Tuple):
 
     with rasterio.open(rgb_file) as src:
         rgb_raster = src.read().astype(np.float32)
-        rgb_raster = rgb_raster / 10000.0  # Scale reflectance to [0, 1]
+        if tile_dt_obj >= PROCESSING_BASELINE:
+            rgb_raster = rgb_raster + BOA_ADD_OFFSET
 
     with rasterio.open(b08_file) as src:
         b08_raster = src.read().astype(np.float32)
-        b08_raster = b08_raster / 10000.0  # Scale reflectance to [0, 1]
+        if tile_dt_obj >= PROCESSING_BASELINE:
+            b08_raster = b08_raster + BOA_ADD_OFFSET
 
     with rasterio.open(ndwi_file) as src:
-        ndwi_raster = src.read().astype(np.float32)  # Keep as-is (already in [-1, 1])
+        if tile_dt_obj >= PROCESSING_BASELINE:
+            # Post processing baseline, need to use different equation for ndwi
+            # This is a temporary patch, but we want to fix this at the data pipeline step!
+            recompute_ndwi = np.where(
+                (rgb_raster[1] + b08_raster[0]) != 0,
+                (rgb_raster[1] - b08_raster[0]) / (rgb_raster[1] + b08_raster[0]),
+                -999999
+            )
+            ndwi_raster = np.expand_dims(recompute_ndwi, axis = 0)
+        else:
+            ndwi_raster = src.read().astype(np.float32)  # Keep as-is (already in [-1, 1])
+    
+    # clip and scale spectral bands by QUANTIFICATION VALUE=10000
+    np.clip(rgb_raster, None, 10000.0, out=rgb_raster)
+    rgb_raster = rgb_raster / 10000.0  # Scale reflectance to [0, 1]
+    np.clip(b08_raster, None, 10000.0, out=b08_raster)
+    b08_raster = b08_raster / 10000.0  # Scale reflectance to [0, 1]
 
     with rasterio.open(dem_file) as src:
         dem_raster = src.read().astype(np.float32)

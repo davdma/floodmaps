@@ -293,16 +293,17 @@ def load_tile_for_sampling(tile_info: Tuple):
         if tile_dt_obj >= PROCESSING_BASELINE:
             b08_raster = b08_raster + BOA_ADD_OFFSET
     
-    with rasterio.open(ndwi_file) as src:
-        if tile_dt_obj >= PROCESSING_BASELINE:
-            # Recompute NDWI using harmonized (offset-applied) Green (B03) and NIR (B08)
-            recompute_ndwi = np.where(
-                (rgb_raster[1] + b08_raster[0]) != 0,
-                (rgb_raster[1] - b08_raster[0]) / (rgb_raster[1] + b08_raster[0]),
-                -999999
-            )
-            ndwi_raster = np.expand_dims(recompute_ndwi, axis = 0)
-        else:
+    if tile_dt_obj >= PROCESSING_BASELINE:
+        # Temporary fix for NDWI computation
+        # Recompute NDWI using harmonized (offset-applied) Green (B03) and NIR (B08)
+        recompute_ndwi = np.where(
+            (rgb_raster[1] + b08_raster[0]) != 0,
+            (rgb_raster[1] - b08_raster[0]) / (rgb_raster[1] + b08_raster[0]),
+            -999999
+        )
+        ndwi_raster = np.expand_dims(recompute_ndwi, axis = 0)
+    else:
+        with rasterio.open(ndwi_file) as src:
             ndwi_raster = src.read().astype(np.float32)  # Keep as-is (already in [-1, 1])
 
     # Clip and scale spectral bands by quantification value 10000

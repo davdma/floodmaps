@@ -1,7 +1,8 @@
 # Configuration for S2 cloud sampling script
 # This config is designed for collecting high cloud coverage tiles for training cloud-robust models
-
-min_cloud_percentage: 99 # minimum cloud cover percentage for filtering S2 tiles (99-100%)
+max_null_percentage: 0 # maximum null cover percentage for filtering S2 tiles (0-100%)
+min_scl_percentage: 99 # minimum cloud cover percentage for filtering S2 tiles (99-100%)
+scl_classes: [8, 9] # SCL classes to filter for
 before: 0 # number of days allowed for download before event date
 after: 5 # number of days allowed for download following event date
 maxevents: 60 # maximum number of cloudy events to attempt downloading

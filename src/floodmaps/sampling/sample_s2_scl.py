@@ -899,7 +899,7 @@ def pipeline_NLCD(dir_path: Path, save_as, year, dst_shape, dst_crs, dst_transfo
         dst.write(rgb_img)
 
 def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_path: Path, cfg, manual_crs=None,
-                 max_null_percentage=0, min_scl_percentage=50, scl_classes=None):
+                 max_null_percentage=0, min_scl_percentage=50, scl_classes=[8, 9]):
     """Samples S2 imagery for events with high coverage of specified SCL classes and generates accompanying rasters.
     
     Note to developers: the script simplifies normalization onto a consistent grid by finding any common CRS shared by S2 and S1 products.
@@ -935,7 +935,7 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
     min_scl_percentage : int, optional
         Minimum SCL class coverage percentage threshold (default: 50).
     scl_classes : list[int], optional
-        List of SCL class codes to filter for. If None, uses cfg.sampling.scl_classes or defaults to [8, 9].
+        List of SCL class codes to filter for. Defaults to [8, 9].
 
     Returns
     -------
@@ -955,12 +955,9 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
     bbox = (conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1])
     event_dir_path = dir_path / eid
     time_of_interest = get_date_interval(event_date, cfg.sampling.before, cfg.sampling.after)
-
-    # Get SCL classes from config, default to cloud classes [8, 9] if not specified
-    scl_classes_to_filter = scl_classes if scl_classes is not None else cfg.sampling.get('scl_classes', [8, 9])
     
     # STAC catalog search - search for tiles with high SCL class coverage
-    logger.info(f'Beginning catalog search for tiles with high coverage of SCL classes {scl_classes_to_filter}...')
+    logger.info(f'Beginning catalog search for tiles with high coverage of SCL classes {scl_classes}...')
     items_s2 = stac_provider.search_s2(bbox, time_of_interest, query={"eo:cloud_cover": {"gte": cfg.sampling.get('min_cloud_percentage', 95)}})
             
     logger.info('Filtering catalog search results...')
@@ -979,9 +976,9 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
         item_crs = pe.ext(item).crs_string
         try:
             nullpercentage = null_percentage(stac_provider, item, item_crs, prism_bbox)
-            scl_percentage = scl_class_percentage(stac_provider, item, item_crs, prism_bbox, scl_classes_to_filter)
+            scl_percentage = scl_class_percentage(stac_provider, item, item_crs, prism_bbox, scl_classes)
             logger.info(f'Null percentage for item {item.id}: {nullpercentage}')
-            logger.info(f'SCL class {scl_classes_to_filter} percentage for item {item.id}: {scl_percentage}')
+            logger.info(f'SCL class {scl_classes} percentage for item {item.id}: {scl_percentage}')
         except Exception as err:
             logger.exception(f'SCL class / null percentage calculation error for item {item.id}.')
             raise err
@@ -1100,7 +1097,7 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
             "Item IDs": file_to_product,
             "Max Null Percentage (%)": cfg.sampling.get('max_null_percentage', max_null_percentage),
             "Min SCL Class Percentage (%)": cfg.sampling.get('min_scl_percentage', min_scl_percentage),
-            "SCL Classes": scl_classes_to_filter
+            "SCL Classes": scl_classes
         }
     }
 
@@ -1261,7 +1258,7 @@ def main(cfg: DictConfig) -> None:
                                     manual_crs=crs,
                                     max_null_percentage=cfg.sampling.get('max_null_percentage', 0),
                                     min_scl_percentage=cfg.sampling.get('min_scl_percentage', 50),
-                                    scl_classes=cfg.sampling.get('scl_classes', [8, 9])):
+                                    scl_classes=list(cfg.sampling.get('scl_classes', [8, 9]))):
                         count += 1
                     history.add(indices)
                     break

@@ -143,8 +143,27 @@ def null_percentage(stac_provider, item, item_crs, bbox):
     out_image, _ = rasterio.merge.merge([item_href], bounds=img_bbox)
     return int(((out_image == 0).sum() / out_image.size) * 100)
 
-def cloud_percentage(stac_provider, item, item_crs, bbox):
-    """Calculates the percentage of pixels in the bounding box of the S2 image that are cloud."""
+def scl_class_percentage(stac_provider, item, item_crs, bbox, scl_classes):
+    """Calculates the percentage of pixels in the bounding box of the S2 image that match the specified SCL classes.
+    
+    Parameters
+    ----------
+    stac_provider : STACProvider
+        STAC provider object.
+    item : Item
+        PyStac Item object.
+    item_crs : str
+        Coordinate reference system of the item.
+    bbox : (float, float, float, float)
+        Tuple in the order minx, miny, maxx, maxy, representing bounding box.
+    scl_classes : list[int]
+        List of SCL class codes to filter for (e.g., [8, 9] for clouds).
+    
+    Returns
+    -------
+    int
+        Percentage of pixels matching the specified SCL classes.
+    """
     scl_name = stac_provider.get_asset_names("s2")["SCL"]
     item_href = stac_provider.sign_asset_href(item.assets[scl_name].href)
 
@@ -152,7 +171,7 @@ def cloud_percentage(stac_provider, item, item_crs, bbox):
     img_bbox = conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]
 
     out_image, _ = rasterio.merge.merge([item_href], bounds=img_bbox)
-    return int((np.isin(out_image, [8, 9]).sum() / out_image.size) * 100)
+    return int((np.isin(out_image, scl_classes).sum() / out_image.size) * 100)
 
 # we will choose a UTM zone CRS already given and stick to it for rest of sample data!
 def pipeline_TCI(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
@@ -191,7 +210,7 @@ def pipeline_TCI(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
 
     return (out_image.shape[-2], out_image.shape[-1]), out_transform
 
-def pipeline_SCL(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst_transform, item, bbox):
+def pipeline_clouds(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst_transform, item, bbox, cloud_classes=[8, 9, 10]):
     """Generates Scene Classification Layer raster of S2 multispectral file and resamples to 10m resolution.
 
     Parameters
@@ -213,12 +232,14 @@ def pipeline_SCL(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst
     bbox : (float, float, float, float)
         Tuple in the order minx, miny, maxx, maxy, representing bounding box, 
         should be in CRS specified by dst_crs.
+    cloud_classes : list[int]
+        List of cloud class codes to filter for (default: [8, 9, 10]).
     """
     scl_name = stac_provider.get_asset_names("s2")["SCL"]
     item_href = stac_provider.sign_asset_href(item.assets[scl_name].href)
 
     out_image, out_transform = crop_to_bounds(item_href, bbox, dst_crs, nodata=0, resampling=Resampling.nearest)
-    clouds = np.isin(out_image[0], [8, 9, 10]).astype(np.uint8)
+    clouds = np.isin(out_image[0], cloud_classes).astype(np.uint8)
 
     # need to resample to grid of tci
     h, w = dst_shape[-2:]
@@ -878,8 +899,8 @@ def pipeline_NLCD(dir_path: Path, save_as, year, dst_shape, dst_crs, dst_transfo
         dst.write(rgb_img)
 
 def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_path: Path, cfg, manual_crs=None,
-                 max_null_percentage=0, min_cloud_percentage=99):
-    """Samples S2 imagery for a high precipitation event based on parameters and generates accompanying rasters.
+                 max_null_percentage=0, min_scl_percentage=50, scl_classes=None):
+    """Samples S2 imagery for events with high coverage of specified SCL classes and generates accompanying rasters.
     
     Note to developers: the script simplifies normalization onto a consistent grid by finding any common CRS shared by S2 and S1 products.
     Once it finds a CRS in common, all products that do not share that CRS are thrown out. The first S2 product is cropped using the bounding box
@@ -901,12 +922,20 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
         Event id.
     dir_path : Path
         Path for sampling folder of events.
+    cfg : DictConfig
+        Configuration object.
     manual_crs : str, optional
         Manual CRS specification for event processing. If provided, this CRS will be used
         instead of automatically selecting (alphabetically) from available products. The CRS
         determines the resulting shape of the generated rasters, so specifying the CRS prevents
         any shape ambiguity. This is especially important for downloading events for previously
         labeled products.
+    max_null_percentage : int, optional
+        Maximum null percentage threshold (default: 0).
+    min_scl_percentage : int, optional
+        Minimum SCL class coverage percentage threshold (default: 50).
+    scl_classes : list[int], optional
+        List of SCL class codes to filter for. If None, uses cfg.sampling.scl_classes or defaults to [8, 9].
 
     Returns
     -------
@@ -927,8 +956,11 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
     event_dir_path = dir_path / eid
     time_of_interest = get_date_interval(event_date, cfg.sampling.before, cfg.sampling.after)
 
-    # STAC catalog search - search for high cloud cover tiles
-    logger.info('Beginning catalog search for cloudy tiles...')
+    # Get SCL classes from config, default to cloud classes [8, 9] if not specified
+    scl_classes_to_filter = scl_classes if scl_classes is not None else cfg.sampling.get('scl_classes', [8, 9])
+    
+    # STAC catalog search - search for tiles with high SCL class coverage
+    logger.info(f'Beginning catalog search for tiles with high coverage of SCL classes {scl_classes_to_filter}...')
     items_s2 = stac_provider.search_s2(bbox, time_of_interest, query={"eo:cloud_cover": {"gte": cfg.sampling.get('min_cloud_percentage', 95)}})
             
     logger.info('Filtering catalog search results...')
@@ -936,22 +968,22 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
         logger.info(f'Zero products from query for date interval {time_of_interest}.')
         return False
     elif not has_date_after_PRISM([item.datetime for item in items_s2], event_date):
-        logger.info(f'Cloudy products found but only before event date {event_date}.')
+        logger.info(f'Products found but only before event date {event_date}.')
         return False
 
     # group items by dates in dictionary
-    logger.info(f'Checking s2 cloud null percentage for high cloud coverage...')
+    logger.info(f'Checking S2 null percentage and SCL class coverage...')
     s2_by_date_crs = DateCRSOrganizer()
     for item in items_s2:
-        # filter FOR high cloud coverage tiles (opposite of original logic)
+        # filter FOR high SCL class coverage tiles
         item_crs = pe.ext(item).crs_string
         try:
             nullpercentage = null_percentage(stac_provider, item, item_crs, prism_bbox)
-            coverpercentage = cloud_percentage(stac_provider, item, item_crs, prism_bbox)
+            scl_percentage = scl_class_percentage(stac_provider, item, item_crs, prism_bbox, scl_classes_to_filter)
             logger.info(f'Null percentage for item {item.id}: {nullpercentage}')
-            logger.info(f'Cloud percentage for item {item.id}: {coverpercentage}')
+            logger.info(f'SCL class {scl_classes_to_filter} percentage for item {item.id}: {scl_percentage}')
         except Exception as err:
-            logger.exception(f'Cloud / null percentage calculation error for item {item.id}.')
+            logger.exception(f'SCL class / null percentage calculation error for item {item.id}.')
             raise err
 
         # Filter out tiles with high null percentage
@@ -960,10 +992,10 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
             logger.debug(f'Sample {item.id} near event {event_date}, at {minx}, {miny}, {maxx}, {maxy} rejected due to {nullpercentage}% > {max_null_pct}% null percentage.')
             continue
 
-        # Keep tiles with HIGH cloud coverage (reverse the original logic)
-        min_cloud_pct = cfg.sampling.get('min_cloud_percentage', min_cloud_percentage)
-        if coverpercentage < min_cloud_pct:
-            logger.debug(f'Sample {item.id} near event {event_date}, at {minx}, {miny}, {maxx}, {maxy} rejected due to only {coverpercentage}% cloud cover (need >= {min_cloud_pct}%).')
+        # Keep tiles with HIGH SCL class coverage
+        min_scl_pct = cfg.sampling.get('min_scl_percentage', min_scl_percentage)
+        if scl_percentage < min_scl_pct:
+            logger.debug(f'Sample {item.id} near event {event_date}, at {minx}, {miny}, {maxx}, {maxy} rejected due to only {scl_percentage}% SCL class coverage (need >= {min_scl_pct}%).')
             continue
 
         s2_by_date_crs.add_item(item, item.datetime, item_crs)
@@ -1013,7 +1045,7 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
             logger.debug(f'B08 raster completed for {dt}.')
             pipeline_NDWI(stac_provider, event_dir_path, f'ndwi_{dt}_{eid}', main_crs, item, cbbox)
             logger.debug(f'NDWI raster completed for {dt}.')
-            pipeline_SCL(stac_provider, event_dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox)
+            pipeline_clouds(stac_provider, event_dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox)
             logger.debug(f'SCL raster completed for {dt}.')
 
             # record product used to generate rasters
@@ -1066,8 +1098,9 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
                 "maxy": maxy
             },
             "Item IDs": file_to_product,
-            "Max Cloud/Nodata Cover Percentage (%)": 100,
-            "Min Cloud Cover Percentage (%)": cfg.sampling.get('min_cloud_percentage', 99)
+            "Max Null Percentage (%)": cfg.sampling.get('max_null_percentage', max_null_percentage),
+            "Min SCL Class Percentage (%)": cfg.sampling.get('min_scl_percentage', min_scl_percentage),
+            "SCL Classes": scl_classes_to_filter
         }
     }
 
@@ -1080,11 +1113,11 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
 @hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig) -> None:
     """
-    Randomly samples PRISM cells across the US and filters for high cloud coverage S2 tiles (99-100%).
-    This script is designed to collect cloudy imagery samples for training models to avoid cloud artifacts.
-    Downloaded samples will contain multispectral data with high cloud coverage, along with supplementary
-    rasters including roads from TIGER dataset, DEM raster from USGS, flowlines and waterbody rasters 
-    from NHDPlus dataset. All rasters will be 4km x 4km at 10m resolution.
+    Randomly samples PRISM cells across the US and filters for S2 tiles with high coverage of specified SCL classes.
+    This script is designed to collect imagery samples with specific Scene Classification Layer (SCL) classes,
+    such as clouds, snow, water, or vegetation. Downloaded samples will contain multispectral data along with 
+    supplementary rasters including roads from TIGER dataset, DEM raster from USGS, flowlines and waterbody 
+    rasters from NHDPlus dataset. All rasters will be 4km x 4km at 10m resolution.
 
     Manual file
     -----------
@@ -1095,10 +1128,13 @@ def main(cfg: DictConfig) -> None:
     Regions mask the PRISM cell grid to only sample from specific regions (e.g., CESER mask).
     If no region is specified, samples randomly from the entire US.
 
-    Cloud Filtering
-    ---------------
-    Unlike the original precipitation-based sampling, this script specifically looks for tiles with
-    high cloud coverage (default: 99%+) to create training data for cloud-robust models.
+    SCL Class Filtering
+    -------------------
+    This script filters for tiles with high coverage of specified SCL classes. Common SCL classes include:
+    - Clouds: [8, 9, 10] (cloud medium probability, high probability, thin cirrus)
+    - Water: [6] (water)
+    - Cloud Shadows: [3]
+    - Vegetation: [4] (vegetation)
     
     Parameters
     ----------
@@ -1109,14 +1145,16 @@ def main(cfg: DictConfig) -> None:
     -----------------------
     max_null_percentage : int, optional
         Maximum null cover percentage for filtering S2 tiles (default: 0).
-    min_cloud_percentage : int, optional
-        Minimum cloud cover percentage for filtering S2 tiles (default: 99).
+    min_scl_percentage : int, optional
+        Minimum SCL class coverage percentage for filtering S2 tiles (default: 99).
+    scl_classes : list[int], optional
+        List of SCL class codes to filter for (default: [8, 9])
     days_before : int
         Number of days of interest before event date.
     days_after : int
         Number of days of interest following event date.
     maxevents: int or None
-        Specify a limit to the number of cloudy events to process.
+        Specify a limit to the number of events to process.
     dir_path : str, optional
         Path to directory where samples will be saved.
     region : str, optional
@@ -1131,11 +1169,13 @@ def main(cfg: DictConfig) -> None:
     int
     """
     # make directory
+    min_scl_pct = cfg.sampling.get('min_scl_percentage', 50)
+    scl_classes = cfg.sampling.get('scl_classes', [8, 9])
     if cfg.sampling.dir_path is None:
-        # Generate default directory path for cloud sampling
-        min_cloud_pct = cfg.sampling.get('min_cloud_percentage', 99)
+        # Generate default directory path for SCL class sampling
+        scl_str = "-".join(map(str, scl_classes))
         region_str = f"_{cfg.sampling.region}" if cfg.sampling.region else ""
-        cfg.sampling.dir_path = str(Path(cfg.paths.imagery_dir) / f"s2_clouds_{min_cloud_pct}pct_{cfg.sampling.before}_{cfg.sampling.after}{region_str}/")
+        cfg.sampling.dir_path = str(Path(cfg.paths.imagery_dir) / f"s2_scl_{scl_str}_{min_scl_pct}pct_{cfg.sampling.before}_{cfg.sampling.after}{region_str}/")
         Path(cfg.sampling.dir_path).mkdir(parents=True, exist_ok=True)
     else:
         # Create directory if it doesn't exist
@@ -1143,9 +1183,9 @@ def main(cfg: DictConfig) -> None:
             Path(cfg.sampling.dir_path).mkdir(parents=True, exist_ok=True)
         except (OSError, ValueError) as e:
             print(f"Invalid directory path '{cfg.sampling.dir_path}'. Using default.", file=sys.stderr)
-            min_cloud_pct = cfg.sampling.get('min_cloud_percentage', 99)
+            scl_str = "-".join(map(str, scl_classes))
             region_str = f"_{cfg.sampling.region}" if cfg.sampling.region else ""
-            cfg.sampling.dir_path = str(Path(cfg.paths.imagery_dir) / f"s2_clouds_{min_cloud_pct}pct_{cfg.sampling.before}_{cfg.sampling.after}{region_str}/")
+            cfg.sampling.dir_path = str(Path(cfg.paths.imagery_dir) / f"s2_scl_{scl_str}_{min_scl_pct}pct_{cfg.sampling.before}_{cfg.sampling.after}{region_str}/")
             Path(cfg.sampling.dir_path).mkdir(parents=True, exist_ok=True)
 
         # Ensure trailing slash
@@ -1159,9 +1199,10 @@ def main(cfg: DictConfig) -> None:
 
     # log sampling parameters used
     rootLogger.info(
-        "S2 cloudy tile sampling parameters used:\n"
+        "S2 SCL class filtering sampling parameters used:\n"
+        f"  SCL classes to filter for: {scl_classes}\n"
         f"  Max null coverage percentage: {cfg.sampling.get('max_null_percentage', 0)}\n"
-        f"  Min cloud coverage percentage: {cfg.sampling.get('min_cloud_percentage', 99)}\n"
+        f"  Min SCL class coverage percentage: {min_scl_pct}\n"
         f"  Days before event: {cfg.sampling.before}\n"
         f"  Days after event: {cfg.sampling.after}\n"
         f"  Max events to sample: {cfg.sampling.maxevents}\n"
@@ -1184,7 +1225,7 @@ def main(cfg: DictConfig) -> None:
         rootLogger.info(f"Found {num_candidates} events from {cfg.sampling.manual}.")
     else:
         mask = get_mask(cfg, prism_data.shape)
-        rootLogger.info("Finding random PRISM cells for cloudy tile sampling...")
+        rootLogger.info("Finding random PRISM cells for SCL class filtering...")
         num_candidates, events = get_random_events(
             prism_data, 
             history, 
@@ -1193,7 +1234,7 @@ def main(cfg: DictConfig) -> None:
             random_seed=cfg.sampling.get('random_seed', None),
             logger=rootLogger
         )
-        rootLogger.info(f"Found {num_candidates} candidate random PRISM cells for cloudy tile sampling.")
+        rootLogger.info(f"Found {num_candidates} candidate random PRISM cells for SCL class filtering.")
 
     rootLogger.info("Initializing event sampling...")
     count = 0
@@ -1216,7 +1257,11 @@ def main(cfg: DictConfig) -> None:
             for attempt in range(1, max_attempts + 1):
                 try:
                     if event_sample(stac_provider, event_date, event_precip, 
-                                    prism_bbox, eid, Path(cfg.sampling.dir_path), cfg, manual_crs=crs):
+                                    prism_bbox, eid, Path(cfg.sampling.dir_path), cfg,
+                                    manual_crs=crs,
+                                    max_null_percentage=cfg.sampling.get('max_null_percentage', 0),
+                                    min_scl_percentage=cfg.sampling.get('min_scl_percentage', 50),
+                                    scl_classes=cfg.sampling.get('scl_classes', [8, 9])):
                         count += 1
                     history.add(indices)
                     break

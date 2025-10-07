@@ -182,7 +182,7 @@ def pipeline_TCI(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
 
     return (out_image.shape[-2], out_image.shape[-1]), out_transform
 
-def pipeline_SCL(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst_transform, item, bbox):
+def pipeline_clouds(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst_transform, item, bbox, cloud_classes=[8, 9, 10]):
     """Generates Scene Classification Layer raster of S2 multispectral file and resamples to 10m resolution.
 
     Parameters
@@ -204,12 +204,14 @@ def pipeline_SCL(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst
     bbox : (float, float, float, float)
         Tuple in the order minx, miny, maxx, maxy, representing bounding box, 
         should be in CRS specified by dst_crs.
+    cloud_classes : list[int]
+        List of cloud class codes to filter for (default: [8, 9, 10]).
     """
     scl_name = stac_provider.get_asset_names("s2")["SCL"]
     item_href = stac_provider.sign_asset_href(item.assets[scl_name].href)
 
     out_image, out_transform = crop_to_bounds(item_href, bbox, dst_crs, nodata=0, resampling=Resampling.nearest)
-    clouds = np.isin(out_image[0], [8, 9, 10]).astype(np.uint8)
+    clouds = np.isin(out_image[0], cloud_classes).astype(np.uint8)
 
     # need to resample to grid of tci
     h, w = dst_shape[-2:]
@@ -998,7 +1000,7 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
             logger.debug(f'B08 raster completed for {dt}.')
             pipeline_NDWI(stac_provider, event_dir_path, f'ndwi_{dt}_{eid}', main_crs, item, cbbox)
             logger.debug(f'NDWI raster completed for {dt}.')
-            pipeline_SCL(stac_provider, event_dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox)
+            pipeline_clouds(stac_provider, event_dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox)
             logger.debug(f'SCL raster completed for {dt}.')
 
             # record product used to generate rasters

@@ -18,8 +18,8 @@ import yaml
 import hydra
 from omegaconf import DictConfig
 
-from floodmaps.utils.preprocess_utils import WelfordAccumulator
-from floodmaps.utils.sampling_utils import (
+from floodmaps.utils.preprocess_utils import (
+    WelfordAccumulator,
     PROCESSING_BASELINE,
     BOA_ADD_OFFSET,
 )

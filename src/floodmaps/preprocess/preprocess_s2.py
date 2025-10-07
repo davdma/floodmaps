@@ -16,7 +16,7 @@ import psutil
 import shutil
 from numpy.lib.format import open_memmap
 
-from floodmaps.utils.sampling_utils import (
+from floodmaps.utils.preprocess_utils import (
     PROCESSING_BASELINE,
     BOA_ADD_OFFSET,
 )

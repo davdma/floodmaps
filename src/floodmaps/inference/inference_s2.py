@@ -11,7 +11,7 @@ from datetime import datetime
 
 from floodmaps.utils.utils import ChannelIndexer
 from floodmaps.models.model import S2WaterDetector
-from floodmaps.utils.preprocess_utils import PROCESSING_BASELINE, BOA_ADD_OFFSET
+from floodmaps.utils.preprocess_utils import PROCESSING_BASELINE_NAIVE, BOA_ADD_OFFSET
 
 
 def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_path, dt, eid, threshold=0.5):
@@ -47,7 +47,7 @@ def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_pa
     rgb_file = event_path / f'rgb_{dt}_{eid}.tif'
     with rasterio.open(rgb_file) as src:
         rgb_tile = src.read().astype(np.float32)
-        if img_dt_obj >= PROCESSING_BASELINE:
+        if img_dt_obj >= PROCESSING_BASELINE_NAIVE:
             rgb_tile = rgb_tile + BOA_ADD_OFFSET
 
     if my_channels.has_rgb():
@@ -58,7 +58,7 @@ def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_pa
     b08_file = event_path / f'b08_{dt}_{eid}.tif'
     with rasterio.open(b08_file) as src:
         b08_tile = src.read().astype(np.float32)
-        if img_dt_obj >= PROCESSING_BASELINE:
+        if img_dt_obj >= PROCESSING_BASELINE_NAIVE:
             b08_tile = b08_tile + BOA_ADD_OFFSET
 
     if my_channels.has_b08():
@@ -68,7 +68,7 @@ def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_pa
 
     if my_channels.has_ndwi():
         ndwi_file = event_path / f'ndwi_{dt}_{eid}.tif'
-        if img_dt_obj >= PROCESSING_BASELINE:
+        if img_dt_obj >= PROCESSING_BASELINE_NAIVE:
             # Post processing baseline, need to use different equation for ndwi
             # This is a temporary patch, but we want to fix this at the data pipeline step!
             recompute_ndwi = np.where(

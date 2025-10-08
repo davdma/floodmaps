@@ -5,7 +5,7 @@ from datetime import datetime
 # S2 processing baseline offset correction
 # SEE: https://sentiwiki.copernicus.eu/web/s2-products
 BOA_ADD_OFFSET = -1000.0
-PROCESSING_BASELINE = datetime(2022, 1, 25)
+PROCESSING_BASELINE_NAIVE = datetime(2022, 1, 25)
 
 class WelfordAccumulator:
     """Online algorithm for computing mean and variance using Welford's method."""

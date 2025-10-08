@@ -25,7 +25,7 @@ from floodmaps.utils.sampling_utils import (
     PRISM_CRS,
     SEARCH_CRS,
     BOA_ADD_OFFSET,
-    PROCESSING_BASELINE,
+    PROCESSING_BASELINE_UTC,
     NLCD_CODE_TO_RGB,
     PRISMData,
     DateCRSOrganizer,
@@ -334,7 +334,7 @@ def pipeline_NDWI(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
     nir = out_image2[0].astype(np.int32)
 
     # calculate ndwi with BOA offset for baseline-or-later captures
-    if item.datetime >= PROCESSING_BASELINE:
+    if item.datetime >= PROCESSING_BASELINE_UTC:
         green_corrected = green.astype(np.float32) + BOA_ADD_OFFSET
         nir_corrected = nir.astype(np.float32) + BOA_ADD_OFFSET
         ndwi = np.where((green_corrected + nir_corrected) != 0, (green_corrected - nir_corrected) / (green_corrected + nir_corrected), -999999)

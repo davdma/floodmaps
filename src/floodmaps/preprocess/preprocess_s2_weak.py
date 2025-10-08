@@ -20,7 +20,7 @@ from omegaconf import DictConfig
 
 from floodmaps.utils.preprocess_utils import (
     WelfordAccumulator,
-    PROCESSING_BASELINE,
+    PROCESSING_BASELINE_NAIVE,
     BOA_ADD_OFFSET,
 )
 
@@ -285,15 +285,15 @@ def load_tile_for_sampling(tile_info: Tuple):
 
     with rasterio.open(rgb_file) as src:
         rgb_raster = src.read().astype(np.float32)
-        if tile_dt_obj >= PROCESSING_BASELINE:
+        if tile_dt_obj >= PROCESSING_BASELINE_NAIVE:
             rgb_raster = rgb_raster + BOA_ADD_OFFSET
 
     with rasterio.open(b08_file) as src:
         b08_raster = src.read().astype(np.float32)
-        if tile_dt_obj >= PROCESSING_BASELINE:
+        if tile_dt_obj >= PROCESSING_BASELINE_NAIVE:
             b08_raster = b08_raster + BOA_ADD_OFFSET
     
-    if tile_dt_obj >= PROCESSING_BASELINE:
+    if tile_dt_obj >= PROCESSING_BASELINE_NAIVE:
         # Temporary fix for NDWI computation
         # Recompute NDWI using harmonized (offset-applied) Green (B03) and NIR (B08)
         recompute_ndwi = np.where(

@@ -32,7 +32,7 @@ SEARCH_CRS = "EPSG:4326"
 # S2 processing baseline offset correction
 # SEE: https://sentiwiki.copernicus.eu/web/s2-products
 BOA_ADD_OFFSET = -1000.0
-PROCESSING_BASELINE = datetime(2022, 1, 25)
+PROCESSING_BASELINE_UTC = datetime(2022, 1, 25, tzinfo=timezone.utc)
 
 # NLCD color mapping dictionary
 NLCD_COLORS = {

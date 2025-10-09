@@ -18,8 +18,11 @@ import yaml
 import hydra
 from omegaconf import DictConfig
 
-from floodmaps.utils.preprocess_utils import WelfordAccumulator
-
+from floodmaps.utils.preprocess_utils import (
+    WelfordAccumulator,
+    PROCESSING_BASELINE_NAIVE,
+    BOA_ADD_OFFSET,
+)
 
 def discover_all_tiles(events: List[Path], label_idx: Optional[Dict[Tuple[str, str], Path]] = None) -> List[Tuple]:
     """Discover all individual tiles across a list of events.
@@ -278,16 +281,36 @@ def load_tile_for_sampling(tile_info: Tuple):
     # tci floats
     tci_floats = (tci_raster / 255).astype(np.float32)
 
+    tile_dt_obj = datetime.strptime(img_dt, '%Y%m%d')
+
     with rasterio.open(rgb_file) as src:
         rgb_raster = src.read().astype(np.float32)
-        rgb_raster = rgb_raster / 10000.0  # Scale reflectance to [0, 1]
+        if tile_dt_obj >= PROCESSING_BASELINE_NAIVE:
+            rgb_raster = rgb_raster + BOA_ADD_OFFSET
 
     with rasterio.open(b08_file) as src:
         b08_raster = src.read().astype(np.float32)
-        b08_raster = b08_raster / 10000.0  # Scale reflectance to [0, 1]
+        if tile_dt_obj >= PROCESSING_BASELINE_NAIVE:
+            b08_raster = b08_raster + BOA_ADD_OFFSET
     
-    with rasterio.open(ndwi_file) as src:
-        ndwi_raster = src.read().astype(np.float32)  # Keep as-is (already in [-1, 1])
+    if tile_dt_obj >= PROCESSING_BASELINE_NAIVE:
+        # Temporary fix for NDWI computation
+        # Recompute NDWI using harmonized (offset-applied) Green (B03) and NIR (B08)
+        recompute_ndwi = np.where(
+            (rgb_raster[1] + b08_raster[0]) != 0,
+            (rgb_raster[1] - b08_raster[0]) / (rgb_raster[1] + b08_raster[0]),
+            -999999
+        )
+        ndwi_raster = np.expand_dims(recompute_ndwi, axis = 0)
+    else:
+        with rasterio.open(ndwi_file) as src:
+            ndwi_raster = src.read().astype(np.float32)  # Keep as-is (already in [-1, 1])
+
+    # Clip and scale spectral bands by quantification value 10000
+    np.clip(rgb_raster, None, 10000.0, out=rgb_raster)
+    rgb_raster = rgb_raster / 10000.0
+    np.clip(b08_raster, None, 10000.0, out=b08_raster)
+    b08_raster = b08_raster / 10000.0
 
     with rasterio.open(dem_file) as src:
         dem_raster = src.read().astype(np.float32)

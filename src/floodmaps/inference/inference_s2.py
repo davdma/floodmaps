@@ -7,9 +7,11 @@ import pickle
 from pathlib import Path
 import hydra
 from omegaconf import DictConfig
+from datetime import datetime
 
 from floodmaps.utils.utils import ChannelIndexer
 from floodmaps.models.model import S2WaterDetector
+from floodmaps.utils.preprocess_utils import PROCESSING_BASELINE_NAIVE, BOA_ADD_OFFSET
 
 
 def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_path, dt, eid, threshold=0.5):
@@ -38,22 +40,46 @@ def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_pa
     label : ndarray
         Predicted label of the specified tile in shape (H, W).
     """
+    img_dt_obj = datetime.strptime(dt, '%Y%m%d')
     layers = []
     my_channels = ChannelIndexer([bool(int(x)) for x in cfg.data.channels])
+
+    rgb_file = event_path / f'rgb_{dt}_{eid}.tif'
+    with rasterio.open(rgb_file) as src:
+        rgb_tile = src.read().astype(np.float32)
+        if img_dt_obj >= PROCESSING_BASELINE_NAIVE:
+            rgb_tile = rgb_tile + BOA_ADD_OFFSET
+
     if my_channels.has_rgb():
-        rgb_file = event_path / f'rgb_{dt}_{eid}.tif'
-        with rasterio.open(rgb_file) as src:
-            rgb_tile = src.read().astype(np.float32)
-        layers.append(rgb_tile)
+        rgb_tile_clipped = np.clip(rgb_tile, None, 10000.0)
+        rgb_tile_clipped = rgb_tile_clipped / 10000.0  # Scale reflectance to [0, 1]
+        layers.append(rgb_tile_clipped)
+
+    b08_file = event_path / f'b08_{dt}_{eid}.tif'
+    with rasterio.open(b08_file) as src:
+        b08_tile = src.read().astype(np.float32)
+        if img_dt_obj >= PROCESSING_BASELINE_NAIVE:
+            b08_tile = b08_tile + BOA_ADD_OFFSET
+
     if my_channels.has_b08():
-        b08_file = event_path / f'b08_{dt}_{eid}.tif'
-        with rasterio.open(b08_file) as src:
-            b08_tile = src.read().astype(np.float32)
-        layers.append(b08_tile)
+        b08_tile_clipped = np.clip(b08_tile, None, 10000.0)
+        b08_tile_clipped = b08_tile_clipped / 10000.0  # Scale reflectance to [0, 1]
+        layers.append(b08_tile_clipped)
+
     if my_channels.has_ndwi():
         ndwi_file = event_path / f'ndwi_{dt}_{eid}.tif'
-        with rasterio.open(ndwi_file) as src:
-            ndwi_tile = src.read().astype(np.float32)
+        if img_dt_obj >= PROCESSING_BASELINE_NAIVE:
+            # Post processing baseline, need to use different equation for ndwi
+            # This is a temporary patch, but we want to fix this at the data pipeline step!
+            recompute_ndwi = np.where(
+                (rgb_tile[1] + b08_tile[0]) != 0,
+                (rgb_tile[1] - b08_tile[0]) / (rgb_tile[1] + b08_tile[0]),
+                -999999
+            )
+            ndwi_tile = np.expand_dims(recompute_ndwi, axis = 0)
+        else:
+            with rasterio.open(ndwi_file) as src:
+                ndwi_tile = src.read().astype(np.float32)
         layers.append(ndwi_tile)
 
     # need dem for slope regardless if in channels or not
@@ -110,8 +136,8 @@ def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_pa
     if H < patch_size or W < patch_size:
         raise ValueError(f"Image dimensions must be at least {patch_size}x{patch_size}")
 
-    # Initialize output prediction map
-    pred_map = torch.zeros((H, W), dtype=torch.uint8)
+    # Initialize output prediction map (accumulate probabilities, not binaries)
+    pred_map = torch.zeros((H, W), dtype=torch.float32)
     count_map = torch.zeros((H, W), dtype=torch.float32)
 
     with torch.no_grad():
@@ -142,18 +168,16 @@ def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_pa
                 else:
                     pred = output.squeeze()
                 
-                # Convert to binary prediction
-                pred_binary = torch.where(torch.sigmoid(pred) >= threshold, 1.0, 0.0).cpu().byte()
-                
-                # Add to prediction map (average overlapping regions)
-                pred_map[y:y+patch_size, x:x+patch_size] += pred_binary
+                # Accumulate probabilities for overlapping regions
+                prob = torch.sigmoid(pred).cpu().float()
+                pred_map[y:y+patch_size, x:x+patch_size] += prob
                 count_map[y:y+patch_size, x:x+patch_size] += 1.0
     
     # Average overlapping predictions
     pred_map = torch.where(count_map > 0, pred_map / count_map, pred_map)
     
     # Convert to final binary prediction
-    label = torch.where(pred_map >= 0.5, 1.0, 0.0).byte().numpy()
+    label = torch.where(pred_map >= threshold, 1.0, 0.0).byte().numpy()
     label[missing_vals] = 0
     return label
 

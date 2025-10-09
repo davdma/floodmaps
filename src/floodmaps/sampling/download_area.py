@@ -20,6 +20,8 @@ from omegaconf import DictConfig
 from floodmaps.utils.sampling_utils import (
     PRISM_CRS,
     SEARCH_CRS,
+    BOA_ADD_OFFSET,
+    PROCESSING_BASELINE_UTC,
     NLCD_CODE_TO_RGB,
     get_date_interval,
     setup_logging,
@@ -130,7 +132,7 @@ def pipeline_TCI(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
 
     return (out_image.shape[-2], out_image.shape[-1]), out_transform
 
-def pipeline_SCL(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst_transform, item, bbox, cfg):
+def pipeline_clouds(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst_transform, item, bbox, cfg, cloud_classes=[8, 9, 10]):
     """Generates Scene Classification Layer raster of S2 multispectral file and resamples to 10m resolution.
 
     Parameters
@@ -154,12 +156,14 @@ def pipeline_SCL(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst
         should be in CRS specified by dst_crs.
     cfg : DictConfig
         Configuration object.
+    cloud_classes : list[int]
+        List of cloud class codes to filter for (default: [8, 9, 10]).
     """
     scl_name = stac_provider.get_asset_names("s2")["SCL"]
     item_href = stac_provider.sign_asset_href(item.assets[scl_name].href)
 
     out_image, out_transform = crop_to_bounds(item_href, bbox, dst_crs, nodata=0, resampling=Resampling.nearest)
-    clouds = np.isin(out_image[0], [8, 9, 10]).astype(np.uint8)
+    clouds = np.isin(out_image[0], cloud_classes).astype(np.uint8)
 
     # need to resample to grid of tci
     h, w = dst_shape[-2:]
@@ -173,7 +177,7 @@ def pipeline_SCL(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst
         dst_crs=dst_crs,
         resampling=Resampling.nearest)
 
-    # only make cloud values (8, 9, 10) 1 everything else 0
+    # only make cloud values 1 everything else 0
     with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=h, width=w, crs=dst_crs,
                         dtype=clouds.dtype, transform=dst_transform) as dst:
         dst.write(dest, 1)
@@ -284,8 +288,17 @@ def pipeline_NDWI(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox, c
     out_image2, out_transform = crop_to_bounds(b08_item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
     nir = out_image2[0].astype(np.int32)
 
-    # calculate ndwi
-    ndwi = np.where((green + nir) != 0, (green - nir)/(green + nir), -999999)
+    # calculate ndwi with BOA offset for baseline-or-later captures
+    if item.datetime >= PROCESSING_BASELINE_UTC:
+        green_corrected = green.astype(np.float32) + BOA_ADD_OFFSET
+        nir_corrected = nir.astype(np.float32) + BOA_ADD_OFFSET
+        ndwi = np.where(
+            (green_corrected + nir_corrected) != 0,
+            (green_corrected - nir_corrected) / (green_corrected + nir_corrected),
+            -999999
+        )
+    else:
+        ndwi = np.where((green + nir) != 0, (green - nir) / (green + nir), -999999)
 
     # save raw
     with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=ndwi.shape[-2], width=ndwi.shape[-1], crs=dst_crs, dtype=ndwi.dtype, transform=out_transform, nodata=-999999) as dst:
@@ -1002,7 +1015,7 @@ def download_area(stac_provider, bbox, cfg):
             logger.debug(f'B08 raster completed for {product_id_item.id} on {dt}.')
             pipeline_NDWI(stac_provider, area_dir_path, f'ndwi_{dt}_{eid}', main_crs, product_id_item, cbbox, cfg)
             logger.debug(f'NDWI raster completed for {product_id_item.id} on {dt}.')
-            pipeline_SCL(stac_provider, area_dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, product_id_item, cbbox, cfg)
+            pipeline_clouds(stac_provider, area_dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, product_id_item, cbbox, cfg)
             logger.debug(f'SCL raster completed for {product_id_item.id} on {dt}.')
 
             # record product used to generate rasters
@@ -1041,7 +1054,7 @@ def download_area(stac_provider, bbox, cfg):
             logger.debug(f'B08 raster completed for {item.id} on {dt}.')
             pipeline_NDWI(stac_provider, area_dir_path, f'ndwi_{dt}_{eid}', main_crs, item, cbbox, cfg)
             logger.debug(f'NDWI raster completed for {item.id} on {dt}.')
-            pipeline_SCL(stac_provider, area_dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox, cfg)
+            pipeline_clouds(stac_provider, area_dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox, cfg)
             logger.debug(f'SCL raster completed for {item.id} on {dt}.')
 
             # record product used to generate rasters

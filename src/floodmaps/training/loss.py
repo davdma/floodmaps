@@ -248,21 +248,25 @@ class JSD(nn.Module):
         return jsd_vv + jsd_vh
 
 class BCEDiceLoss(nn.Module):
-    def __init__(self, weight=None, size_average=True):
+    def __init__(self, weight=None, size_average=True, pos_weight=None):
         super().__init__()
+        # optional positive class weighting for the BCE component only
+        self.pos_weight = pos_weight
 
     def forward(self, inputs, targets, smooth=1):
+        # BCE Loss (use logits)
+        logits = inputs.view(-1)
 
         # remove if your model contains a sigmoid or equivalent activation layer
-        inputs = F.sigmoid(inputs)
+        probs = F.sigmoid(inputs)
 
         # flatten label and prediction tensors
-        inputs = inputs.view(-1)
+        probs = probs.view(-1)
         targets = targets.view(-1)
 
-        intersection = (inputs * targets).sum()
-        dice_loss = 1 - (2. * intersection + smooth) / (inputs.sum() + targets.sum() + smooth)
-        BCE = F.binary_cross_entropy(inputs, targets, reduction='mean')
+        intersection = (probs * targets).sum()
+        dice_loss = 1 - (2. * intersection + smooth) / (probs.sum() + targets.sum() + smooth)
+        BCE = F.binary_cross_entropy_with_logits(logits, targets, reduction='mean', pos_weight=self.pos_weight)
         BCEDice = BCE + dice_loss
 
         return BCEDice

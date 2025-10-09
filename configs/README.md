@@ -139,6 +139,9 @@ train:
     epochs: 400
     batch_size: 4608
     loss: BCELoss # ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
+    use_pos_weight: false  # enable positive class weighting for BCE/BCEDice
+    pos_weight:            # null -> auto-compute from train labels; set float to override
+    pos_weight_clip: 10.0  # clip auto-computed weight to [1, clip]
     tversky:
       alpha:
     clip: 1.0
@@ -196,6 +199,9 @@ train:
     epochs: 200
     batch_size: 256
     loss: BCELoss # ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
+    use_pos_weight: false  # enable positive class weighting for BCE/BCEDice
+    pos_weight:            # null -> auto-compute from train labels; set float to override
+    pos_weight_clip: 10.0  # clip auto-computed weight to [1, clip]
     shift_invariant: True
     balance_coeff:
     tversky:

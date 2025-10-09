@@ -136,8 +136,8 @@ def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_pa
     if H < patch_size or W < patch_size:
         raise ValueError(f"Image dimensions must be at least {patch_size}x{patch_size}")
 
-    # Initialize output prediction map
-    pred_map = torch.zeros((H, W), dtype=torch.uint8)
+    # Initialize output prediction map (accumulate probabilities, not binaries)
+    pred_map = torch.zeros((H, W), dtype=torch.float32)
     count_map = torch.zeros((H, W), dtype=torch.float32)
 
     with torch.no_grad():
@@ -168,18 +168,16 @@ def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_pa
                 else:
                     pred = output.squeeze()
                 
-                # Convert to binary prediction
-                pred_binary = torch.where(torch.sigmoid(pred) >= threshold, 1.0, 0.0).cpu().byte()
-                
-                # Add to prediction map (average overlapping regions)
-                pred_map[y:y+patch_size, x:x+patch_size] += pred_binary
+                # Accumulate probabilities for overlapping regions
+                prob = torch.sigmoid(pred).cpu().float()
+                pred_map[y:y+patch_size, x:x+patch_size] += prob
                 count_map[y:y+patch_size, x:x+patch_size] += 1.0
     
     # Average overlapping predictions
     pred_map = torch.where(count_map > 0, pred_map / count_map, pred_map)
     
     # Convert to final binary prediction
-    label = torch.where(pred_map >= 0.5, 1.0, 0.0).byte().numpy()
+    label = torch.where(pred_map >= threshold, 1.0, 0.0).byte().numpy()
     label[missing_vals] = 0
     return label
 

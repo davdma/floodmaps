@@ -35,11 +35,20 @@ import albumentations as A
 MODEL_NAMES = ['unet', 'unet++']
 LOSS_NAMES = ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
 
-def get_loss_fn(cfg):
+def get_loss_fn(cfg, device=None, pos_weight=None):
     if cfg.train.loss == 'BCELoss':
-        loss_fn = nn.BCEWithLogitsLoss()
+        if pos_weight is not None:
+            pw = torch.tensor(float(pos_weight), device=device) if device is not None else torch.tensor(float(pos_weight))
+            loss_fn = nn.BCEWithLogitsLoss(pos_weight=pw)
+        else:
+            loss_fn = nn.BCEWithLogitsLoss()
     elif cfg.train.loss == 'BCEDiceLoss':
-        loss_fn = BCEDiceLoss()
+        # pass pos_weight into BCEDiceLoss BCE component if enabled
+        if pos_weight is not None:
+            pw = torch.tensor(float(pos_weight), device=device) if device is not None else torch.tensor(float(pos_weight))
+            loss_fn = BCEDiceLoss(pos_weight=pw)
+        else:
+            loss_fn = BCEDiceLoss()
     elif cfg.train.loss == 'TverskyLoss':
         loss_fn = TverskyLoss(alpha=cfg.train.tversky.alpha, beta=1-cfg.train.tversky.alpha)
     else:
@@ -70,8 +79,8 @@ def train_loop(model, dataloader, device, optimizer, loss_fn, run, epoch):
         loss.backward()
         optimizer.step()
 
-        y_pred = nn.functional.sigmoid(logits).flatten() > 0.5
-        target = y.flatten() > 0.5
+        y_pred = nn.functional.sigmoid(logits).flatten()
+        target = y.flatten()
         metric_collection.update(y_pred, target)
         running_loss += loss.detach()
 
@@ -135,8 +144,8 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
             logits = model(X)
             loss = loss_fn(logits, y.float())
             
-            y_pred = nn.functional.sigmoid(logits).flatten() > 0.5
-            target = y.flatten() > 0.5
+            y_pred = nn.functional.sigmoid(logits).flatten()
+            target = y.flatten()
             metric_collection.update(y_pred, target)
             running_vloss += loss.detach()
 
@@ -195,8 +204,29 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
     # log weights and gradients each epoch
     run.watch(model, log="all", log_freq=10)
 
+    # compute pos_weight if enabled for rebalancing
+    pos_weight_val = None
+    if getattr(cfg.train, 'use_pos_weight', False):
+        if getattr(cfg.train, 'pos_weight', None) is not None:
+            pos_weight_val = float(cfg.train.pos_weight)
+        else:
+            # Efficient vectorized computation over loaded training labels
+            # label plane is last channel in dataset (kept in-memory by dataset class)
+            logging.info("Computing pos_weight from training labels")
+            label_np = train_loader.dataset.dataset[:, -1, :, :]
+            pos = float(label_np.sum())
+            total = float(label_np.size)
+            neg = max(total - pos, 1.0)
+            # raw pos_weight = neg/pos; clip to [1, clip]
+            raw_pw = neg / max(pos, 1.0)
+            clip_max = float(getattr(cfg.train, 'pos_weight_clip', 10.0))
+            pos_weight_val = max(1.0, min(raw_pw, clip_max))
+            logging.info(f"Computed pos_weight: {pos_weight_val}")
+            logging.info(f"Neg: {neg}, Pos: {pos}, Total: {total}")
+            logging.info(f"Percentage of positive pixels: {pos / total:.2%}")
+
     # loss function
-    loss_fn = get_loss_fn(cfg)
+    loss_fn = get_loss_fn(cfg, device=device, pos_weight=pos_weight_val)
 
     # optimizer and scheduler for reducing learning rate
     optimizer = get_optimizer(model, cfg)
@@ -455,7 +485,7 @@ def run_pretrain_s2(cfg):
 
     # dataset and transforms
     print(f"Using {device} device")
-    sample_dir = Path(cfg.paths.preprocess_dir) / 'worldfloodsv2' / 'test' # temporary name
+    sample_dir = Path(cfg.paths.preprocess_dir) / 'worldfloodsv2' / '50_clouds' # temporary name
 
     channels = [bool(int(x)) for x in cfg.data.channels]
     train_transform = A.Compose([

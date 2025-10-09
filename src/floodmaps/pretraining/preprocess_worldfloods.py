@@ -178,7 +178,8 @@ def _process_files_worker(
         image_prefix: str,
         gt_prefix: str,
         do_filter: bool,
-        threshold_missing: float
+        threshold_missing: float,
+        threshold_clouds: float
     ) -> np.ndarray:
     """Worker that processes a batch of files: reads full rasters, tiles, filters, and concatenates.
 
@@ -227,7 +228,12 @@ def _process_files_worker(
                 # invalid pixel where both bands == 0
                 invalid_counts = ((lbl_tiles[:, 0] == 0) & (lbl_tiles[:, 1] == 0)).sum(axis=(1, 2)).astype(np.float32)
                 frac_invalid = invalid_counts / (tile_size * tile_size)
-                tile_mask = frac_invalid <= threshold_missing
+
+                # cloud pixels are where band 0 == 2
+                cloud_counts = (lbl_tiles[:, 0] == 2).sum(axis=(1, 2)).astype(np.float32)
+                frac_cloud = cloud_counts / (tile_size * tile_size)
+
+                tile_mask = (frac_invalid <= threshold_missing) & (frac_cloud <= threshold_clouds)
             else:
                 tile_mask = np.ones((x_tiles.shape[0],), dtype=bool)
 
@@ -264,6 +270,7 @@ def preprocess_batch(
                 workers: int = 10,
                 filter_windows: Callable = None,
                 threshold_missing: float = 0.0,
+                threshold_clouds: float = 0.5,
                 image_prefix: str = "S2",
                 gt_prefix: str = "gt",
                 dir_path: str = None
@@ -319,6 +326,7 @@ def preprocess_batch(
                 gt_prefix,
                 filter_windows is not None,
                 threshold_missing,
+                threshold_clouds,
             )
             for chunk in chunks
         ]
@@ -411,6 +419,7 @@ def run_preprocess(cfg: DictConfig) -> None:
                 workers=cfg.pretraining.workers,
                 filter_windows=filter_windows,
                 threshold_missing=getattr(cfg.pretraining, 'threshold_missing', 0.0),
+                threshold_clouds=getattr(cfg.pretraining, 'threshold_clouds', 0.5),
                 image_prefix=cfg.pretraining.image_prefix,
                 gt_prefix=cfg.pretraining.gt_prefix,
                 dir_path=cfg.pretraining.dir_path)
@@ -424,6 +433,7 @@ def run_preprocess(cfg: DictConfig) -> None:
                 workers=cfg.pretraining.workers,
                 filter_windows=filter_windows,
                 threshold_missing=getattr(cfg.pretraining, 'threshold_missing', 0.0),
+                threshold_clouds=getattr(cfg.pretraining, 'threshold_clouds', 0.5),
                 image_prefix=cfg.pretraining.image_prefix,
                 gt_prefix=cfg.pretraining.gt_prefix,
                 dir_path=cfg.pretraining.dir_path)
@@ -437,6 +447,7 @@ def run_preprocess(cfg: DictConfig) -> None:
                 workers=cfg.pretraining.workers,
                 filter_windows=filter_windows,
                 threshold_missing=getattr(cfg.pretraining, 'threshold_missing', 0.0),
+                threshold_clouds=getattr(cfg.pretraining, 'threshold_clouds', 0.5),
                 image_prefix=cfg.pretraining.image_prefix,
                 gt_prefix=cfg.pretraining.gt_prefix,
                 dir_path=cfg.pretraining.dir_path)

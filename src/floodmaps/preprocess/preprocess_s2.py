@@ -205,7 +205,7 @@ def load_tile_for_sampling(tile_info: Tuple):
     Returns
     -------
     stacked_raster : np.ndarray
-        Stacked raster of the tile (16 channels)
+        Stacked raster of the tile (17 channels: 16 data + 1 missing mask)
     """
     label_rel, sample_dirs, cfg = tile_info
     
@@ -244,8 +244,13 @@ def load_tile_for_sampling(tile_info: Tuple):
 
     with rasterio.open(rgb_file) as src:
         rgb_raster = src.read().astype(np.float32)
-        if tile_dt_obj >= PROCESSING_BASELINE_NAIVE:
-            rgb_raster = rgb_raster + BOA_ADD_OFFSET
+    
+    # Extract missing values mask BEFORE applying offset (raw DN 0 = missing)
+    missing_mask = (rgb_raster[0] == 0).astype(np.float32)
+    missing_mask = np.expand_dims(missing_mask, axis=0)  # Shape: (1, H, W)
+    
+    if tile_dt_obj >= PROCESSING_BASELINE_NAIVE:
+        rgb_raster = rgb_raster + BOA_ADD_OFFSET
 
     with rasterio.open(b08_file) as src:
         b08_raster = src.read().astype(np.float32)
@@ -290,10 +295,12 @@ def load_tile_for_sampling(tile_info: Tuple):
     with rasterio.open(nlcd_file) as src:
         nlcd_raster = src.read().astype(np.float32)
 
-    # stack all tiles
+    # Stack all tiles: 16 data channels + 1 missing mask channel (17 total)
+    # Channel 16 (0-indexed) is the missing mask for filtering, will be dropped before saving
     stacked_tile = np.vstack((rgb_raster, b08_raster, ndwi_raster, dem_raster, 
                                 slope_y_raster, slope_x_raster, waterbody_raster, 
-                                roads_raster, flowlines_raster, label_binary, tci_floats, nlcd_raster), dtype=np.float32)
+                                roads_raster, flowlines_raster, label_binary, tci_floats, nlcd_raster, 
+                                missing_mask), dtype=np.float32)
     
     return stacked_tile
 
@@ -340,8 +347,8 @@ def sample_patches_in_mem(tile_infos: List[Tuple], size: int, num_samples: int,
             y = int(rng.uniform(0, WIDTH - size))
             patch = tile_data[:, x : x + size, y : y + size]
             
-            # if contains missing values in tci or ndwi, toss out and resample
-            if np.any(patch[0] == 0) or np.any(patch[4] == -999999):
+            # Filter using missing mask (channel 16) and NDWI (channel 4)
+            if np.any(patch[16] == 1) or np.any(patch[4] == -999999):
                 continue
 
             dataset[i * num_samples + patches_sampled] = patch[:16]
@@ -402,8 +409,8 @@ def sample_patches_in_disk(tile_infos: List[Tuple], size: int, num_samples: int,
                 y = int(rng.uniform(0, WIDTH - size))
                 patch = tile_data[:, x : x + size, y : y + size]
                 
-                # if contains missing values in tci or ndwi, toss out and resample
-                if np.any(patch[0] == 0) or np.any(patch[4] == -999999):
+                # Filter using missing mask (channel 16) and NDWI (channel 4)
+                if np.any(patch[16] == 1) or np.any(patch[4] == -999999):
                     continue
 
                 dataset[i * num_samples + patches_sampled] = patch[:16]

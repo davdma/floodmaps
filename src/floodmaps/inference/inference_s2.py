@@ -47,8 +47,12 @@ def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_pa
     rgb_file = event_path / f'rgb_{dt}_{eid}.tif'
     with rasterio.open(rgb_file) as src:
         rgb_tile = src.read().astype(np.float32)
-        if img_dt_obj >= PROCESSING_BASELINE_NAIVE:
-            rgb_tile = rgb_tile + BOA_ADD_OFFSET
+    
+    # Extract missing values mask BEFORE applying offset (raw DN 0 = missing)
+    missing_vals = rgb_tile[0] == 0
+    
+    if img_dt_obj >= PROCESSING_BASELINE_NAIVE:
+        rgb_tile = rgb_tile + BOA_ADD_OFFSET
 
     if my_channels.has_rgb():
         rgb_tile_clipped = np.clip(rgb_tile, None, 10000.0)
@@ -112,9 +116,6 @@ def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_pa
         layers.append(flowlines_tile)
 
     X = np.vstack(layers, dtype=np.float32)
-
-    # get missing values mask (to later zero out)
-    missing_vals = X[0] == 0
 
     # impute missing values in each channel with its mean
     train_mean = train_mean.tolist()

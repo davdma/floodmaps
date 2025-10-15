@@ -23,7 +23,6 @@ from floodmaps.utils.sampling_utils import (
     BOA_ADD_OFFSET,
     PROCESSING_BASELINE_UTC,
     NLCD_CODE_TO_RGB,
-    get_date_interval,
     setup_logging,
     db_scale,
     get_state,
@@ -903,35 +902,77 @@ def pipeline_S1(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox, cfg
         with rasterio.open(dir_path / f'{save_as}_vh_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vh_cmap.shape[-2], width=img_vh_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vh, nodata=None) as dst:
             dst.write(img_vh_cmap)
 
-def deduplicate_items_by_date(items):
-    """Keep only one item per date, choosing the first one found for each date.
+def sar_missing_percentage(stac_provider, item, item_crs, bbox):
+    """Calculates the percentage of pixels in the bounding box of the SAR image that are missing."""
+    vv_name = stac_provider.get_asset_names("s1")["vv"]
+    item_href = stac_provider.sign_asset_href(item.assets[vv_name].href)
+
+    conversion = transform(PRISM_CRS, item_crs, (bbox[0], bbox[2]), (bbox[1], bbox[3]))
+    img_bbox = conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]
+
+    out_image, _ = rasterio.merge.merge([item_href], bounds=img_bbox)
+    return int((np.sum(out_image <= 0) / out_image.size) * 100)
+
+def s2_missing_percentage(stac_provider, item, item_crs, bbox):
+    """Calculates the percentage of pixels in the bounding box of the SAR image that are missing."""
+    rgb_name = stac_provider.get_asset_names("s2")["B02"]
+    item_href = stac_provider.sign_asset_href(item.assets[rgb_name].href)
+
+    conversion = transform(PRISM_CRS, item_crs, (bbox[0], bbox[2]), (bbox[1], bbox[3]))
+    img_bbox = conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]
+
+    out_image, _ = rasterio.merge.merge([item_href], bounds=img_bbox)
+    return int((np.sum(out_image == 0) / out_image.size) * 100)
+
+def deduplicate_items_by_date(items, stac_provider, sensor_type, bbox):
+    """Keep only one item per date, choosing the one with least missing data.
     
     Parameters
     ----------
     items : list
         List of STAC items.
+    stac_provider : STACProvider
+        STAC provider object for accessing asset names.
+    sensor_type : str
+        Either 's2' or 's1' to determine which assets to check.
+    bbox : tuple
+        Bounding box in PRISM CRS EPSG:4269.
     
     Returns
     -------
     list
-        List of items with only one item per date.
+        List of items with only one item per date, selected by least missing percentage.
     """
-    date_to_item = {}
+    date_to_items = {}
     for item in items:
         date_str = item.datetime.strftime('%Y%m%d')
-        if date_str not in date_to_item:
-            date_to_item[date_str] = item
-    return list(date_to_item.values())
+        if date_str not in date_to_items:
+            date_to_items[date_str] = []
+        date_to_items[date_str].append(item)
+    
+    # For each date, select the item with least missing data
+    selected_items = []
+    
+    for date_str, date_items in date_to_items.items():
+        if len(date_items) == 1:
+            selected_items.append(date_items[0])
+        else:
+            # Select item with minimum missing percentage
+            if sensor_type == 's2':
+                best_item = min(date_items, key=lambda x: s2_missing_percentage(stac_provider, x, pe.ext(x).crs_string, bbox))
+            else:  # s1
+                best_item = min(date_items, key=lambda x: sar_missing_percentage(stac_provider, x, pe.ext(x).crs_string, bbox))
+            selected_items.append(best_item)
+    
+    return selected_items
 
-def download_area(stac_provider, bbox, cfg):
-    """Downloads S2 and S1 imagery for a specific study area based on parameters and generates accompanying rasters.
+def download_area(stac_provider, bbox, dir_path, area_id, start_date, end_date, 
+                  product_ids_s2, product_ids_s1, crs, cfg):
+    """Downloads S2 and S1 imagery for a specific study area within a date range.
 
-    If a specific product ID is provided - it is assumed that the user only wants to download that specific product.
-    Regardless of the size of the interval and the results, only that specific product will be downloaded.
-    If no match found then the program exits.
-
-    If no product ID is provided - it is assumed that the user wants to download all products within the
-    specific interval, both S2 and S1 if available.
+    Downloads all S2 and S1 products within the specified date interval. For each date,
+    selects only one product of each type (S2/S1) based on least missing data percentage.
+    If product ID lists are provided, only downloads those specific products.
 
     Parameters
     ----------
@@ -939,25 +980,39 @@ def download_area(stac_provider, bbox, cfg):
         STAC provider object.
     bbox : tuple
         Bounding box in PRISM CRS EPSG:4269.
+    dir_path : str or Path
+        Output directory for downloaded data.
+    area_id : str
+        Area identifier for file naming.
+    start_date : str
+        Start date of interval (YYYY-MM-DD).
+    end_date : str
+        End date of interval (YYYY-MM-DD).
+    product_ids_s2 : list
+        List of S2 product IDs to filter for (empty list = all products).
+    product_ids_s1 : list
+        List of S1 product IDs to filter for (empty list = all products).
+    crs : str or None
+        CRS for output rasters (None = auto-detect from first product).
     cfg : DictConfig
-        Configuration object.
+        Configuration object for system-wide settings (paths, include_cmap, etc.).
 
     Returns
     -------
     bool
-        Return True if successful, False if unsuccessful event download and processing.
+        Return True if successful, False if unsuccessful download and processing.
     """
     logger = logging.getLogger('main')
     minx, miny, maxx, maxy = bbox # assume bbox is in EPSG:4269
+    
     # need to transform box from EPSG 4269 to EPSG 4326 for query
     conversion = transform(PRISM_CRS, SEARCH_CRS, (minx, maxx), (miny, maxy))
     search_bbox = (conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1])
-    time_of_interest = get_date_interval(cfg.sampling.event_date, cfg.sampling.before, cfg.sampling.after)
-    eid = datetime.strptime(cfg.sampling.event_date, '%Y-%m-%d').strftime('%Y%m%d')
+    time_of_interest = f"{start_date}/{end_date}"
 
     # STAC catalog search
     logger.info('Beginning catalog search...')
-    items_s2 = stac_provider.search_s2(search_bbox, time_of_interest, query={"eo:cloud_cover": {"lt": 95}})
+    items_s2 = stac_provider.search_s2(search_bbox, time_of_interest)
     items_s1 = stac_provider.search_s1(search_bbox, time_of_interest, query={"sar:instrument_mode": {"eq": "IW"}})
 
     logger.info('Filtering catalog search results...')
@@ -969,163 +1024,174 @@ def download_area(stac_provider, bbox, cfg):
     try:
         state = get_state(minx, miny, maxx, maxy)
         if state is None:
-            raise Exception(f'State not found for {cfg.sampling.event_date}, at {minx}, {miny}, {maxx}, {maxy}')
+            raise Exception(f'State not found for bbox: {minx}, {miny}, {maxx}, {maxy}')
     except Exception as err:
-        logger.exception(f'Error fetching state. Eid: {eid}.')
+        logger.exception(f'Error fetching state for area {area_id}.')
         return False
 
-    # if product ID provided, look for match
     logger.info('Beginning download...')
-    area_dir_path = Path(cfg.sampling.dir_path)
+    area_dir_path = Path(dir_path)
     file_to_product = dict()
-    if cfg.sampling.product_id:
-        logger.info(f'Checking for product ID: {cfg.sampling.product_id}')
-        product_id_item = None
-        matched = None
-        for item in items_s2:
-            logger.info(f'Checking S2 product: {item.id}')
-            if cfg.sampling.product_id in item.id:
-                logger.info(f'Matched S2 product: {item.id}')
-                product_id_item = item
-                matched = 's2'
-                break
-        for item in items_s1:
-            logger.info(f'Checking S1 product: {item.id}')
-            if cfg.sampling.product_id in item.id:
-                logger.info(f'Matched S1 product: {item.id}')
-                product_id_item = item
-                matched = 's1'
-                break
-
-        if not product_id_item:
-            logger.exception(f'No product found with ID that matches {cfg.sampling.product_id}.')
-            return False
-
-        main_crs = pe.ext(product_id_item).crs_string if cfg.sampling.crs is None else cfg.sampling.crs
-        conversion = transform(PRISM_CRS, main_crs, (minx, maxx), (miny, maxy))
-        cbbox = conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]
-
-        if matched == 's2':
-            dt = product_id_item.datetime.strftime('%Y%m%d')
-            dst_shape, dst_transform = pipeline_TCI(stac_provider, area_dir_path, f'tci_{dt}_{eid}', main_crs, product_id_item, cbbox)
-            logger.debug(f'TCI raster completed for {product_id_item.id} on {dt}.')
-            pipeline_RGB(stac_provider, area_dir_path, f'rgb_{dt}_{eid}', main_crs, product_id_item, cbbox)
-            logger.debug(f'RGB raster completed for {product_id_item.id} on {dt}.')
-            pipeline_B08(stac_provider, area_dir_path, f'b08_{dt}_{eid}', main_crs, product_id_item, cbbox)
-            logger.debug(f'B08 raster completed for {product_id_item.id} on {dt}.')
-            pipeline_NDWI(stac_provider, area_dir_path, f'ndwi_{dt}_{eid}', main_crs, product_id_item, cbbox, cfg)
-            logger.debug(f'NDWI raster completed for {product_id_item.id} on {dt}.')
-            pipeline_clouds(stac_provider, area_dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, product_id_item, cbbox, cfg)
-            logger.debug(f'SCL raster completed for {product_id_item.id} on {dt}.')
-
-            # record product used to generate rasters
-            file_to_product[f'tci_{dt}_{eid}'] = product_id_item.id
-            file_to_product[f'rgb_{dt}_{eid}'] = product_id_item.id
-            file_to_product[f'b08_{dt}_{eid}'] = product_id_item.id
-            file_to_product[f'ndwi_{dt}_{eid}'] = product_id_item.id
-            file_to_product[f'clouds_{dt}_{eid}'] = product_id_item.id
-        else:
-            dt = product_id_item.datetime.strftime('%Y%m%d')
-            pipeline_S1(stac_provider, area_dir_path, f'sar_{dt}_{eid}', main_crs, product_id_item, cbbox, cfg)
-            logger.debug(f'S1 raster completed for {product_id_item.id} on {dt}.')
-
-            # record product used to generate rasters
-            file_to_product[f'sar_{dt}_{eid}'] = product_id_item.id
-    else:
-        # Deduplicate items by date - keep only one per date
-        items_s2 = deduplicate_items_by_date(items_s2)
-        items_s1 = deduplicate_items_by_date(items_s1)
+    date_to_products = {'s2': {}, 's1': {}}  # Track products by date and type
+    
+    # Handle product ID filtering if specified
+    if product_ids_s2:
+        logger.info(f'Filtering for S2 product IDs: {product_ids_s2}')
+        items_s2 = [item for item in items_s2 if any(pid in item.id for pid in product_ids_s2)]
+        logger.info(f'Filtered to {len(items_s2)} S2 products.')
+    
+    if product_ids_s1:
+        logger.info(f'Filtering for S1 product IDs: {product_ids_s1}')
+        items_s1 = [item for item in items_s1 if any(pid in item.id for pid in product_ids_s1)]
+        logger.info(f'Filtered to {len(items_s1)} S1 products.')
+    
+    # Deduplicate items by date - keep only one per date based on least missing data
+    if items_s2:
+        items_s2 = deduplicate_items_by_date(items_s2, stac_provider, 's2', bbox)
+    if items_s1:
+        items_s1 = deduplicate_items_by_date(items_s1, stac_provider, 's1', bbox)
+    
+    logger.info(f'After deduplication: {len(items_s2)} S2 products and {len(items_s1)} S1 products.')
+    
+    # Determine consistent CRS across all products
+    all_items = items_s2 + items_s1
+    if not all_items:
+        logger.error('No products to download after filtering.')
+        return False
+    
+    # Use specified CRS or extract from first item
+    main_crs = crs if crs else pe.ext(all_items[0]).crs_string
+    logger.info(f'Using CRS: {main_crs} for all rasters.')
+    
+    # Transform bbox to target CRS
+    conversion = transform(PRISM_CRS, main_crs, (minx, maxx), (miny, maxy))
+    cbbox = conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]
+    
+    # Track shape and transform for supplementary rasters
+    dst_shape = None
+    dst_transform = None
+    
+    # Download S2 products
+    for item in items_s2:
+        dt = item.datetime.strftime('%Y%m%d')
+        logger.info(f'Processing S2 product {item.id} for date {dt}')
         
-        logger.info(f'Downloading {len(items_s2)} S2 products and {len(items_s1)} S1 products (deduplicated by date).')
-        # try to download all in the interval
-        all_items = items_s2 + items_s1
-        main_crs = pe.ext(all_items[0]).crs_string if cfg.sampling.crs is None else cfg.sampling.crs
+        shape, transform = pipeline_TCI(stac_provider, area_dir_path, f'tci_{dt}_{area_id}', main_crs, item, cbbox)
+        if dst_shape is None:
+            dst_shape = shape
+            dst_transform = transform
+        logger.debug(f'TCI raster completed for {item.id} on {dt}.')
+        
+        pipeline_RGB(stac_provider, area_dir_path, f'rgb_{dt}_{area_id}', main_crs, item, cbbox)
+        logger.debug(f'RGB raster completed for {item.id} on {dt}.')
+        
+        pipeline_B08(stac_provider, area_dir_path, f'b08_{dt}_{area_id}', main_crs, item, cbbox)
+        logger.debug(f'B08 raster completed for {item.id} on {dt}.')
+        
+        pipeline_NDWI(stac_provider, area_dir_path, f'ndwi_{dt}_{area_id}', main_crs, item, cbbox, cfg)
+        logger.debug(f'NDWI raster completed for {item.id} on {dt}.')
+        
+        pipeline_clouds(stac_provider, area_dir_path, f'clouds_{dt}_{area_id}', shape, main_crs, transform, item, cbbox, cfg)
+        logger.debug(f'SCL raster completed for {item.id} on {dt}.')
 
-        conversion = transform(PRISM_CRS, main_crs, (minx, maxx), (miny, maxy))
-        cbbox = conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]
+        # Track products by date
+        date_to_products['s2'][dt] = {
+            'product_id': item.id,
+            'files': [
+                f'tci_{dt}_{area_id}.tif',
+                f'rgb_{dt}_{area_id}.tif',
+                f'b08_{dt}_{area_id}.tif',
+                f'ndwi_{dt}_{area_id}.tif',
+                f'clouds_{dt}_{area_id}.tif'
+            ]
+        }
+        
+        # record product used to generate rasters
+        for filename in date_to_products['s2'][dt]['files']:
+            file_to_product[filename] = item.id
 
-        for item in items_s2:
-            dt = item.datetime.strftime('%Y%m%d')
-            dst_shape, dst_transform = pipeline_TCI(stac_provider, area_dir_path, f'tci_{dt}_{eid}', main_crs, item, cbbox)
-            logger.debug(f'TCI raster completed for {item.id} on {dt}.')
-            pipeline_RGB(stac_provider, area_dir_path, f'rgb_{dt}_{eid}', main_crs, item, cbbox)
-            logger.debug(f'RGB raster completed for {item.id} on {dt}.')
-            pipeline_B08(stac_provider, area_dir_path, f'b08_{dt}_{eid}', main_crs, item, cbbox)
-            logger.debug(f'B08 raster completed for {item.id} on {dt}.')
-            pipeline_NDWI(stac_provider, area_dir_path, f'ndwi_{dt}_{eid}', main_crs, item, cbbox, cfg)
-            logger.debug(f'NDWI raster completed for {item.id} on {dt}.')
-            pipeline_clouds(stac_provider, area_dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox, cfg)
-            logger.debug(f'SCL raster completed for {item.id} on {dt}.')
+    # Download S1 products
+    for item in items_s1:
+        dt = item.datetime.strftime('%Y%m%d')
+        logger.info(f'Processing S1 product {item.id} for date {dt}')
+        
+        pipeline_S1(stac_provider, area_dir_path, f'sar_{dt}_{area_id}', main_crs, item, cbbox, cfg)
+        logger.debug(f'S1 raster completed for {item.id} on {dt}.')
 
-            # record product used to generate rasters
-            file_to_product[f'tci_{dt}_{eid}'] = item.id
-            file_to_product[f'rgb_{dt}_{eid}'] = item.id
-            file_to_product[f'b08_{dt}_{eid}'] = item.id
-            file_to_product[f'ndwi_{dt}_{eid}'] = item.id
-            file_to_product[f'clouds_{dt}_{eid}'] = item.id
-
-        for item in items_s1:
-            dt = item.datetime.strftime('%Y%m%d')
-            pipeline_S1(stac_provider, area_dir_path, f'sar_{dt}_{eid}', main_crs, item, cbbox, cfg)
-            logger.debug(f'S1 raster completed for {item.id} on {dt}.')
-
-            # record product used to generate rasters
-            file_to_product[f'sar_{dt}_{eid}'] = item.id
-
-    # save all supplementary rasters in raw and rgb colormap
+        # Track products by date
+        date_to_products['s1'][dt] = {
+            'product_id': item.id,
+            'files': [
+                f'sar_{dt}_{area_id}_vv.tif',
+                f'sar_{dt}_{area_id}_vh.tif'
+            ]
+        }
+        
+        # record product used to generate rasters
+        for filename in date_to_products['s1'][dt]['files']:
+            file_to_product[filename] = item.id
+    
+    # Save supplementary rasters (only once for the area)
+    if dst_shape is None or dst_transform is None:
+        logger.error('No products downloaded - cannot create supplementary rasters.')
+        return False
+    
     logger.info('Processing supplementary rasters...')
-    if not (area_dir_path / f'roads_{eid}.tif').exists():
-        pipeline_roads(area_dir_path, f'roads_{eid}', dst_shape, main_crs, dst_transform, state, bbox, cfg)
+    if not (area_dir_path / f'roads_{area_id}.tif').exists():
+        pipeline_roads(area_dir_path, f'roads_{area_id}', dst_shape, main_crs, dst_transform, state, bbox, cfg)
         logger.debug(f'Roads raster completed successfully.')
-    if not (area_dir_path / f'dem_{eid}.tif').exists():
-        pipeline_dem(area_dir_path, f'dem_{eid}', dst_shape, main_crs, dst_transform, bbox, cfg)
+    if not (area_dir_path / f'dem_{area_id}.tif').exists():
+        pipeline_dem(area_dir_path, f'dem_{area_id}', dst_shape, main_crs, dst_transform, bbox, cfg)
         logger.debug(f'DEM raster completed successfully.')
-    if not (area_dir_path / f'flowlines_{eid}.tif').exists():
-        pipeline_flowlines(area_dir_path, f'flowlines_{eid}', dst_shape, main_crs, dst_transform, bbox, cfg)
+    if not (area_dir_path / f'flowlines_{area_id}.tif').exists():
+        pipeline_flowlines(area_dir_path, f'flowlines_{area_id}', dst_shape, main_crs, dst_transform, bbox, cfg)
         logger.debug(f'Flowlines raster completed successfully.')
-    if not (area_dir_path / f'waterbody_{eid}.tif').exists():
-        pipeline_waterbody(area_dir_path, f'waterbody_{eid}', dst_shape, main_crs, dst_transform, bbox, cfg)
+    if not (area_dir_path / f'waterbody_{area_id}.tif').exists():
+        pipeline_waterbody(area_dir_path, f'waterbody_{area_id}', dst_shape, main_crs, dst_transform, bbox, cfg)
         logger.debug(f'Waterbody raster completed successfully.')
-    if not (area_dir_path / f'nlcd_{eid}.tif').exists():
-        pipeline_NLCD(area_dir_path, f'nlcd_{eid}', int(eid[:4]), dst_shape, main_crs, dst_transform, cfg)
+    if not (area_dir_path / f'nlcd_{area_id}.tif').exists():
+        # Use start year for NLCD
+        start_year = int(start_date[:4])
+        pipeline_NLCD(area_dir_path, f'nlcd_{area_id}', start_year, dst_shape, main_crs, dst_transform, cfg)
         logger.debug(f'NLCD raster completed successfully.')
 
     # validate raster shapes, CRS, transforms
     result = validate_event_rasters(area_dir_path, logger=logger)
     if not result.is_valid:
-        logger.error(f'Raster validation failed for event {eid}. Removing directory and contents.')
-        # shutil.rmtree(dir_path) - for now do not delete!
-        raise Exception(f'Raster validation failed for event {eid}.')
+        logger.error(f'Raster validation failed for area {area_id}.')
+        raise Exception(f'Raster validation failed for area {area_id}.')
 
-    # lastly generate metadata file
+    # Generate metadata file
     logger.info(f'Generating metadata file...')
     metadata = {
-        "metadata": {
-            "Download Date": cfg.sampling.event_date,
-            "CRS": main_crs,
-            "State": state,
-            "Bounding Box": {
-                "minx": minx,
-                "miny": miny,
-                "maxx": maxx,
-                "maxy": maxy
-            },
-            "Item IDs": file_to_product
-        }
+        "area_id": area_id,
+        "date_range": {
+            "start_date": start_date,
+            "end_date": end_date
+        },
+        "CRS": main_crs,
+        "State": state,
+        "Bounding Box": {
+            "minx": minx,
+            "miny": miny,
+            "maxx": maxx,
+            "maxy": maxy
+        },
+        "products_by_date": date_to_products,
+        "supplementary_files": [
+            f'dem_{area_id}.tif',
+            f'roads_{area_id}.tif',
+            f'flowlines_{area_id}.tif',
+            f'waterbody_{area_id}.tif',
+            f'nlcd_{area_id}.tif'
+        ]
     }
 
     metadata_path = area_dir_path / 'metadata.json'
-    if metadata_path.exists():
-        # if metadata file already exists, update the item IDs
-        with open(metadata_path, "r") as json_file:
-            existing_metadata = json.load(json_file)
-            existing_metadata['metadata']['Item IDs'].update(metadata['metadata']['Item IDs'])
-            metadata = existing_metadata
-
     with open(metadata_path, "w") as json_file:
         json.dump(metadata, json_file, indent=4)
 
-    logger.info('Metadata and raster generation completed. Event finished.')
+    logger.info('Metadata and raster generation completed. Download finished.')
     return True
 
 def get_bbox_from_shapefile(shapefile, crs='EPSG:4269'):
@@ -1168,19 +1234,32 @@ def get_bbox_from_shapefile(shapefile, crs='EPSG:4269'):
     return expanded_bounds
 
 def run_download_area(cfg: DictConfig) -> None:
-    """Downloads S2 or S1 imagery + accompanying rasters for a specific study area delineated by
-    a shapefile. Best used with a specific S2 or S1 product ID in mind.
+    """Downloads S2 and S1 imagery + accompanying rasters for a specific study area within a date range.
     
-    The script downloads imagery given a shapefile of ROI. It is agnostic of event tiles.
-    To ensure shape consistency across different dates/images, use the same CRS.
+    The script downloads all imagery within the specified date interval given a shapefile of ROI.
+    For each date, it selects one S2 and one S1 product (if available) based on least missing data.
+    To ensure shape consistency across different dates/images, a consistent CRS is enforced.
     
     Parameters
     ----------
     cfg : DictConfig
-        Configuration object.
+        Configuration object with required fields:
+        - sampling.dir_path: Directory to save downloaded data
+        - sampling.shapefile: Path to shapefile defining area of interest
+        - sampling.start_date: Start date of interval (YYYY-MM-DD)
+        - sampling.end_date: End date of interval (YYYY-MM-DD)
+        - sampling.area_id: Identifier for area (optional, defaults to 'aoi')
+        - sampling.product_ids_s2: List of S2 product IDs to filter for (optional)
+        - sampling.product_ids_s1: List of S1 product IDs to filter for (optional)
+        - sampling.crs: CRS to use for all rasters (optional, auto-detected if not provided)
+        - sampling.include_cmap: Whether to include color maps for the rasters (optional, defaults to true)
+        - sampling.source: mpc or aws (optional, defaults to mpc)
     """
     if cfg.sampling.dir_path is None:
         raise ValueError('sampling.dir_path config parameter is required to specify a directory for download.')
+    
+    if cfg.sampling.start_date is None or cfg.sampling.end_date is None:
+        raise ValueError('sampling.start_date and sampling.end_date are required.')
 
     # Create directory if it doesn't exist
     Path(cfg.sampling.dir_path).mkdir(parents=True, exist_ok=True)
@@ -1193,15 +1272,22 @@ def run_download_area(cfg: DictConfig) -> None:
     rootLogger = setup_logging(cfg.sampling.dir_path, logger_name='main', log_level=logging.DEBUG, mode='w', include_console=False)
 
     # log sampling parameters used
+    area_id = getattr(cfg.sampling, 'area_id', 'aoi')
+    product_ids_s2 = getattr(cfg.sampling, 'product_ids_s2', [])
+    product_ids_s1 = getattr(cfg.sampling, 'product_ids_s1', [])
+    crs = getattr(cfg.sampling, 'crs', None)
+    source = getattr(cfg.sampling, 'source', 'mpc')
+    
     rootLogger.info(
         "Download area parameters used:\n"
-        f"  Event date: {cfg.sampling.event_date}\n"
-        f"  Days before flood event: {cfg.sampling.before}\n"
-        f"  Days after flood event: {cfg.sampling.after}\n"
-        f"  Product ID: {cfg.sampling.product_id}\n"
-        f"  CRS: {cfg.sampling.crs}\n"
+        f"  Area ID: {area_id}\n"
+        f"  Start date: {cfg.sampling.start_date}\n"
+        f"  End date: {cfg.sampling.end_date}\n"
+        f"  S2 Product IDs: {product_ids_s2 if product_ids_s2 else 'All'}\n"
+        f"  S1 Product IDs: {product_ids_s1 if product_ids_s1 else 'All'}\n"
+        f"  CRS: {cfg.sampling.crs if cfg.sampling.crs else 'Auto-detect'}\n"
         f"  Include color maps: {cfg.sampling.include_cmap}\n"
-        f"  Source: {cfg.sampling.source}\n"
+        f"  Source: {source}\n"
     )
 
     rootLogger.info("Initializing area download...")
@@ -1210,22 +1296,33 @@ def run_download_area(cfg: DictConfig) -> None:
         bbox = get_bbox_from_shapefile(cfg.sampling.shapefile, crs=PRISM_CRS)
 
         # get stac provider
-        stac_provider = get_stac_provider(cfg.sampling.source.lower(), mpc_api_key=getattr(cfg, "mpc_api_key", None), logger=rootLogger)
+        stac_provider = get_stac_provider(source.lower(), mpc_api_key=getattr(cfg, "mpc_api_key", None), logger=rootLogger)
 
         # download imagery
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
             try:
-                download_area(stac_provider, bbox, cfg)
+                download_area(
+                    stac_provider=stac_provider,
+                    bbox=bbox,
+                    dir_path=cfg.sampling.dir_path,
+                    area_id=area_id,
+                    start_date=cfg.sampling.start_date,
+                    end_date=cfg.sampling.end_date,
+                    product_ids_s2=product_ids_s2,
+                    product_ids_s1=product_ids_s1,
+                    crs=crs,
+                    cfg=cfg
+                )
                 break
             except (rasterio.errors.WarpOperationError, rasterio.errors.RasterioIOError, pystac_client.exceptions.APIError) as err:
                 rootLogger.error(f"Connection error: {type(err)}")
                 if attempt == max_attempts:
-                    rootLogger.error(f'Maximum number of attempts reached, skipping event...')
+                    rootLogger.error(f'Maximum number of attempts reached, skipping download...')
                 else:
                     rootLogger.info(f'Retrying ({attempt}/{max_attempts})...')
             except NoElevationError as err:
-                rootLogger.error(f'Elevation file missing, skipping event...')
+                rootLogger.error(f'Elevation file missing, skipping download...')
                 break
             except Exception as err:
                 raise err

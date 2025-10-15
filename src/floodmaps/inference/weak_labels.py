@@ -110,9 +110,6 @@ def get_sample_prediction_sar(model, device, cfg: DictConfig, standardize, train
     pred_map = torch.zeros((H, W), dtype=torch.float32, device=device)
     count_map = torch.zeros((H, W), dtype=torch.float32, device=device)
 
-    # send to device
-    X = X.to(device)
-
     with torch.no_grad():
         hit_y_edge = False
         for y in range(0, H, stride):
@@ -142,7 +139,7 @@ def get_sample_prediction_sar(model, device, cfg: DictConfig, standardize, train
                     pred = output.squeeze()
 
                 # Accumulate probabilities
-                prob = torch.sigmoid(pred).cpu().float()
+                prob = torch.sigmoid(pred).float()
                 pred_map[y:y+patch_size, x:x+patch_size] += prob
                 count_map[y:y+patch_size, x:x+patch_size] += 1.0
 
@@ -150,7 +147,7 @@ def get_sample_prediction_sar(model, device, cfg: DictConfig, standardize, train
     pred_map = torch.where(count_map > 0, pred_map / count_map, pred_map)
 
     # Convert to final binary prediction
-    label = torch.where(pred_map >= threshold, 1.0, 0.0).byte().to('cpu').numpy()
+    label = torch.where(pred_map >= threshold, 1.0, 0.0).byte().cpu().numpy()
     label[missing_vals] = 0
     return label
 
@@ -171,7 +168,7 @@ def get_sample_prediction_s2(model, device, cfg: DictConfig, standardize, train_
     event_path : Path
         Path to the event directory where the raw sample data is stored.
     dt : str
-        Date that the TCI of the sample was taken.
+        Date that the RGB image was taken.
     eid : str
         Event ID of the sample.
     threshold : float
@@ -279,8 +276,8 @@ def get_sample_prediction_s2(model, device, cfg: DictConfig, standardize, train_
         raise ValueError(f"Image dimensions must be at least {patch_size}x{patch_size}")
 
     # Initialize output prediction map (accumulate probabilities, not binaries)
-    pred_map = torch.zeros((H, W), dtype=torch.float32)
-    count_map = torch.zeros((H, W), dtype=torch.float32)
+    pred_map = torch.zeros((H, W), dtype=torch.float32, device=device)
+    count_map = torch.zeros((H, W), dtype=torch.float32, device=device)
 
     with torch.no_grad():
         hit_y_edge = False
@@ -311,7 +308,7 @@ def get_sample_prediction_s2(model, device, cfg: DictConfig, standardize, train_
                     pred = output.squeeze()
                 
                 # Accumulate probabilities
-                prob = torch.sigmoid(pred).cpu().float()
+                prob = torch.sigmoid(pred).float()
                 pred_map[y:y+patch_size, x:x+patch_size] += prob
                 count_map[y:y+patch_size, x:x+patch_size] += 1.0
     
@@ -319,7 +316,7 @@ def get_sample_prediction_s2(model, device, cfg: DictConfig, standardize, train_
     pred_map = torch.where(count_map > 0, pred_map / count_map, pred_map)
     
     # Convert to final binary prediction
-    label = torch.where(pred_map >= threshold, 1.0, 0.0).byte().numpy()
+    label = torch.where(pred_map >= threshold, 1.0, 0.0).byte().cpu().numpy()
     label[missing_vals] = 0
     return label
 
@@ -422,7 +419,7 @@ def run_weak_labeling(cfg: DictConfig):
 
 @hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig):
-    """Main entry point for weak label generation using the old deprecated TCI input model."""
+    """Main entry point for weak label generation using RGB S2 optical model."""
     run_weak_labeling(cfg)
 
 if __name__ == '__main__':

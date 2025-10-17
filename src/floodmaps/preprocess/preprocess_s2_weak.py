@@ -65,8 +65,11 @@ def discover_all_tiles(events: List[Path], label_idx: Optional[Dict[Tuple[str, s
             required_files = [
                 rgb_file,
                 event / f'b08_{img_dt}_{eid}.tif',
+                event / f'b11_{img_dt}_{eid}.tif',
+                event / f'b12_{img_dt}_{eid}.tif',
                 event / f'ndwi_{img_dt}_{eid}.tif',
                 event / f'tci_{img_dt}_{eid}.tif',
+                event / f'scl_{img_dt}_{eid}.tif',
                 event / f'dem_{eid}.tif',
                 event / f'waterbody_{eid}.tif',
                 event / f'roads_{eid}.tif',
@@ -256,12 +259,15 @@ def load_tile_for_sampling(tile_info: Tuple):
     Returns
     -------
     stacked_raster : np.ndarray
-        Stacked raster of the tile (17 channels: 16 data + 1 missing mask)
+        Stacked raster of the tile (23 channels: 22 data + 1 missing mask)
     """
     event_path, rgb_file, label_file, eid, img_dt = tile_info
     tci_file = event_path / f'tci_{img_dt}_{eid}.tif'
     b08_file = event_path / f'b08_{img_dt}_{eid}.tif'
+    b11_file = event_path / f'b11_{img_dt}_{eid}.tif'
+    b12_file = event_path / f'b12_{img_dt}_{eid}.tif'
     ndwi_file = event_path / f'ndwi_{img_dt}_{eid}.tif'
+    scl_file = event_path / f'scl_{img_dt}_{eid}.tif'
     dem_file = event_path / f'dem_{eid}.tif'
     waterbody_file = event_path / f'waterbody_{eid}.tif'
     roads_file = event_path / f'roads_{eid}.tif'
@@ -297,6 +303,16 @@ def load_tile_for_sampling(tile_info: Tuple):
         b08_raster = src.read().astype(np.float32)
         if tile_dt_obj >= PROCESSING_BASELINE_NAIVE:
             b08_raster = b08_raster + BOA_ADD_OFFSET
+
+    with rasterio.open(b11_file) as src:
+        b11_raster = src.read().astype(np.float32)
+        if tile_dt_obj >= PROCESSING_BASELINE_NAIVE:
+            b11_raster = b11_raster + BOA_ADD_OFFSET
+
+    with rasterio.open(b12_file) as src:
+        b12_raster = src.read().astype(np.float32)
+        if tile_dt_obj >= PROCESSING_BASELINE_NAIVE:
+            b12_raster = b12_raster + BOA_ADD_OFFSET
     
     if tile_dt_obj >= PROCESSING_BASELINE_NAIVE:
         # Temporary fix for NDWI computation
@@ -316,6 +332,30 @@ def load_tile_for_sampling(tile_info: Tuple):
     rgb_raster = rgb_raster / 10000.0
     np.clip(b08_raster, None, 10000.0, out=b08_raster)
     b08_raster = b08_raster / 10000.0
+    np.clip(b11_raster, None, 10000.0, out=b11_raster)
+    b11_raster = b11_raster / 10000.0
+    np.clip(b12_raster, None, 10000.0, out=b12_raster)
+    b12_raster = b12_raster / 10000.0
+
+    # Compute MNDWI (Modified NDWI): (Green - SWIR1) / (Green + SWIR1)
+    mndwi_raster = np.where(
+        (rgb_raster[1] + b11_raster[0]) != 0,
+        (rgb_raster[1] - b11_raster[0]) / (rgb_raster[1] + b11_raster[0]),
+        -999999
+    )
+    mndwi_raster = np.expand_dims(mndwi_raster, axis=0)
+
+    # Compute AWEI_sh (Automated Water Extraction Index - shadow): Blue + 2.5*Green - 1.5*(NIR + SWIR1) - 0.25*SWIR2
+    awei_sh_raster = (rgb_raster[2] + 2.5 * rgb_raster[1] - 
+                       1.5 * (b08_raster[0] + b11_raster[0]) - 
+                       0.25 * b12_raster[0])
+    awei_sh_raster = np.expand_dims(awei_sh_raster, axis=0)
+
+    # Compute AWEI_nsh (Automated Water Extraction Index - no shadow): 4*(Green - SWIR1) - 0.25*NIR + 2.75*SWIR2
+    awei_nsh_raster = (4 * (rgb_raster[1] - b11_raster[0]) - 
+                        0.25 * b08_raster[0] + 
+                        2.75 * b12_raster[0])
+    awei_nsh_raster = np.expand_dims(awei_nsh_raster, axis=0)
 
     with rasterio.open(dem_file) as src:
         dem_raster = src.read().astype(np.float32)
@@ -335,12 +375,20 @@ def load_tile_for_sampling(tile_info: Tuple):
     with rasterio.open(nlcd_file) as src:
         nlcd_raster = src.read().astype(np.float32)
 
-    # Stack all tiles: 16 data channels + 1 missing mask channel (17 total)
-    # Channel 16 (0-indexed) is the missing mask for filtering, will be dropped before saving
-    stacked_tile = np.vstack((rgb_raster, b08_raster, ndwi_raster, dem_raster, 
-                            slope_y_raster, slope_x_raster, waterbody_raster, 
-                            roads_raster, flowlines_raster, label_binary, tci_floats, nlcd_raster,
-                            missing_mask), dtype=np.float32)
+    with rasterio.open(scl_file) as src:
+        scl_raster = src.read().astype(np.float32)
+
+    # Stack all tiles: 22 data channels + 1 missing mask channel (23 total)
+    # New channel order: RGB(1-3), B08(4), SWIR1(5), SWIR2(6), NDWI(7), MNDWI(8), AWEI_sh(9), AWEI_nsh(10),
+    #                    DEM(11), slope_y(12), slope_x(13), waterbody(14), roads(15), flowlines(16),
+    #                    label(17), TCI(18-20), NLCD(21), SCL(22)
+    # Channel 22 (0-indexed) is the missing mask for filtering, will be dropped before saving
+    stacked_tile = np.vstack((rgb_raster, b08_raster, b11_raster, b12_raster, ndwi_raster, 
+                                mndwi_raster, awei_sh_raster, awei_nsh_raster,
+                                dem_raster, slope_y_raster, slope_x_raster, 
+                                waterbody_raster, roads_raster, flowlines_raster, 
+                                label_binary, tci_floats, nlcd_raster, scl_raster,
+                                missing_mask), dtype=np.float32)
     
     return stacked_tile
 
@@ -369,7 +417,7 @@ def sample_patches_in_mem(tiles: List[Tuple], size: int, num_samples: int,
     """
     rng = Random(seed)
     total_patches = num_samples * len(tiles)
-    dataset = np.empty((total_patches, 16, size, size), dtype=np.float32)
+    dataset = np.empty((total_patches, 22, size, size), dtype=np.float32)
     
     for i, tile in enumerate(tiles):
         try:
@@ -387,11 +435,11 @@ def sample_patches_in_mem(tiles: List[Tuple], size: int, num_samples: int,
             y = int(rng.uniform(0, WIDTH - size))
             patch = tile_data[:, x : x + size, y : y + size]
             
-            # Filter using missing mask (channel 16) and NDWI (channel 4)
-            if np.any(patch[16] == 1) or np.any(patch[4] == -999999):
+            # Filter using missing mask (channel 22) and NDWI/MNDWI (channels 6, 7)
+            if np.any(patch[22] == 1) or np.any(patch[6] == -999999) or np.any(patch[7] == -999999):
                 continue
 
-            dataset[i * num_samples + patches_sampled] = patch[:16]
+            dataset[i * num_samples + patches_sampled] = patch[:22]
             patches_sampled += 1
         
         if patches_sampled < num_samples:
@@ -430,7 +478,7 @@ def sample_patches_in_disk(tiles: List[Tuple], size: int, num_samples: int,
     rng = Random(seed)
     total_patches = num_samples * len(tiles)
     tmp_file = scratch_dir / f"tmp_{worker_id}.dat"
-    dataset = np.memmap(tmp_file, dtype=np.float32, shape=(total_patches, 16, size, size), mode="w+")
+    dataset = np.memmap(tmp_file, dtype=np.float32, shape=(total_patches, 22, size, size), mode="w+")
     
     try:
         for i, tile in enumerate(tiles):
@@ -449,11 +497,11 @@ def sample_patches_in_disk(tiles: List[Tuple], size: int, num_samples: int,
                 y = int(rng.uniform(0, WIDTH - size))
                 patch = tile_data[:, x : x + size, y : y + size]
                 
-                # Filter using missing mask (channel 16) and NDWI (channel 4)
-                if np.any(patch[16] == 1) or np.any(patch[4] == -999999):
+                # Filter using missing mask (channel 22) and NDWI/MNDWI (channels 6, 7)
+                if np.any(patch[22] == 1) or np.any(patch[6] == -999999) or np.any(patch[7] == -999999):
                     continue
 
-                dataset[i * num_samples + patches_sampled] = patch[:16]
+                dataset[i * num_samples + patches_sampled] = patch[:22]
                 patches_sampled += 1
 
             if patches_sampled < num_samples:
@@ -503,7 +551,7 @@ def sample_patches_parallel(tiles: List[Tuple], size: int, num_samples: int,
     logger.info(f'Using {n_workers} workers for {len(tiles)} tiles...')
     
     total_patches = len(tiles) * num_samples
-    array_shape = (total_patches, 16, size, size)
+    array_shape = (total_patches, 22, size, size)
     array_dtype = np.float32
 
     # calculate how much memory required for the entire array (factor of 2 for concatenation operation)
@@ -578,7 +626,7 @@ def sample_patches_parallel(tiles: List[Tuple], size: int, num_samples: int,
             start_idx = 0
             for i, f in enumerate(worker_files):
                 tiles_in_worker = len(worker_tiles[i])
-                chunk_shape = (num_samples * tiles_in_worker, 16, size, size)
+                chunk_shape = (num_samples * tiles_in_worker, 22, size, size)
                 worker_data = np.memmap(f, dtype=np.float32, shape=chunk_shape, mode="r")  # load worker memmap
                 end_idx = start_idx + worker_data.shape[0]
                 final_npy[start_idx:end_idx] = worker_data  # copy into final memmap
@@ -803,20 +851,18 @@ def main(cfg: DictConfig) -> None:
     logger.info('Computing training statistics for DEM and slope channels...')
     mean_dem_slopes, std_dem_slopes = compute_statistics_parallel(train_tiles, n_workers)
     
-    # Construct final mean and std arrays:
-    # Channels 0-3 (RGB, NIR): mean=0, std=1 (already scaled by 10000)
-    # Channel 4 (NDWI): mean=0, std=1 (already in [-1, 1])
-    # Channels 5-7 (DEM, slopes): computed mean/std
-    # Channels 8-10 (waterbody, roads, flowlines): mean=0, std=1
-    mean_reflectance = np.zeros(4, dtype=np.float32)  # RGB + NIR
-    std_reflectance = np.ones(4, dtype=np.float32)
-    mean_ndwi = np.zeros(1, dtype=np.float32)  # NDWI
-    std_ndwi = np.ones(1, dtype=np.float32)
+    # Construct final mean and std arrays for 16 input channels:
+    # Channels 0-9: RGB(3), B08(1), SWIR1(1), SWIR2(1), NDWI(1), MNDWI(1), AWEI_sh(1), AWEI_nsh(1)
+    #               All scaled/normalized → mean=0, std=1
+    # Channels 10-12: DEM, slope_y, slope_x → computed mean/std
+    # Channels 13-15: waterbody, roads, flowlines → mean=0, std=1
+    mean_spectral = np.zeros(10, dtype=np.float32)  # RGB + NIR + SWIR1 + SWIR2 + spectral indices
+    std_spectral = np.ones(10, dtype=np.float32)
     mean_binary = np.zeros(3, dtype=np.float32)  # waterbody, roads, flowlines
     std_binary = np.ones(3, dtype=np.float32)
     
-    mean = np.concatenate([mean_reflectance, mean_ndwi, mean_dem_slopes, mean_binary])
-    std = np.concatenate([std_reflectance, std_ndwi, std_dem_slopes, std_binary])
+    mean = np.concatenate([mean_spectral, mean_dem_slopes, mean_binary])
+    std = np.concatenate([std_spectral, std_dem_slopes, std_binary])
     
     # Save statistics
     stats_file = pre_sample_dir / f'mean_std_{cfg.preprocess.size}_{cfg.preprocess.samples}.pkl'

@@ -70,6 +70,30 @@ def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_pa
         b08_tile_clipped = b08_tile_clipped / 10000.0  # Scale reflectance to [0, 1]
         layers.append(b08_tile_clipped)
 
+    # Load SWIR1 (B11)
+    b11_file = event_path / f'b11_{dt}_{eid}.tif'
+    with rasterio.open(b11_file) as src:
+        b11_tile = src.read().astype(np.float32)
+        if img_dt_obj >= PROCESSING_BASELINE_NAIVE:
+            b11_tile = b11_tile + BOA_ADD_OFFSET
+
+    if my_channels.has_swir1():
+        b11_tile_clipped = np.clip(b11_tile, None, 10000.0)
+        b11_tile_clipped = b11_tile_clipped / 10000.0  # Scale reflectance to [0, 1]
+        layers.append(b11_tile_clipped)
+
+    # Load SWIR2 (B12)
+    b12_file = event_path / f'b12_{dt}_{eid}.tif'
+    with rasterio.open(b12_file) as src:
+        b12_tile = src.read().astype(np.float32)
+        if img_dt_obj >= PROCESSING_BASELINE_NAIVE:
+            b12_tile = b12_tile + BOA_ADD_OFFSET
+
+    if my_channels.has_swir2():
+        b12_tile_clipped = np.clip(b12_tile, None, 10000.0)
+        b12_tile_clipped = b12_tile_clipped / 10000.0  # Scale reflectance to [0, 1]
+        layers.append(b12_tile_clipped)
+
     if my_channels.has_ndwi():
         ndwi_file = event_path / f'ndwi_{dt}_{eid}.tif'
         if img_dt_obj >= PROCESSING_BASELINE_NAIVE:
@@ -85,6 +109,44 @@ def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_pa
             with rasterio.open(ndwi_file) as src:
                 ndwi_tile = src.read().astype(np.float32)
         layers.append(ndwi_tile)
+
+    # Compute MNDWI (Modified NDWI): (Green - SWIR1) / (Green + SWIR1)
+    if my_channels.has_mndwi():
+        # Use corrected/clipped values for computation
+        green_corrected = np.clip(rgb_tile[1], None, 10000.0) / 10000.0
+        swir1_corrected = np.clip(b11_tile[0], None, 10000.0) / 10000.0
+        mndwi_tile = np.where(
+            (green_corrected + swir1_corrected) != 0,
+            (green_corrected - swir1_corrected) / (green_corrected + swir1_corrected),
+            -999999
+        )
+        mndwi_tile = np.expand_dims(mndwi_tile, axis=0)
+        layers.append(mndwi_tile)
+
+    # Compute AWEI_sh (Automated Water Extraction Index - shadow): Blue + 2.5*Green - 1.5*(NIR + SWIR1) - 0.25*SWIR2
+    if my_channels.has_awei_sh():
+        blue_corrected = np.clip(rgb_tile[2], None, 10000.0) / 10000.0
+        green_corrected = np.clip(rgb_tile[1], None, 10000.0) / 10000.0
+        nir_corrected = np.clip(b08_tile[0], None, 10000.0) / 10000.0
+        swir1_corrected = np.clip(b11_tile[0], None, 10000.0) / 10000.0
+        swir2_corrected = np.clip(b12_tile[0], None, 10000.0) / 10000.0
+        awei_sh_tile = (blue_corrected + 2.5 * green_corrected - 
+                        1.5 * (nir_corrected + swir1_corrected) - 
+                        0.25 * swir2_corrected)
+        awei_sh_tile = np.expand_dims(awei_sh_tile, axis=0)
+        layers.append(awei_sh_tile)
+
+    # Compute AWEI_nsh (Automated Water Extraction Index - no shadow): 4*(Green - SWIR1) - 0.25*NIR + 2.75*SWIR2
+    if my_channels.has_awei_nsh():
+        green_corrected = np.clip(rgb_tile[1], None, 10000.0) / 10000.0
+        nir_corrected = np.clip(b08_tile[0], None, 10000.0) / 10000.0
+        swir1_corrected = np.clip(b11_tile[0], None, 10000.0) / 10000.0
+        swir2_corrected = np.clip(b12_tile[0], None, 10000.0) / 10000.0
+        awei_nsh_tile = (4 * (green_corrected - swir1_corrected) - 
+                         0.25 * nir_corrected + 
+                         2.75 * swir2_corrected)
+        awei_nsh_tile = np.expand_dims(awei_nsh_tile, axis=0)
+        layers.append(awei_nsh_tile)
 
     # need dem for slope regardless if in channels or not
     dem_file = event_path / f'dem_{eid}.tif'

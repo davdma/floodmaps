@@ -31,13 +31,21 @@ Before running weak label preprocessing scripts, you must generate machine label
 - Channel 13: NLCD land cover
 
 ### S2 Preprocessing (`preprocess_s2_weak.py`)
-**Output**: 16-channel patches
-- Channels 1-5: RGB, B08, NDWI
-- Channels 6-8: DEM, slope_y, slope_x
-- Channels 9-11: waterbody, roads, flowlines (binary)
-- Channel 12: binary flood label
-- Channels 13-15: TCI (RGB scaled to [0,1])
-- Channel 16: NLCD land cover
+**Output**: 22-channel patches
+- Channels 1-3: RGB (reflectance scaled by 10000)
+- Channel 4: B08 NIR (reflectance scaled by 10000)
+- Channel 5: SWIR1/B11 (reflectance scaled by 10000)
+- Channel 6: SWIR2/B12 (reflectance scaled by 10000)
+- Channel 7: NDWI (unnormalized, range [-1, 1])
+- Channel 8: MNDWI (unnormalized, range [-1, 1])
+- Channel 9: AWEI_sh (unnormalized)
+- Channel 10: AWEI_nsh (unnormalized)
+- Channels 11-13: DEM, slope_y, slope_x
+- Channels 14-16: waterbody, roads, flowlines (binary)
+- Channel 17: binary flood label
+- Channels 18-20: TCI (RGB scaled to [0,1])
+- Channel 21: NLCD land cover
+- Channel 22: SCL (Scene Classification Layer)
 
 ### Configuration Files
 

@@ -275,22 +275,26 @@ class FloodSampleS2Dataset(Dataset):
     channels is done during retrieval.
 
     The class does not have knowledge of the dimensions of the patches of the dataset which are
-    set during preprocessing. The class assumes the data has 11 channels:
+    set during preprocessing. The class assumes the data has 16 input channels:
 
     1. B04 Red Reflectance
     2. B03 Green Reflectance
     3. B02 Blue Reflectance
     4. B08 Near Infrared
-    5. NDWI
-    6. DEM
-    7. Slope Y
-    8. Slope X
-    9. Waterbody
-    10. Roads
-    11. Flowlines
+    5. SWIR1 (B11)
+    6. SWIR2 (B12)
+    7. NDWI
+    8. MNDWI
+    9. AWEI_sh
+    10. AWEI_nsh
+    11. DEM
+    12. Slope Y
+    13. Slope X
+    14. Waterbody
+    15. Roads
+    16. Flowlines
 
-    The last N+1 channel is the label, N+2 - N+4 channel is the TCI
-    and the N+5 channel is the NLCD land cover classes.
+    The last 6 channels are: label (channel 17), TCI (channels 18-20), NLCD (channel 21), SCL (channel 22).
 
     Parameters
     ----------
@@ -310,15 +314,15 @@ class FloodSampleS2Dataset(Dataset):
     Returns
     -------
     image : torch.Tensor
-        The input image (11 channels).
+        The input image (16 channels).
     label : torch.Tensor
         The binary label (1 channel).
     supplementary : torch.Tensor
-        The TCI (3 channels) + NLCD (1 channel).
+        The TCI (3 channels) + NLCD (1 channel) + SCL (1 channel) = 5 channels.
     """
-    def __init__(self, sample_dir, channels=[True] * 11, typ="train", random_flip=False, transform=None, seed=3200):
+    def __init__(self, sample_dir, channels=[True] * 16, typ="train", random_flip=False, transform=None, seed=3200):
         self.sample_dir = Path(sample_dir)
-        self.channels = channels + [True] * 5 # always keep label, tci, nlcd
+        self.channels = channels + [True] * 6 # always keep label, tci, nlcd, scl
         self.typ = typ
         self.random_flip = random_flip
         self.transform = transform
@@ -340,9 +344,9 @@ class FloodSampleS2Dataset(Dataset):
 
     def __getitem__(self, idx):
         patch = self.dataset[idx]
-        image = torch.from_numpy(patch[:-5, :, :])
-        label = torch.from_numpy(patch[-5, :, :]).unsqueeze(0)
-        supplementary = torch.from_numpy(patch[-4:, :, :])
+        image = torch.from_numpy(patch[:-6, :, :])
+        label = torch.from_numpy(patch[-6, :, :]).unsqueeze(0)
+        supplementary = torch.from_numpy(patch[-5:, :, :])
 
         if self.transform:
             # for standardization only standardize the non-binary channels!

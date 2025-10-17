@@ -63,6 +63,26 @@ NLCD_CODE_TO_RGB = {
     for code, hex_color in NLCD_COLORS.items()
 }
 
+# SCL (Scene Classification Layer) color mapping dictionary
+SCL_COLORS = {
+    0: '#000000',    # No data
+    1: '#ff0000',    # Saturated or defective
+    2: '#2f2f2f',    # Topographic casted shadows
+    3: '#643200',    # Cloud shadow
+    4: '#00a000',    # Vegetation
+    5: '#ffe65a',    # Not vegetated
+    6: '#0000ff',    # Water
+    7: '#808080',    # Unclassified
+    8: '#c0c0c0',    # Cloud medium probability
+    9: '#ffffff',    # Cloud high probability
+    10: '#64c8ff',    # Thin cirrus
+    11: '#ff96ff',    # Snow or ice
+}
+SCL_CODE_TO_RGB = {
+    code: tuple(int(255 * c) for c in to_rgb(hex_color))
+    for code, hex_color in SCL_COLORS.items()
+}
+
 @dataclass
 class PRISMData:
     """Container for PRISM netCDF data."""
@@ -1087,3 +1107,29 @@ def unzip_file(zip_path: Path, remove_zip: bool = True, extract_to: Path = None)
         print(f"Warning: {zip_path} is not a valid zip file")
     except Exception as e:
         print(f"Error extracting {zip_path}: {e}")
+
+def scl_to_rgb(scl_array):
+    """Convert SCL classification array to RGB image using SCL colormap.
+    
+    Optimized version using lookup table for efficient batch processing.
+    
+    Parameters
+    ----------
+    scl_array : numpy.ndarray
+        2D array of SCL class codes (uint8)
+        
+    Returns
+    -------
+    numpy.ndarray
+        3D RGB array with shape (3, H, W), dtype uint8
+    """
+    H, W = scl_array.shape
+    rgb_img = np.zeros((H, W, 3), dtype=np.uint8)
+
+    # vectorized mapping
+    for code, rgb in SCL_CODE_TO_RGB.items():
+        mask = scl_array == code
+        rgb_img[mask] = rgb
+    
+    # transpose to (3, H, W) for rasterio
+    return np.transpose(rgb_img, (2, 0, 1))

@@ -94,28 +94,34 @@ class ChannelIndexer:
     """Abstract class for wrapping list of S2 dataset channels used for input.
     Most up to date with RGB spectral bands instead of TCI.
 
-    The 11 available channels in order:
+    The 16 available channels in order:
 
     1. B04 Red Reflectance
     2. B03 Green Reflectance
     3. B02 Blue Reflectance
     4. B08 Near Infrared
-    5. NDWI
-    6. DEM
-    7. Slope Y
-    8. Slope X
-    9. Waterbody
-    10. Roads
-    11. Flowlines
+    5. SWIR1 (B11)
+    6. SWIR2 (B12)
+    7. NDWI
+    8. MNDWI
+    9. AWEI_sh
+    10. AWEI_nsh
+    11. DEM
+    12. Slope Y
+    13. Slope X
+    14. Waterbody
+    15. Roads
+    16. Flowlines
 
     Parameters
     ----------
     channels : list[bool]
-        List of 11 booleans corresponding to the 11 input channels.
+        List of 16 booleans corresponding to the 16 input channels.
     """
     def __init__(self, channels):
         self.channels = channels
-        self.names = names = ["rgb", "nir", "ndwi", "dem", "slope_y", "slope_x", "waterbody", "roads", "flowlines"]
+        self.names = names = ["rgb", "nir", "swir1", "swir2", "ndwi", "mndwi", "awei_sh", "awei_nsh", 
+                               "dem", "slope_y", "slope_x", "waterbody", "roads", "flowlines"]
 
     def has_rgb(self):
         return all(self.channels[:3])
@@ -123,26 +129,41 @@ class ChannelIndexer:
     def has_b08(self):
         return self.channels[3]
 
-    def has_ndwi(self):
+    def has_swir1(self):
         return self.channels[4]
 
-    def has_dem(self):
+    def has_swir2(self):
         return self.channels[5]
 
-    def has_slope_y(self):
+    def has_ndwi(self):
         return self.channels[6]
 
-    def has_slope_x(self):
+    def has_mndwi(self):
         return self.channels[7]
 
-    def has_waterbody(self):
+    def has_awei_sh(self):
         return self.channels[8]
 
-    def has_roads(self):
+    def has_awei_nsh(self):
         return self.channels[9]
+
+    def has_dem(self):
+        return self.channels[10]
+
+    def has_slope_y(self):
+        return self.channels[11]
+
+    def has_slope_x(self):
+        return self.channels[12]
+
+    def has_waterbody(self):
+        return self.channels[13]
+
+    def has_roads(self):
+        return self.channels[14]
     
     def has_flowlines(self):
-        return self.channels[10]
+        return self.channels[15]
 
     def get_channel_names(self):
         return self.names
@@ -153,6 +174,8 @@ class ChannelIndexer:
         display_names = []
         if self.has_ndwi():
             display_names.append("ndwi")
+        if self.has_mndwi():
+            display_names.append("mndwi")
         if self.has_dem():
             display_names.append("dem")
         if self.has_slope_y():
@@ -898,6 +921,51 @@ def nlcd_to_rgb(nlcd_array):
     # vectorized mapping
     for code, rgb in NLCD_CODE_TO_RGB.items():
         mask = nlcd_array == code
+        rgb_img[mask] = rgb
+    
+    return rgb_img
+
+SCL_COLORS = {
+    0: '#000000',    # No data
+    1: '#ff0000',    # Saturated or defective
+    2: '#2f2f2f',    # Topographic casted shadows
+    3: '#643200',    # Cloud shadow
+    4: '#00a000',    # Vegetation
+    5: '#ffe65a',    # Not vegetated
+    6: '#0000ff',    # Water
+    7: '#808080',    # Unclassified
+    8: '#c0c0c0',    # Cloud medium probability
+    9: '#ffffff',    # Cloud high probability
+    10: '#64c8ff',    # Thin cirrus
+    11: '#ff96ff',    # Snow or ice
+}
+SCL_CODE_TO_RGB = {
+    code: tuple(int(255 * c) for c in to_rgb(hex_color))
+    for code, hex_color in SCL_COLORS.items()
+}
+
+def scl_to_rgb(scl_array):
+    """Convert SCL classification array to RGB image using SCL colormap.
+    
+    Optimized version using lookup table for efficient batch processing.
+    
+    Parameters
+    ----------
+    scl_array : numpy.ndarray
+        2D array of SCL class codes (uint8)
+        
+    Returns
+    -------
+    numpy.ndarray
+        3D RGB array with shape (H, W, 3), dtype uint8
+    """
+    # create NLCD colormap
+    H, W = scl_array.shape
+    rgb_img = np.zeros((H, W, 3), dtype=np.uint8)
+
+    # vectorized mapping
+    for code, rgb in SCL_CODE_TO_RGB.items():
+        mask = scl_array == code
         rgb_img[mask] = rgb
     
     return rgb_img

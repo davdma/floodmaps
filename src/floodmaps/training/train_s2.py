@@ -22,7 +22,7 @@ from omegaconf import DictConfig, OmegaConf
 import hydra
 
 from floodmaps.models.model import S2WaterDetector
-from floodmaps.utils.utils import flatten_dict, get_model_params, Metrics, EarlyStopper, ChannelIndexer, nlcd_to_rgb, get_samples_with_wet_percentage
+from floodmaps.utils.utils import flatten_dict, get_model_params, Metrics, EarlyStopper, ChannelIndexer, nlcd_to_rgb, scl_to_rgb, get_samples_with_wet_percentage
 from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
 from floodmaps.utils.metrics import compute_nlcd_metrics
 
@@ -371,11 +371,11 @@ def sample_predictions(model, sample_set, mean, std, cfg, percent_wet_patches=0.
     if cfg.wandb.num_sample_predictions <= 0:
         return None
 
-    columns = ["id", "tci", "nlcd"] # TCI, NLCD always included
+    columns = ["id", "tci", "nlcd", "scl"] # TCI, NLCD, SCL always included
     channels = [bool(int(x)) for x in cfg.data.channels]
-    my_channels = ChannelIndexer(channels) # ndwi, dem, slope_y, slope_x, waterbody, roads, flowlines
+    my_channels = ChannelIndexer(channels) # ndwi, mndwi, awei_sh, awei_nsh, dem, slope_y, slope_x, waterbody, roads, flowlines
     # initialize wandb table given the channel settings
-    columns += my_channels.get_display_channels()
+    columns += my_channels.get_display_channels() # corresponds with additional channels to display!
     columns += ["truth", "prediction", "false positive", "false negative"] # added residual binary map
     table = wandb.Table(columns=columns)
     
@@ -383,6 +383,9 @@ def sample_predictions(model, sample_set, mean, std, cfg, percent_wet_patches=0.
         # initialize mappable objects
         ndwi_norm = Normalize(vmin=-1, vmax=1)
         ndwi_map = ScalarMappable(norm=ndwi_norm, cmap='seismic_r')
+    if my_channels.has_mndwi():
+        mndwi_norm = Normalize(vmin=-1, vmax=1)
+        mndwi_map = ScalarMappable(norm=mndwi_norm, cmap='seismic_r')
     if my_channels.has_dem():
         dem_map = ScalarMappable(norm=None, cmap='gray')
     if my_channels.has_slope_y():
@@ -392,7 +395,7 @@ def sample_predictions(model, sample_set, mean, std, cfg, percent_wet_patches=0.
 
     # get map of each channel to index of resulting tensor
     n = 0
-    channel_indices = [-1] * 11
+    channel_indices = [-1] * 16
     for i, channel in enumerate(channels):
         if channel:
             channel_indices[i] = n
@@ -443,43 +446,55 @@ def sample_predictions(model, sample_set, mean, std, cfg, percent_wet_patches=0.
         nlcd_img = Image.fromarray(nlcd_rgb, mode="RGB")
         row.append(wandb.Image(nlcd_img))
 
+        # SCL (Scene Classification Layer) visualization
+        scl = supplementary[4, :, :].byte().numpy()
+        scl_rgb = scl_to_rgb(scl)
+        scl_img = Image.fromarray(scl_rgb, mode="RGB")
+        row.append(wandb.Image(scl_img))
+
         if my_channels.has_ndwi():
-            ndwi = X[:, :, channel_indices[4]]
+            ndwi = X[:, :, channel_indices[6]]
             ndwi = ndwi_map.to_rgba(ndwi.numpy(), bytes=True)
             ndwi = np.clip(ndwi, 0, 255).astype(np.uint8)
             ndwi_img = Image.fromarray(ndwi, mode="RGBA")
             row.append(wandb.Image(ndwi_img))
+        if my_channels.has_mndwi():
+            mndwi = X[:, :, channel_indices[7]]
+            mndwi = mndwi_map.to_rgba(mndwi.numpy(), bytes=True)
+            mndwi = np.clip(mndwi, 0, 255).astype(np.uint8)
+            mndwi_img = Image.fromarray(mndwi, mode="RGBA")
+            row.append(wandb.Image(mndwi_img))
         if my_channels.has_dem():
-            dem = X[:, :, channel_indices[5]].numpy()
+            dem = X[:, :, channel_indices[10]].numpy()
             dem_map.set_norm(Normalize(vmin=np.min(dem), vmax=np.max(dem)))
             dem = dem_map.to_rgba(dem, bytes=True)
             dem = np.clip(dem, 0, 255).astype(np.uint8)
             dem_img = Image.fromarray(dem, mode="RGBA")
             row.append(wandb.Image(dem_img))
         if my_channels.has_slope_y():
-            slope_y = X[:, :, channel_indices[6]].numpy()
+            slope_y = X[:, :, channel_indices[11]].numpy()
             slope_y_map.set_norm(Normalize(vmin=np.min(slope_y), vmax=np.max(slope_y)))
             slope_y = slope_y_map.to_rgba(slope_y, bytes=True)
             slope_y = np.clip(slope_y, 0, 255).astype(np.uint8)
             slope_y_img = Image.fromarray(slope_y, mode="RGBA")
             row.append(wandb.Image(slope_y_img))
         if my_channels.has_slope_x():
-            slope_x = X[:, :, channel_indices[7]].numpy()
+            slope_x = X[:, :, channel_indices[12]].numpy()
             slope_x_map.set_norm(Normalize(vmin=np.min(slope_x), vmax=np.max(slope_x)))
             slope_x = slope_x_map.to_rgba(slope_x, bytes=True)
             slope_x = np.clip(slope_x, 0, 255).astype(np.uint8)
             slope_x_img = Image.fromarray(slope_x, mode="RGBA")
             row.append(wandb.Image(slope_x_img))
         if my_channels.has_waterbody():
-            waterbody = X[:, :, channel_indices[8]].mul(255).clamp(0, 255).byte().numpy()
+            waterbody = X[:, :, channel_indices[13]].mul(255).clamp(0, 255).byte().numpy()
             waterbody_img = Image.fromarray(waterbody, mode="L")
             row.append(wandb.Image(waterbody_img))
         if my_channels.has_roads():
-            roads = X[:, :, channel_indices[9]].mul(255).clamp(0, 255).byte().numpy()
+            roads = X[:, :, channel_indices[14]].mul(255).clamp(0, 255).byte().numpy()
             roads_img = Image.fromarray(roads, mode="L")
             row.append(wandb.Image(roads_img))
         if my_channels.has_flowlines():
-            flowlines = X[:, :, channel_indices[10]].mul(255).clamp(0, 255).byte().numpy()
+            flowlines = X[:, :, channel_indices[15]].mul(255).clamp(0, 255).byte().numpy()
             flowlines_img = Image.fromarray(flowlines, mode="L")
             row.append(wandb.Image(flowlines_img))
 
@@ -646,7 +661,7 @@ def run_experiment_s2(cfg):
 
 def validate_config(cfg):
     def validate_channels(s):
-        return type(s) == str and len(s) == 11 and all(c in '01' for c in s)
+        return type(s) == str and len(s) == 16 and all(c in '01' for c in s)
 
     # Add checks
     assert cfg.save in [True, False], "Save must be a boolean"
@@ -663,7 +678,7 @@ def validate_config(cfg):
     assert cfg.data.random_flip in [True, False], "Random flip must be a boolean"
     assert cfg.eval.mode in ['val', 'test'], f"Evaluation mode must be one of {['val', 'test']}"
     assert cfg.wandb.project is not None, "Wandb project must be specified"
-    assert validate_channels(cfg.data.channels), "Channels must be a binary string of length 11"
+    assert validate_channels(cfg.data.channels), "Channels must be a binary string of length 16"
 
 @hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig):

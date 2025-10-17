@@ -61,8 +61,10 @@ regex_patterns = [
     r'rgb_\d{8}.*\.tif',
     r'ndwi_\d{8}.*\.tif',
     r'b08_\d{8}.*\.tif',
+    r'b11_\d{8}.*\.tif',
+    r'b12_\d{8}.*\.tif',
     r'sar_\d{8}.*\.tif',
-    r'clouds_\d{8}.*\.tif',
+    r'scl_\d{8}.*\.tif',
     'metadata.json'
 ]
 pattern_dict = {
@@ -75,8 +77,10 @@ pattern_dict = {
     r'rgb_\d{8}.*\.tif': 'RGB',
     r'ndwi_\d{8}.*\.tif': 'NDWI',
     r'b08_\d{8}.*\.tif': 'B8 NIR',
+    r'b11_\d{8}.*\.tif': 'SWIR1',
+    r'b12_\d{8}.*\.tif': 'SWIR2',
     r'sar_\d{8}.*\.tif': 'SAR',
-    r'clouds_\d{8}.*\.tif': 'CLOUDS',
+    r'scl_\d{8}.*\.tif': 'SCL',
     'metadata.json': 'METADATA'
 }
 
@@ -197,7 +201,7 @@ def pipeline_TCI(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
 
     return (out_image.shape[-2], out_image.shape[-1]), out_transform
 
-def pipeline_clouds(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst_transform, item, bbox, cloud_classes=[8, 9, 10]):
+def pipeline_SCL(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst_transform, item, bbox):
     """Generates Scene Classification Layer raster of S2 multispectral file and resamples to 10m resolution.
 
     Parameters
@@ -219,40 +223,38 @@ def pipeline_clouds(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, 
     bbox : (float, float, float, float)
         Tuple in the order minx, miny, maxx, maxy, representing bounding box,
         should be in CRS specified by dst_crs.
-    cloud_classes : list[int]
-        List of cloud class codes to filter for (default: [8, 9, 10]).
     """
     scl_name = stac_provider.get_asset_names("s2")["SCL"]
     item_href = stac_provider.sign_asset_href(item.assets[scl_name].href)
 
-    out_image, out_transform = crop_to_bounds(item_href, bbox, dst_crs, nodata=0, resampling=Resampling.nearest)
-    clouds = np.isin(out_image[0], cloud_classes).astype(np.uint8)
+    # Single-step resampling directly to TCI grid for perfect pixel alignment
+    h, w = dst_shape
+    dest = np.zeros((1, h, w), dtype=np.uint8)
+    
+    with rasterio.open(item_href) as src:
+        reproject(
+            source=rasterio.band(src, 1),
+            destination=dest,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            dst_transform=dst_transform,
+            dst_crs=dst_crs,
+            resampling=Resampling.nearest,
+            dst_nodata=0
+        )
 
-    # need to resample to grid of tci
-    h, w = dst_shape[-2:]
-    dest = np.zeros((h, w), dtype=clouds.dtype)
-    reproject(
-        clouds,
-        dest,
-        src_transform=out_transform,
-        src_crs=dst_crs,
-        dst_transform=dst_transform,
-        dst_crs=dst_crs,
-        resampling=Resampling.nearest)
+    # save SCL raster with all class values preserved
+    with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=h, width=w, crs=dst_crs, 
+                        dtype=dest.dtype, transform=dst_transform, nodata=0) as dst:
+        dst.write(dest)
 
-    # only make cloud values 1 everything else 0
-    with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=h, width=w, crs=dst_crs,
-                        dtype=clouds.dtype, transform=dst_transform) as dst:
-        dst.write(dest, 1)
+    # create RGB colormap from SCL using utility function from sampling_utils
+    from floodmaps.utils.sampling_utils import scl_to_rgb
+    rgb_scl = scl_to_rgb(dest[0])
 
-    rgb_clouds = np.zeros((3, h, w), dtype=np.uint8)
-    rgb_clouds[0, :, :] = dest * 255
-    rgb_clouds[1, :, :] = dest * 255
-    rgb_clouds[2, :, :] = dest * 255
-
-    with rasterio.open(dir_path / f'{save_as}_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_clouds.shape[-2], width=rgb_clouds.shape[-1],
-                       crs=dst_crs, dtype=rgb_clouds.dtype, transform=dst_transform, nodata=None) as dst:
-        dst.write(rgb_clouds)
+    with rasterio.open(dir_path / f'{save_as}_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_scl.shape[-2], width=rgb_scl.shape[-1],
+                       crs=dst_crs, dtype=rgb_scl.dtype, transform=dst_transform, nodata=None) as dst:
+        dst.write(rgb_scl)
 
 def pipeline_RGB(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
     """Generates B02 (B), B03 (G), B04 (R) rasters of S2 multispectral file.
@@ -316,6 +318,96 @@ def pipeline_B08(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
 
     with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=0) as dst:
         dst.write(out_image)
+
+def pipeline_B11(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst_transform, item, bbox):
+    """Generates SWIR1 B11 band raster of S2 multispectral file (resampled to 10m).
+
+    Parameters
+    ----------
+    stac_provider : STACProvider
+        STAC provider object.
+    dir_path : Path
+        Path for saving generated raster.
+    save_as : str
+        Name of file to be saved (do not include extension!).
+    dst_shape : (int, int)
+        Shape of output raster.
+    dst_crs : str
+        Coordinate reference system of output raster.
+    dst_transform : rasterio.affine.Affine()
+        Transform of TCI raster.
+    item : Item
+        PyStac Item object.
+    bbox : (float, float, float, float)
+        Tuple in the order minx, miny, maxx, maxy, representing bounding box,
+        should be in CRS specified by dst_crs.
+    """
+    b11_name = stac_provider.get_asset_names("s2")["B11"]
+    item_href = stac_provider.sign_asset_href(item.assets[b11_name].href)
+
+    # Single-step resampling directly to TCI grid for perfect pixel alignment
+    h, w = dst_shape
+    dest = np.zeros((1, h, w), dtype=np.uint16)
+    
+    with rasterio.open(item_href) as src:
+        reproject(
+            source=rasterio.band(src, 1),
+            destination=dest,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            dst_transform=dst_transform,
+            dst_crs=dst_crs,
+            resampling=Resampling.bilinear,
+            dst_nodata=0
+        )
+
+    with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=h, width=w, crs=dst_crs, dtype=dest.dtype, transform=dst_transform, nodata=0) as dst:
+        dst.write(dest)
+
+def pipeline_B12(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst_transform, item, bbox):
+    """Generates SWIR2 B12 band raster of S2 multispectral file (resampled to 10m).
+
+    Parameters
+    ----------
+    stac_provider : STACProvider
+        STAC provider object.
+    dir_path : Path
+        Path for saving generated raster.
+    save_as : str
+        Name of file to be saved (do not include extension!).
+    dst_shape : (int, int)
+        Shape of output raster.
+    dst_crs : str
+        Coordinate reference system of output raster.
+    dst_transform : rasterio.affine.Affine()
+        Transform of TCI raster.
+    item : Item
+        PyStac Item object.
+    bbox : (float, float, float, float)
+        Tuple in the order minx, miny, maxx, maxy, representing bounding box,
+        should be in CRS specified by dst_crs.
+    """
+    b12_name = stac_provider.get_asset_names("s2")["B12"]
+    item_href = stac_provider.sign_asset_href(item.assets[b12_name].href)
+
+    # Single-step resampling directly to TCI grid for perfect pixel alignment
+    h, w = dst_shape
+    dest = np.zeros((1, h, w), dtype=np.uint16)
+    
+    with rasterio.open(item_href) as src:
+        reproject(
+            source=rasterio.band(src, 1),
+            destination=dest,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            dst_transform=dst_transform,
+            dst_crs=dst_crs,
+            resampling=Resampling.bilinear,
+            dst_nodata=0
+        )
+
+    with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=h, width=w, crs=dst_crs, dtype=dest.dtype, transform=dst_transform, nodata=0) as dst:
+        dst.write(dest)
 
 def pipeline_NDWI(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
     """Generates NDWI raster from S2 multispectral files.
@@ -1051,7 +1143,7 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
 
     # STAC catalog search
     logger.info('Beginning catalog search...')
-    items_s2 = stac_provider.search_s2(bbox, time_of_interest, query={"eo:cloud_cover": {"lt": 95}})
+    items_s2 = stac_provider.search_s2(bbox, time_of_interest)
     items_s1 = stac_provider.search_s1(bbox, time_of_interest_sar, query={"sar:instrument_mode": {"eq": "IW"}})
 
     logger.info('Filtering catalog search results...')
@@ -1141,7 +1233,8 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
     # raster generation with chosen CRS
     logger.info('Beginning raster generation...')
     event_dir_path.mkdir(parents=True, exist_ok=True)
-    file_to_product = dict()
+    s2_date_to_product = dict()
+    s1_date_to_product = dict()
     try:
         conversion = transform(PRISM_CRS, main_crs, (minx, maxx), (miny, maxy))
         cbbox = conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1]
@@ -1159,17 +1252,17 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
             logger.debug(f'RGB raster completed for {dt}.')
             pipeline_B08(stac_provider, event_dir_path, f'b08_{dt}_{eid}', main_crs, item, cbbox)
             logger.debug(f'B08 raster completed for {dt}.')
+            pipeline_B11(stac_provider, event_dir_path, f'b11_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox)
+            logger.debug(f'B11 raster completed for {dt}.')
+            pipeline_B12(stac_provider, event_dir_path, f'b12_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox)
+            logger.debug(f'B12 raster completed for {dt}.')
             pipeline_NDWI(stac_provider, event_dir_path, f'ndwi_{dt}_{eid}', main_crs, item, cbbox)
             logger.debug(f'NDWI raster completed for {dt}.')
-            pipeline_clouds(stac_provider, event_dir_path, f'clouds_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox)
-            logger.debug(f'Clouds raster completed for {dt}.')
+            pipeline_SCL(stac_provider, event_dir_path, f'scl_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox)
+            logger.debug(f'SCL raster completed for {dt}.')
 
-            # record product used to generate rasters
-            file_to_product[f'tci_{dt}_{eid}'] = item.id
-            file_to_product[f'rgb_{dt}_{eid}'] = item.id
-            file_to_product[f'b08_{dt}_{eid}'] = item.id
-            file_to_product[f'ndwi_{dt}_{eid}'] = item.id
-            file_to_product[f'clouds_{dt}_{eid}'] = item.id
+            # record S2 product ID for this date
+            s2_date_to_product[date.strftime('%Y-%m-%d')] = item.id
 
         logger.debug(f'All S2, B08, NDWI, SCL rasters completed successfully.')
 
@@ -1185,8 +1278,8 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
             pipeline_S1(stac_provider, event_dir_path, f'sar_{cdt}_{dt}_{eid}', main_crs, item, cbbox)
             logger.debug(f'S1 raster completed for {dt} coincident with S2 product at {cdt}.')
 
-            # record product used to generate rasters
-            file_to_product[f'sar_{cdt}_{dt}_{eid}'] = item.id
+            # record S1 product ID for coincident date
+            s1_date_to_product[date.strftime('%Y-%m-%d')] = item.id
 
         logger.debug(f'All coincident S1 rasters completed successfully.')
 
@@ -1218,23 +1311,23 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
     # lastly generate metadata file
     logger.info(f'Generating metadata file...')
     metadata = {
-        "metadata": {
-            "Download Date": CURRENT_DATE,
-            "Sample ID": eid,
-            "Precipitation Event Date": event_date,
-            "Cumulative Daily Precipitation (mm)": float(event_precip),
-            "CRS": main_crs,
-            "State": state,
-            "Bounding Box": {
-                "minx": minx,
-                "miny": miny,
-                "maxx": maxx,
-                "maxy": maxy
-            },
-            "Item IDs": file_to_product,
-            "S2, S1 Coincident Within (hours)": cfg.sampling.within_hours,
-            "Max Cloud/Nodata Cover Percentage (%)": cfg.sampling.maxcoverpercentage
-        }
+        "Download Date": CURRENT_DATE,
+        "Sample ID": eid,
+        "Precipitation Event Date": datetime.strptime(event_date, '%Y%m%d').strftime('%Y-%m-%d'),
+        "Cumulative Daily Precipitation (mm)": float(event_precip),
+        "CRS": main_crs,
+        "State": state,
+        "Bounding Box": {
+            "minx": minx,
+            "miny": miny,
+            "maxx": maxx,
+            "maxy": maxy
+        },
+        "S2 Products": s2_date_to_product,
+        "S1 Products": s1_date_to_product,
+        "S2, S1 Coincident Within (hours)": cfg.sampling.within_hours,
+        "Max Cloud/Nodata Cover Percentage (%)": cfg.sampling.maxcoverpercentage,
+        "Source": cfg.sampling.source
     }
 
     with open(event_dir_path / 'metadata.json', "w") as json_file:

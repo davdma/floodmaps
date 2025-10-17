@@ -146,7 +146,9 @@ class MicrosoftPlanetaryComputerProvider(STACProvider):
                 "B03": "B03",  # Green
                 "B04": "B04",  # Red
                 "B08": "B08",  # NIR
-                "SCL": "SCL"   # Scene Classification Layer
+                "B11": "B11", # SWIR1
+                "B12": "B12", # SWIR2
+                "SCL": "SCL",   # Scene Classification Layer
             }
         elif asset_type == "s1":
             return {
@@ -191,7 +193,9 @@ class AWSProvider(STACProvider):
                 "B03": "green",  # Green
                 "B04": "red",  # Red
                 "B08": "nir",  # NIR
-                "SCL": "scl"   # Scene Classification Layer
+                "B11": "swir16",  # SWIR1
+                "B12": "swir22",  # SWIR2
+                "SCL": "scl",   # Scene Classification Layer
             }
         elif asset_type == "s1":
             return {

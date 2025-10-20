@@ -4,7 +4,6 @@ import json
 import logging
 from datetime import datetime, timedelta
 import pystac_client
-from pystac.extensions.projection import ProjectionExtension as pe
 import planetary_computer
 import rasterio
 from rasterio.warp import calculate_default_transform, reproject, Resampling
@@ -17,7 +16,7 @@ from fiona.transform import transform
 import hydra
 from omegaconf import DictConfig
 
-from floodmaps.utils.sampling_utils import PRISM_CRS, SEARCH_CRS, setup_logging
+from floodmaps.utils.sampling_utils import PRISM_CRS, SEARCH_CRS, setup_logging, get_item_crs
 
 def is_completed(sample_dir: Path) -> bool:
     """Check if the sample has already been processed."""
@@ -177,7 +176,7 @@ def download_and_process_sar(items: List,
     # Group items by date
     items_by_date = {}
     # choose one sample to extract reference parameters
-    crs = pe.ext(items[0]).crs_string
+    crs = get_item_crs(items[0])
     for item in items:
         # skip if item has no vv or vh
         if "vv" not in item.assets or "vh" not in item.assets:
@@ -202,7 +201,7 @@ def download_and_process_sar(items: List,
         for item in date_items:
             vv_href = planetary_computer.sign(item.assets["vv"].href)
             vh_href = planetary_computer.sign(item.assets["vh"].href)
-            item_crs = pe.ext(item).crs_string
+            item_crs = get_item_crs(item)
             if item_crs != crs:
                 # instead of skipping, try to reproject to the reference crs
                 logger.info(f"CRS mismatch for {item.id}: {item_crs} != reference {crs}")

@@ -190,100 +190,86 @@ def get_sample_prediction_s2(model, device, cfg: DictConfig, standardize, train_
     missing_vals = rgb_tile[0] == 0
     
     if img_dt_obj >= PROCESSING_BASELINE_NAIVE:
-        rgb_tile = rgb_tile + BOA_ADD_OFFSET
+        rgb_tile_sr = np.clip((rgb_tile + BOA_ADD_OFFSET) / 10000.0, 0, 1)
+    else:
+        rgb_tile_sr = np.clip(rgb_tile / 10000.0, 0, 1)
 
     if my_channels.has_rgb():
-        rgb_tile_clipped = np.clip(rgb_tile, None, 10000.0)
-        rgb_tile_clipped = rgb_tile_clipped / 10000.0  # Scale reflectance to [0, 1]
-        layers.append(rgb_tile_clipped)
+        layers.append(rgb_tile_sr)
     
     b08_file = event_path / f'b08_{dt}_{eid}.tif'
     with rasterio.open(b08_file) as src:
         b08_tile = src.read().astype(np.float32)
         if img_dt_obj >= PROCESSING_BASELINE_NAIVE:
-            b08_tile = b08_tile + BOA_ADD_OFFSET
+            b08_tile_sr = np.clip((b08_tile + BOA_ADD_OFFSET) / 10000.0, 0, 1)
+        else:
+            b08_tile_sr = np.clip(b08_tile / 10000.0, 0, 1)
 
     if my_channels.has_b08():
-        b08_tile_clipped = np.clip(b08_tile, None, 10000.0)
-        b08_tile_clipped = b08_tile_clipped / 10000.0  # Scale reflectance to [0, 1]
-        layers.append(b08_tile_clipped)
+        layers.append(b08_tile_sr)
 
     # Load SWIR1 (B11)
     b11_file = event_path / f'b11_{dt}_{eid}.tif'
     with rasterio.open(b11_file) as src:
         b11_tile = src.read().astype(np.float32)
         if img_dt_obj >= PROCESSING_BASELINE_NAIVE:
-            b11_tile = b11_tile + BOA_ADD_OFFSET
+            b11_tile_sr = np.clip((b11_tile + BOA_ADD_OFFSET) / 10000.0, 0, 1)
+        else:
+            b11_tile_sr = np.clip(b11_tile / 10000.0, 0, 1)
 
     if my_channels.has_swir1():
-        b11_tile_clipped = np.clip(b11_tile, None, 10000.0)
-        b11_tile_clipped = b11_tile_clipped / 10000.0  # Scale reflectance to [0, 1]
-        layers.append(b11_tile_clipped)
+        layers.append(b11_tile_sr)
 
     # Load SWIR2 (B12)
     b12_file = event_path / f'b12_{dt}_{eid}.tif'
     with rasterio.open(b12_file) as src:
         b12_tile = src.read().astype(np.float32)
         if img_dt_obj >= PROCESSING_BASELINE_NAIVE:
-            b12_tile = b12_tile + BOA_ADD_OFFSET
+            b12_tile_sr = np.clip((b12_tile + BOA_ADD_OFFSET) / 10000.0, 0, 1)
+        else:
+            b12_tile_sr = np.clip(b12_tile / 10000.0, 0, 1)
 
     if my_channels.has_swir2():
-        b12_tile_clipped = np.clip(b12_tile, None, 10000.0)
-        b12_tile_clipped = b12_tile_clipped / 10000.0  # Scale reflectance to [0, 1]
-        layers.append(b12_tile_clipped)
+        layers.append(b12_tile_sr)
 
     if my_channels.has_ndwi():
-        ndwi_file = event_path / f'ndwi_{dt}_{eid}.tif'
-        if img_dt_obj >= PROCESSING_BASELINE_NAIVE:
-            # Post processing baseline, need to use different equation for ndwi
-            # This is a temporary patch, but we want to fix this at the data pipeline step!
-            recompute_ndwi = np.where(
-                (rgb_tile[1] + b08_tile[0]) != 0,
-                (rgb_tile[1] - b08_tile[0]) / (rgb_tile[1] + b08_tile[0]),
-                -999999
-            )
-            ndwi_tile = np.expand_dims(recompute_ndwi, axis = 0)
-        else:
-            with rasterio.open(ndwi_file) as src:
-                ndwi_tile = src.read().astype(np.float32)
+        # Recompute NDWI using surface reflectance: (Green - NIR) / (Green + NIR)
+        recompute_ndwi = np.where(
+            (rgb_tile_sr[1] + b08_tile_sr[0]) != 0,
+            (rgb_tile_sr[1] - b08_tile_sr[0]) / (rgb_tile_sr[1] + b08_tile_sr[0]),
+            -999999
+        )
+        ndwi_tile = np.expand_dims(recompute_ndwi, axis = 0)
+        ndwi_tile = np.where(missing_vals, -999999, ndwi_tile)
         layers.append(ndwi_tile)
 
     # Compute MNDWI (Modified NDWI): (Green - SWIR1) / (Green + SWIR1)
     if my_channels.has_mndwi():
-        # Use corrected/clipped values for computation
-        green_corrected = np.clip(rgb_tile[1], None, 10000.0) / 10000.0
-        swir1_corrected = np.clip(b11_tile[0], None, 10000.0) / 10000.0
         mndwi_tile = np.where(
-            (green_corrected + swir1_corrected) != 0,
-            (green_corrected - swir1_corrected) / (green_corrected + swir1_corrected),
+            (rgb_tile_sr[1] + b11_tile_sr[0]) != 0,
+            (rgb_tile_sr[1] - b11_tile_sr[0]) / (rgb_tile_sr[1] + b11_tile_sr[0]),
             -999999
         )
         mndwi_tile = np.expand_dims(mndwi_tile, axis=0)
+        mndwi_tile = np.where(missing_vals, -999999, mndwi_tile)
         layers.append(mndwi_tile)
 
     # Compute AWEI_sh (Automated Water Extraction Index - shadow): Blue + 2.5*Green - 1.5*(NIR + SWIR1) - 0.25*SWIR2
     if my_channels.has_awei_sh():
-        blue_corrected = np.clip(rgb_tile[2], None, 10000.0) / 10000.0
-        green_corrected = np.clip(rgb_tile[1], None, 10000.0) / 10000.0
-        nir_corrected = np.clip(b08_tile[0], None, 10000.0) / 10000.0
-        swir1_corrected = np.clip(b11_tile[0], None, 10000.0) / 10000.0
-        swir2_corrected = np.clip(b12_tile[0], None, 10000.0) / 10000.0
-        awei_sh_tile = (blue_corrected + 2.5 * green_corrected - 
-                        1.5 * (nir_corrected + swir1_corrected) - 
-                        0.25 * swir2_corrected)
+        awei_sh_tile = (rgb_tile_sr[2] + 2.5 * rgb_tile_sr[1] - 
+                        1.5 * (b08_tile_sr[0] + b11_tile_sr[0]) - 
+                        0.25 * b12_tile_sr[0])
         awei_sh_tile = np.expand_dims(awei_sh_tile, axis=0)
+        awei_sh_tile = np.where(missing_vals, -999999, awei_sh_tile)
         layers.append(awei_sh_tile)
 
     # Compute AWEI_nsh (Automated Water Extraction Index - no shadow): 4*(Green - SWIR1) - 0.25*NIR + 2.75*SWIR2
     if my_channels.has_awei_nsh():
-        green_corrected = np.clip(rgb_tile[1], None, 10000.0) / 10000.0
-        nir_corrected = np.clip(b08_tile[0], None, 10000.0) / 10000.0
-        swir1_corrected = np.clip(b11_tile[0], None, 10000.0) / 10000.0
-        swir2_corrected = np.clip(b12_tile[0], None, 10000.0) / 10000.0
-        awei_nsh_tile = (4 * (green_corrected - swir1_corrected) - 
-                         0.25 * nir_corrected + 
-                         2.75 * swir2_corrected)
+        awei_nsh_tile = (4 * (rgb_tile_sr[1] - b11_tile_sr[0]) - 
+                         0.25 * b08_tile_sr[0] + 
+                         2.75 * b12_tile_sr[0])
         awei_nsh_tile = np.expand_dims(awei_nsh_tile, axis=0)
+        awei_nsh_tile = np.where(missing_vals, -999999, awei_nsh_tile)
         layers.append(awei_nsh_tile)
 
     # need dem for slope regardless if in channels or not

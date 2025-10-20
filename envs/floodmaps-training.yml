@@ -18,7 +18,7 @@ dependencies:
   - scikit-image
   - pip
   - pip:
-    - rasterio
+    - "rasterio[s3]"
     - torcheval
     - Pillow
     - -e ..

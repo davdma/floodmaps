@@ -6,15 +6,16 @@ dependencies:
   - python=3.11
   - numpy
   - gdal>=3.8
+  - libgdal-jp2openjpeg
   - netCDF4
   - cftime
   - geopandas
   - matplotlib
   - fiona
-  - rasterio
   - folium
   - pip
   - pip:
+    - "rasterio[s3]"
     - pyyaml
     - pystac
     - pystac-client

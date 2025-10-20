@@ -164,7 +164,23 @@ class AWSProvider(STACProvider):
     
     NOTE: The AWS S1 collection is in a requester pays S3 bucket,
     so cannot be accessed without credentials. Will need to configure
-    AWS_SECRET_ACCESS_KEY."""
+    AWS_SECRET_ACCESS_KEY.
+    
+    Highly recommend MPC or CDSE over AWS due to problems with Earth Element 84 provider.
+    """
+
+    def __init__(self,
+                logger: Optional[logging.Logger] = None,
+                aws_access_key_id: Optional[str] = None,
+                aws_secret_access_key: Optional[str] = None
+        ):
+        """Set environment variables for rasterio/GDAL use with S3."""
+        if aws_access_key_id and aws_secret_access_key:
+            os.environ["AWS_REGION"] = "eu-central-1"
+            os.environ["AWS_ACCESS_KEY_ID"] = aws_access_key_id
+            os.environ["AWS_SECRET_ACCESS_KEY"] = aws_secret_access_key
+            os.environ["AWS_HTTPS"] = "YES"
+        super().__init__(logger)
     
     def _initialize_catalog(self):
         """Initialize the AWS catalog."""
@@ -206,15 +222,87 @@ class AWSProvider(STACProvider):
             raise ValueError(f"Unknown asset type: {asset_type}")
 
 
-def get_stac_provider(provider_name: str, mpc_api_key: str = None, logger: Optional[logging.Logger] = None) -> STACProvider:
+class CDSEProvider(STACProvider):
+    """Copernicus Data Space Ecosystem STAC provider implementation.
+    
+    To allow rasterio/GDAL to use S3, set the necessary environment variables
+    using the aws_access_key_id and aws_secret_access_key parameters from
+    Copernicus. See: https://documentation.dataspace.copernicus.eu/APIs/S3.html#registration.
+    """
+
+    def __init__(self,
+                logger: Optional[logging.Logger] = None,
+                aws_access_key_id: Optional[str] = None,
+                aws_secret_access_key: Optional[str] = None
+        ):
+        """Set environment variables for rasterio/GDAL use with S3."""
+        if aws_access_key_id and aws_secret_access_key:
+            os.environ["AWS_REGION"] = "default"
+            os.environ["AWS_S3_ENDPOINT"] = "eodata.dataspace.copernicus.eu"
+            os.environ["AWS_ACCESS_KEY_ID"] = aws_access_key_id
+            os.environ["AWS_SECRET_ACCESS_KEY"] = aws_secret_access_key
+            os.environ["AWS_VIRTUAL_HOSTING"] = "FALSE"
+            os.environ["AWS_HTTPS"] = "YES"
+        super().__init__(logger)
+    
+    def _initialize_catalog(self):
+        """Initialize the CDSE catalog."""
+        self.catalog = pystac_client.Client.open(
+            "https://stac.dataspace.copernicus.eu/v1/"
+        )
+    
+    def get_s2_collection_name(self) -> str:
+        return "sentinel-2-l2a"
+    
+    def get_s1_collection_name(self) -> str:
+        return "sentinel-1-grd"
+    
+    def sign_asset_href(self, href: str) -> str:
+        return href
+    
+    def get_asset_names(self, asset_type: str) -> Dict[str, str]:
+        """Get asset names for CDSE."""
+        if asset_type == "s2":
+            return {
+                "visual": "TCI_10m",
+                "B02": "B02_10m",  # Blue
+                "B03": "B03_10m",  # Green
+                "B04": "B04_10m",  # Red
+                "B08": "B08_10m",  # NIR
+                "B11": "B11_20m", # SWIR1
+                "B12": "B12_20m", # SWIR2
+                "SCL": "SCL_20m",   # Scene Classification Layer
+            }
+        elif asset_type == "s1":
+            return {
+                "vv": "vv",
+                "vh": "vh"
+            }
+        else:
+            raise ValueError(f"Unknown asset type: {asset_type}")
+
+
+
+def get_stac_provider(provider_name: str,
+                mpc_api_key: Optional[str] = None,
+                logger: Optional[logging.Logger] = None,
+                aws_access_key_id: Optional[str] = None,
+                aws_secret_access_key: Optional[str] = None) -> STACProvider:
     f"""Factory function to get the appropriate STAC provider.
+
+    NOTE: AWS Earth Element is not recommended due to partially applied offsets to its products,
+    and the fact that the raster extension that encodes whether an offset has been applied is unreliable.
     
     Parameters
     ----------
     provider_name: str
-        Name of the provider to use: "mpc" for Microsoft Planetary Computer, "aws" for AWS.
+        Name of the provider to use: "mpc" for Microsoft Planetary Computer, "aws" for AWS, "cdse" for Copernicus.
     mpc_api_key: Optional[str]
         API key for Microsoft Planetary Computer.
+    aws_access_key_id: Optional[str]
+        AWS access key ID (for CDSE).
+    aws_secret_access_key: Optional[str]
+        AWS secret access key (for CDSE).
     logger : Optional[logging.Logger]
         Logger instance
     
@@ -228,5 +316,7 @@ def get_stac_provider(provider_name: str, mpc_api_key: str = None, logger: Optio
         return MicrosoftPlanetaryComputerProvider(api_key=mpc_api_key, logger=logger)
     elif provider_name in ["aws", "amazon"]:
         return AWSProvider(logger)
+    elif provider_name in ["cdse", "copernicus"]:
+        return CDSEProvider(aws_access_key_id=aws_access_key_id, aws_secret_access_key=aws_secret_access_key, logger=logger)
     else:
         raise ValueError(f"Unknown provider: {provider_name}. Supported providers: mpc, aws") 

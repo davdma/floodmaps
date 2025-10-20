@@ -421,8 +421,7 @@ def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, a
 
         if cfg.train.early_stopping:
             # use only classifier component for early stopping if AD is frozen
-            early_stopper.step(avg_cls_vloss if ignore_ad_loss else avg_vloss, model)
-            early_stopper.store_best_metrics(val_set_metrics)
+            early_stopper.step(avg_cls_vloss if ignore_ad_loss else avg_vloss, model, epoch, metrics=val_set_metrics)
             if early_stopper.is_stopped():
                 break
 
@@ -453,6 +452,7 @@ def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, a
                               loss=early_stopper.get_min_validation_loss(),
                               **best_val_metrics)
         run.summary.update({f'final model {key}': value for key, value in best_val_metrics['core metrics'].items()})
+        run.summary[f"best_epoch"] = early_stopper.get_best_epoch()
     else:
         cls_weights = model.classifier.state_dict()
         ad_weights = (model.autodespeckler.state_dict()

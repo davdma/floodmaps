@@ -7,7 +7,6 @@ import numpy as np
 import json
 import logging
 from datetime import datetime, timedelta
-from pystac.extensions.projection import ProjectionExtension as pe
 from rasterio.warp import Resampling
 import rasterio.merge
 import rasterio
@@ -16,7 +15,7 @@ import sys
 import hydra
 from omegaconf import DictConfig
 
-from floodmaps.utils.sampling_utils import PRISM_CRS, SEARCH_CRS, db_scale, setup_logging, colormap_to_rgb, crop_to_bounds, DateCRSOrganizer
+from floodmaps.utils.sampling_utils import PRISM_CRS, SEARCH_CRS, db_scale, setup_logging, colormap_to_rgb, crop_to_bounds, DateCRSOrganizer, get_item_crs
 from floodmaps.utils.stac_providers import get_stac_provider
 from floodmaps.utils.validate import validate_event_rasters
 
@@ -215,7 +214,7 @@ def downloadS1(stac_provider, sample: Path, cfg):
     logger.info(f'Checking s1 null percentage...')
     s1_by_date_crs = DateCRSOrganizer()    
     for item in items_s1:
-        item_crs = pe.ext(item).crs_string
+        item_crs = get_item_crs(item)
         polarizations = item.properties["sar:polarizations"]
         if "VV" not in polarizations or "VH" not in polarizations:
             logger.error(f'S1 product {item.id} VV or VH not found.')
@@ -306,7 +305,11 @@ def main(cfg: DictConfig) -> None:
     # loop over samples in directory
     rootLogger.info("Initializing SAR event sampling...")
     samples = Path(cfg.sampling.dir_path).glob('*_*_*/')
-    stac_provider = get_stac_provider(cfg.sampling.source.lower(), mpc_api_key=getattr(cfg, "mpc_api_key", None), logger=logger)
+    stac_provider = get_stac_provider(cfg.sampling.source.lower(),
+                                        mpc_api_key=getattr(cfg, "mpc_api_key", None),
+                                        aws_access_key_id=getattr(cfg, "aws_access_key_id", None),
+                                        aws_secret_access_key=getattr(cfg, "aws_secret_access_key", None),
+                                        logger=logger)
     for sample in samples:
         downloadS1(stac_provider, sample, cfg)
 

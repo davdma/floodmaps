@@ -5,7 +5,7 @@ from collections import defaultdict
 import os
 import re
 from pathlib import Path
-from typing import List, Tuple, Dict, Iterator
+from typing import List, Tuple, Dict, Iterator, Optional
 from cftime import num2date, date2num
 import cftime
 from netCDF4 import Dataset
@@ -25,6 +25,8 @@ from rasterio.vrt import WarpedVRT
 import rasterio
 from omegaconf import DictConfig
 import zipfile
+from pystac.extensions.projection import ProjectionExtension as pe
+from pystac import Item
 
 PRISM_CRS = "EPSG:4269"
 SEARCH_CRS = "EPSG:4326"
@@ -1133,3 +1135,32 @@ def scl_to_rgb(scl_array):
     
     # transpose to (3, H, W) for rasterio
     return np.transpose(rgb_img, (2, 0, 1))
+
+def get_item_crs(item: Item) -> Optional[str]:
+    """
+    Retrieves CRS string for a given STAC item. Handles cases with item or
+    asset level CRS projections which differ for MPC vs CDSE.
+
+    Parameters
+    ----------
+    item : Item
+        STAC item to get CRS for.
+
+    Returns
+    -------
+    CRS string and asset key used.
+    """
+    # 1) Try item-level projection
+    ext_item = pe.ext(item)
+    if ext_item and (ext_item.crs_string is not None):
+        crs = ext_item.crs_string
+        return crs
+
+    # 2) Try asset-level projection (common on CDSE)
+    for key, asset in item.assets.items():
+        ext_a = pe.ext(asset)
+        if ext_a and (ext_a.crs_string is not None):
+            crs = ext_a.crs_string
+            return crs
+
+    return None

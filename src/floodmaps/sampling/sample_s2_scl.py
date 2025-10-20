@@ -16,7 +16,6 @@ from rasterio.warp import calculate_default_transform, reproject, Resampling, tr
 import rasterio.merge
 import rasterio
 from fiona.transform import transform
-from pystac.extensions.projection import ProjectionExtension as pe
 import pystac_client
 import hydra
 from omegaconf import DictConfig
@@ -41,7 +40,8 @@ from floodmaps.utils.sampling_utils import (
     get_state,
     colormap_to_rgb,
     NoElevationError,
-    crop_to_bounds
+    crop_to_bounds,
+    get_item_crs
 )
 from floodmaps.utils.stac_providers import get_stac_provider
 from floodmaps.utils.validate import validate_event_rasters
@@ -454,14 +454,24 @@ def pipeline_NDWI(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
 
     out_image2, out_transform = crop_to_bounds(b08_item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
     nir = out_image2[0].astype(np.int32)
-    
+
+    missing_mask = (green == 0) | (nir == 0)
+
     # calculate ndwi with BOA offset for baseline-or-later captures
     if item.datetime >= PROCESSING_BASELINE_UTC:
-        green_corrected = green.astype(np.float32) + BOA_ADD_OFFSET
-        nir_corrected = nir.astype(np.float32) + BOA_ADD_OFFSET
-        ndwi = np.where((green_corrected + nir_corrected) != 0, (green_corrected - nir_corrected) / (green_corrected + nir_corrected), -999999)
+        green_sr = (green.astype(np.float32) + BOA_ADD_OFFSET) / 10000.0
+        nir_sr = (nir.astype(np.float32) + BOA_ADD_OFFSET) / 10000.0
+        green_sr = np.clip(green_sr, 0, 1)
+        nir_sr = np.clip(nir_sr, 0, 1)
+        ndwi = np.where((green_sr + nir_sr) != 0, (green_sr - nir_sr) / (green_sr + nir_sr), -999999)
     else:
+        green_sr = green.astype(np.float32) / 10000.0
+        nir_sr = nir.astype(np.float32) / 10000.0
+        green_sr = np.clip(green_sr, 0, 1)
+        nir_sr = np.clip(nir_sr, 0, 1)
         ndwi = np.where((green + nir) != 0, (green - nir) / (green + nir), -999999)
+    
+    ndwi = np.where(missing_mask, -999999, ndwi)
 
     # save raw
     with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=ndwi.shape[-2], width=ndwi.shape[-1], crs=dst_crs, dtype=ndwi.dtype, transform=out_transform, nodata=-999999) as dst:
@@ -1072,7 +1082,7 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
     s2_by_date_crs = DateCRSOrganizer()
     for item in items_s2:
         # filter FOR high SCL class coverage tiles
-        item_crs = pe.ext(item).crs_string
+        item_crs = get_item_crs(item)
         try:
             nullpercentage = null_percentage(stac_provider, item, item_crs, prism_bbox)
             scl_percentage = scl_class_percentage(stac_provider, item, item_crs, prism_bbox, scl_classes)
@@ -1337,7 +1347,11 @@ def main(cfg: DictConfig) -> None:
     try:
         rootLogger.info(f"Searching through {num_candidates} candidate indices/events...")
         # get stac provider
-        stac_provider = get_stac_provider(cfg.sampling.source.lower(), mpc_api_key=getattr(cfg, "mpc_api_key", None), logger=logger)
+        stac_provider = get_stac_provider(cfg.sampling.source.lower(),
+                                        mpc_api_key=getattr(cfg, "mpc_api_key", None),
+                                        aws_access_key_id=getattr(cfg, "aws_access_key_id", None),
+                                        aws_secret_access_key=getattr(cfg, "aws_secret_access_key", None),
+                                        logger=logger)
         for event_date, event_precip, prism_bbox, eid, indices, crs in events:
             if (Path(cfg.sampling.dir_path) / eid).is_dir():
                 if event_completed(Path(cfg.sampling.dir_path) / eid, regex_patterns, pattern_dict, logger=rootLogger):

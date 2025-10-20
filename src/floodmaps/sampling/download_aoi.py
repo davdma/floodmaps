@@ -29,7 +29,8 @@ from floodmaps.utils.sampling_utils import (
     colormap_to_rgb,
     NoElevationError,
     crop_to_bounds,
-    scl_to_rgb
+    scl_to_rgb,
+    get_item_crs
 )
 from floodmaps.utils.stac_providers import get_stac_provider
 from floodmaps.utils.validate import validate_event_rasters
@@ -375,17 +376,23 @@ def pipeline_NDWI(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox, c
     out_image2, out_transform = crop_to_bounds(b08_item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
     nir = out_image2[0].astype(np.int32)
 
+    missing_mask = (green == 0) | (nir == 0)
+
     # calculate ndwi with BOA offset for baseline-or-later captures
     if item.datetime >= PROCESSING_BASELINE_UTC:
-        green_corrected = green.astype(np.float32) + BOA_ADD_OFFSET
-        nir_corrected = nir.astype(np.float32) + BOA_ADD_OFFSET
-        ndwi = np.where(
-            (green_corrected + nir_corrected) != 0,
-            (green_corrected - nir_corrected) / (green_corrected + nir_corrected),
-            -999999
-        )
+        green_sr = (green.astype(np.float32) + BOA_ADD_OFFSET) / 10000.0
+        nir_sr = (nir.astype(np.float32) + BOA_ADD_OFFSET) / 10000.0
+        green_sr = np.clip(green_sr, 0, 1)
+        nir_sr = np.clip(nir_sr, 0, 1)
+        ndwi = np.where((green_sr + nir_sr) != 0, (green_sr - nir_sr) / (green_sr + nir_sr), -999999)
     else:
+        green_sr = green.astype(np.float32) / 10000.0
+        nir_sr = nir.astype(np.float32) / 10000.0
+        green_sr = np.clip(green_sr, 0, 1)
+        nir_sr = np.clip(nir_sr, 0, 1)
         ndwi = np.where((green + nir) != 0, (green - nir) / (green + nir), -999999)
+    
+    ndwi = np.where(missing_mask, -999999, ndwi)
 
     # save raw
     with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=ndwi.shape[-2], width=ndwi.shape[-1], crs=dst_crs, dtype=ndwi.dtype, transform=out_transform, nodata=-999999) as dst:
@@ -1053,9 +1060,9 @@ def deduplicate_items_by_date(items, stac_provider, sensor_type, bbox):
         else:
             # Select item with minimum missing percentage
             if sensor_type == 's2':
-                best_item = min(date_items, key=lambda x: s2_missing_percentage(stac_provider, x, pe.ext(x).crs_string, bbox))
+                best_item = min(date_items, key=lambda x: s2_missing_percentage(stac_provider, x, get_item_crs(x), bbox))
             else:  # s1
-                best_item = min(date_items, key=lambda x: sar_missing_percentage(stac_provider, x, pe.ext(x).crs_string, bbox))
+                best_item = min(date_items, key=lambda x: sar_missing_percentage(stac_provider, x, get_item_crs(x), bbox))
             selected_items.append(best_item)
     
     return selected_items
@@ -1154,7 +1161,7 @@ def download_area(stac_provider, bbox, dir_path, area_id, start_date, end_date,
         return False
     
     # Use specified CRS or extract from first item
-    main_crs = crs if crs else pe.ext(all_items[0]).crs_string
+    main_crs = crs if crs else get_item_crs(all_items[0])
     logger.info(f'Using CRS: {main_crs} for all rasters.')
     
     # Transform bbox to target CRS
@@ -1357,7 +1364,11 @@ def run_download_area(cfg: DictConfig) -> None:
         bbox = get_bbox_from_shapefile(cfg.sampling.shapefile, crs=PRISM_CRS)
 
         # get stac provider
-        stac_provider = get_stac_provider(source.lower(), mpc_api_key=getattr(cfg, "mpc_api_key", None), logger=rootLogger)
+        stac_provider = get_stac_provider(source.lower(),
+                                        mpc_api_key=getattr(cfg, "mpc_api_key", None),
+                                        aws_access_key_id=getattr(cfg, "aws_access_key_id", None),
+                                        aws_secret_access_key=getattr(cfg, "aws_secret_access_key", None),
+                                        logger=rootLogger)
 
         # download imagery
         max_attempts = 3

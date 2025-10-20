@@ -17,7 +17,7 @@ dependencies:
   - scikit-image
   - pip
   - pip:
-    - rasterio
+    - "rasterio[s3]"
     - "deephyper[default]"
     - torcheval
     - Pillow

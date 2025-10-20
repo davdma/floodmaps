@@ -19,6 +19,16 @@ NLCD_GROUPS = {
     'ice/snow': [12]
 }
 NLCD_CLASSES = [11, 12, 21, 22, 23, 24, 31, 41, 42, 43, 51, 52, 71, 72, 73, 74, 81, 82, 90, 95]
+SCL_GROUPS = {
+    'topographic shadow': [2],
+    'cloud shadow': [3],
+    'vegetation': [4],
+    'not vegetated': [5],
+    'water': [6],
+    'cloud': [8, 9],
+    'cirrus': [10]
+}
+SCL_CLASSES = list(range(12))
 
 def fast_binary_confusion_matrix(preds, targets):
     """Simplifies the implementation of pytorch lightning binary confusion matrix logic."""
@@ -100,6 +110,107 @@ def compute_nlcd_metrics(all_preds, all_targets, nlcd_classes, groups=NLCD_GROUP
     for group, classes in groups.items():
         # compute confusion matrix for each group
         mask = torch.isin(nlcd_classes, torch.tensor(classes, device=nlcd_classes.device, dtype=nlcd_classes.dtype))
+        pixel_count = int(mask.sum())
+        if pixel_count == 0:
+            output['group_confusion_matrix'][group] = {'tn': 0, 'fp': 0, 'fn': 0, 'tp': 0}
+            output['group_metrics'][group] = {'acc': None, 'prec': None, 'rec': None, 'f1': None, 'iou': None}
+            continue
+        
+        preds_by_group = all_preds[mask]
+        targets_by_group = all_targets[mask]
+        group_confusion_matrix = fast_binary_confusion_matrix(preds_by_group, targets_by_group).tolist()
+        (TN, FP), (FN, TP) = group_confusion_matrix
+        output['group_confusion_matrix'][group] = {
+            'tn': TN,
+            'fp': FP,
+            'fn': FN,
+            'tp': TP
+        }
+        
+        output['group_metrics'][group] = {
+            'acc': (TP + TN) / (TP + TN + FP + FN),
+            'prec': TP / (TP + FP) if (TP + FP) > 0 else None,
+            'rec': TP / (TP + FN) if (TP + FN) > 0 else None,
+            'f1': (2 * TP) / (2 * TP + FP + FN) if (2 * TP + FP + FN) > 0 else None,
+            'iou': TP / (TP + FP + FN) if (TP + FP + FN) > 0 else None
+        }
+
+    return output
+
+def compute_scl_metrics(all_preds, all_targets, scl_classes, groups=SCL_GROUPS):
+    """Compute metrics for SCL classes.
+
+    Parameters
+    ----------
+    all_preds : tensor
+        The predicted labels.
+    all_targets : tensor
+        The true labels.
+    scl_classes : tensor
+        The SCL classes.
+    groups : dict, optional
+        The SCL groups for computing acc, prec, rec, f1, IoU metrics by group.
+
+    Returns
+    -------
+    output : dict
+    
+    The returned dictionary contains:
+    - the confusion matrix for each SCL class.
+    - the confusion matrix for each SCL group.
+    - the acc, prec, rec, f1, IoU for each SCL grouping (topographic shadow, cloud shadows, vegetation, not vegetated, water, unclassified, cloud, cirrus etc.)
+    
+    The dictionary has the following structure:
+    {
+        'confusion_matrix': {
+            '21': {'tn': 0, 'fp': 0, 'fn': 0, 'tp': 0},
+            '22': {'tn': 0, 'fp': 0, 'fn': 0, 'tp': 0}},
+            '23': {'tn': 0, 'fp': 0, 'fn': 0, 'tp': 0},
+            ...
+        },
+        'group_confusion_matrix': {
+            'topographic shadow': {'tn': 0, 'fp': 0, 'fn': 0, 'tp': 0},
+            'vegetation': {'tn': 0, 'fp': 0, 'fn': 0, 'tp': 0},
+            ...
+        },
+        'group_metrics': {
+            'topographic shadow': {'acc': 0.52, 'prec': 0.12, 'rec': 0.90, 'f1': 0.53, 'iou': 0.50},
+            'vegetation': {'acc': 0.90, 'prec': 0.98, 'rec': 0.82, 'f1': 0.90, 'iou': 0.4},
+            ...
+        }
+
+        Note: if metrics are undefined, they are set to None.
+    }
+    """
+    # convert boolean to integer for the binary confusion matrix computation
+    all_preds = all_preds.long()
+    all_targets = all_targets.long()
+    scl_classes = scl_classes.long() # originally float32
+    
+    output = {'confusion_matrix': {}, 'group_confusion_matrix': {}, 'group_metrics': {}}
+    for scl_class in SCL_CLASSES:
+        mask = scl_classes == scl_class
+        pixel_count = int(mask.sum())
+        if pixel_count == 0:
+            output['confusion_matrix'][str(scl_class)] = {'tn': 0, 'fp': 0, 'fn': 0, 'tp': 0}
+            continue
+        
+        preds_by_class = all_preds[mask]
+        targets_by_class = all_targets[mask]
+
+        # compute confusion matrix
+        confusion_matrix = fast_binary_confusion_matrix(preds_by_class, targets_by_class).tolist()
+        output['confusion_matrix'][str(scl_class)] = {
+            'tn': confusion_matrix[0][0],
+            'fp': confusion_matrix[0][1],
+            'fn': confusion_matrix[1][0],
+            'tp': confusion_matrix[1][1]
+        }
+
+    # compute group metrics
+    for group, classes in groups.items():
+        # compute confusion matrix for each group
+        mask = torch.isin(scl_classes, torch.tensor(classes, device=scl_classes.device, dtype=scl_classes.dtype))
         pixel_count = int(mask.sum())
         if pixel_count == 0:
             output['group_confusion_matrix'][group] = {'tn': 0, 'fp': 0, 'fn': 0, 'tp': 0}

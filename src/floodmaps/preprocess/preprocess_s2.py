@@ -255,65 +255,63 @@ def load_tile_for_sampling(tile_info: Tuple):
     missing_mask = np.expand_dims(missing_mask, axis=0)  # Shape: (1, H, W)
     
     if tile_dt_obj >= PROCESSING_BASELINE_NAIVE:
-        rgb_raster = rgb_raster + BOA_ADD_OFFSET
+        rgb_raster_sr = np.clip((rgb_raster + BOA_ADD_OFFSET) / 10000.0, 0, 1)
+    else:
+        rgb_raster_sr = np.clip(rgb_raster / 10000.0, 0, 1)
 
     with rasterio.open(b08_file) as src:
         b08_raster = src.read().astype(np.float32)
         if tile_dt_obj >= PROCESSING_BASELINE_NAIVE:
-            b08_raster = b08_raster + BOA_ADD_OFFSET
+            b08_raster_sr = np.clip((b08_raster + BOA_ADD_OFFSET) / 10000.0, 0, 1)
+        else:
+            b08_raster_sr = np.clip(b08_raster / 10000.0, 0, 1)
 
     with rasterio.open(b11_file) as src:
         b11_raster = src.read().astype(np.float32)
         if tile_dt_obj >= PROCESSING_BASELINE_NAIVE:
-            b11_raster = b11_raster + BOA_ADD_OFFSET
+            b11_raster_sr = np.clip((b11_raster + BOA_ADD_OFFSET) / 10000.0, 0, 1)
+        else:
+            b11_raster_sr = np.clip(b11_raster / 10000.0, 0, 1)
 
     with rasterio.open(b12_file) as src:
         b12_raster = src.read().astype(np.float32)
         if tile_dt_obj >= PROCESSING_BASELINE_NAIVE:
-            b12_raster = b12_raster + BOA_ADD_OFFSET
+            b12_raster_sr = np.clip((b12_raster + BOA_ADD_OFFSET) / 10000.0, 0, 1)
+        else:
+            b12_raster_sr = np.clip(b12_raster / 10000.0, 0, 1)
 
-    if tile_dt_obj >= PROCESSING_BASELINE_NAIVE:
-        # Post processing baseline, need to use different equation for ndwi
-        # This is a temporary patch, but we want to fix this at the data pipeline step!
-        recompute_ndwi = np.where(
-            (rgb_raster[1] + b08_raster[0]) != 0,
-            (rgb_raster[1] - b08_raster[0]) / (rgb_raster[1] + b08_raster[0]),
-            -999999
-        )
-        ndwi_raster = np.expand_dims(recompute_ndwi, axis = 0)
-    else:
-        with rasterio.open(ndwi_file) as src:
-            ndwi_raster = src.read().astype(np.float32)  # Keep as-is (already in [-1, 1])
-    
-    # clip and scale spectral bands by QUANTIFICATION VALUE=10000
-    np.clip(rgb_raster, None, 10000.0, out=rgb_raster)
-    rgb_raster = rgb_raster / 10000.0  # Scale reflectance to [0, 1]
-    np.clip(b08_raster, None, 10000.0, out=b08_raster)
-    b08_raster = b08_raster / 10000.0  # Scale reflectance to [0, 1]
-    np.clip(b11_raster, None, 10000.0, out=b11_raster)
-    b11_raster = b11_raster / 10000.0  # Scale reflectance to [0, 1]
-    np.clip(b12_raster, None, 10000.0, out=b12_raster)
-    b12_raster = b12_raster / 10000.0  # Scale reflectance to [0, 1]
+    # Post processing baseline, need to use different equation for ndwi
+    # This is a temporary patch, but we want to fix this at the data pipeline step!
+    recompute_ndwi = np.where(
+        (rgb_raster_sr[1] + b08_raster_sr[0]) != 0,
+        (rgb_raster_sr[1] - b08_raster_sr[0]) / (rgb_raster_sr[1] + b08_raster_sr[0]),
+        -999999
+    )
+    ndwi_raster = np.expand_dims(recompute_ndwi, axis = 0)
+    ndwi_raster = np.where(missing_mask, -999999, ndwi_raster)
 
     # Compute MNDWI (Modified NDWI): (Green - SWIR1) / (Green + SWIR1)
     mndwi_raster = np.where(
-        (rgb_raster[1] + b11_raster[0]) != 0,
-        (rgb_raster[1] - b11_raster[0]) / (rgb_raster[1] + b11_raster[0]),
+        (rgb_raster_sr[1] + b11_raster_sr[0]) != 0,
+        (rgb_raster_sr[1] - b11_raster_sr[0]) / (rgb_raster_sr[1] + b11_raster_sr[0]),
         -999999
     )
     mndwi_raster = np.expand_dims(mndwi_raster, axis=0)
+    mndwi_raster = np.where(missing_mask, -999999, mndwi_raster)
 
     # Compute AWEI_sh (Automated Water Extraction Index - shadow): Blue + 2.5*Green - 1.5*(NIR + SWIR1) - 0.25*SWIR2
-    awei_sh_raster = (rgb_raster[2] + 2.5 * rgb_raster[1] - 
-                       1.5 * (b08_raster[0] + b11_raster[0]) - 
-                       0.25 * b12_raster[0])
+    awei_sh_raster = (rgb_raster_sr[2] + 2.5 * rgb_raster_sr[1] - 
+                       1.5 * (b08_raster_sr[0] + b11_raster_sr[0]) - 
+                       0.25 * b12_raster_sr[0])
     awei_sh_raster = np.expand_dims(awei_sh_raster, axis=0)
+    awei_sh_raster = np.where(missing_mask, -999999, awei_sh_raster)
 
     # Compute AWEI_nsh (Automated Water Extraction Index - no shadow): 4*(Green - SWIR1) - 0.25*NIR + 2.75*SWIR2
-    awei_nsh_raster = (4 * (rgb_raster[1] - b11_raster[0]) - 
-                        0.25 * b08_raster[0] + 
-                        2.75 * b12_raster[0])
+    awei_nsh_raster = (4 * (rgb_raster_sr[1] - b11_raster_sr[0]) - 
+                        0.25 * b08_raster_sr[0] + 
+                        2.75 * b12_raster_sr[0])
     awei_nsh_raster = np.expand_dims(awei_nsh_raster, axis=0)
+    awei_nsh_raster = np.where(missing_mask, -999999, awei_nsh_raster)
 
     with rasterio.open(dem_file) as src:
         dem_raster = src.read().astype(np.float32)
@@ -342,7 +340,7 @@ def load_tile_for_sampling(tile_info: Tuple):
     #                    DEM(11), slope_y(12), slope_x(13), waterbody(14), roads(15), flowlines(16),
     #                    label(17), TCI(18-20), NLCD(21), SCL(22)
     # Channel 22 (0-indexed) is the missing mask for filtering, will be dropped before saving
-    stacked_tile = np.vstack((rgb_raster, b08_raster, b11_raster, b12_raster, ndwi_raster, 
+    stacked_tile = np.vstack((rgb_raster_sr, b08_raster_sr, b11_raster_sr, b12_raster_sr, ndwi_raster, 
                                 mndwi_raster, awei_sh_raster, awei_nsh_raster,
                                 dem_raster, slope_y_raster, slope_x_raster, 
                                 waterbody_raster, roads_raster, flowlines_raster, 

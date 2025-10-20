@@ -24,7 +24,7 @@ import hydra
 from floodmaps.models.model import S2WaterDetector
 from floodmaps.utils.utils import flatten_dict, get_model_params, Metrics, EarlyStopper, ChannelIndexer, nlcd_to_rgb, scl_to_rgb, get_samples_with_wet_percentage
 from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
-from floodmaps.utils.metrics import compute_nlcd_metrics
+from floodmaps.utils.metrics import compute_nlcd_metrics, compute_scl_metrics
 
 from floodmaps.training.loss import BCEDiceLoss, TverskyLoss
 from floodmaps.training.dataset import FloodSampleS2Dataset
@@ -146,6 +146,7 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
     all_preds = []
     all_targets = []
     all_nlcd_classes = []
+    all_scl_classes = []
     
     model.eval()
     with torch.no_grad():
@@ -153,6 +154,7 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
             X = X.to(device)
             y = y.to(device)
             nlcd_classes = supplementary[:, 3, :, :].to(device)
+            scl_classes = supplementary[:, 4, :, :].to(device)
 
             logits = model(X)
             loss = loss_fn(logits, y.float())
@@ -162,12 +164,14 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
             all_preds.append(y_pred)
             all_targets.append(target)
             all_nlcd_classes.append(nlcd_classes.flatten())
+            all_scl_classes.append(scl_classes.flatten())
             running_vloss += loss.detach()
 
     # calculate metrics
     all_preds = torch.cat(all_preds)
     all_targets = torch.cat(all_targets)
     all_nlcd_classes = torch.cat(all_nlcd_classes)
+    all_scl_classes = torch.cat(all_scl_classes)
 
     metric_collection.update(all_preds, all_targets)
     metric_results = metric_collection.compute()
@@ -187,7 +191,7 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
         log_dict.update({f'{typ} loss': epoch_vloss})
         run.log(log_dict, step=epoch)
 
-    # calculate confusion matrix + NLCD class metrics
+    # calculate confusion matrix + NLCD class metrics + SCL class metrics
     confusion_matrix = metric_results['BinaryConfusionMatrix'].tolist()
     confusion_matrix_dict = {
         "tn": confusion_matrix[0][0],
@@ -196,6 +200,7 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
         "tp": confusion_matrix[1][1]
     }
     nlcd_metrics_dict = compute_nlcd_metrics(all_preds, all_targets, all_nlcd_classes)
+    scl_metrics_dict = compute_scl_metrics(all_preds, all_targets, all_scl_classes)
     metric_collection.reset()
 
     # separate the core loggable metrics from the nested dictionaries
@@ -203,7 +208,8 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
     metrics_dict = {
         'core metrics': core_metrics_dict,
         'confusion matrix': confusion_matrix_dict,
-        'nlcd metrics': nlcd_metrics_dict
+        'nlcd metrics': nlcd_metrics_dict,
+        'scl metrics': scl_metrics_dict
     }
 
     return epoch_vloss, metrics_dict
@@ -230,9 +236,9 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
             pos_weight_val = float(cfg.train.pos_weight)
         else:
             # Efficient vectorized computation over loaded training labels
-            # label plane is last 5th channel in dataset (kept in-memory by dataset class)
+            # label plane is last 6th channel in dataset (kept in-memory by dataset class)
             logging.info("Computing pos_weight from training labels")
-            label_np = train_loader.dataset.dataset[:, -5, :, :]
+            label_np = train_loader.dataset.dataset[:, -6, :, :]
             pos = float(label_np.sum())
             total = float(label_np.size)
             neg = max(total - pos, 1.0)
@@ -272,8 +278,7 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
             raise RuntimeError(f'Error while training occurred at epoch {epoch}.') from err
 
         if cfg.train.early_stopping:
-            early_stopper.step(avg_vloss, model)
-            early_stopper.store_best_metrics(val_set_metrics)
+            early_stopper.step(avg_vloss, model, epoch, metrics=val_set_metrics)
             if early_stopper.is_stopped():
                 break
 
@@ -301,6 +306,7 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
                       if model.uses_discriminator() else None)
         fmetrics.save_metrics('val', loss=early_stopper.get_min_validation_loss(), **best_val_metrics)
         run.summary.update({f'final model {key}': value for key, value in best_val_metrics['core metrics'].items()})
+        run.summary[f"best_epoch"] = early_stopper.get_best_epoch()
     else:
         cls_weights = model.classifier.state_dict()
         disc_weights = (model.discriminator.state_dict()

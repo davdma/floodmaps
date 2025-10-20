@@ -544,10 +544,11 @@ class EarlyStopper:
         self.patience = patience
         self.min_delta = min_delta
         self.counter = 0
-        self.best = True
+        self.best = False
         self.min_validation_loss = float('inf')
         self.metrics = None
         self.best_model_weights = None
+        self.best_epoch = 0
 
     def state_dict(self):
         """For saving the state of the early stopper."""
@@ -558,7 +559,8 @@ class EarlyStopper:
             "best": self.best,
             "min_validation_loss": self.min_validation_loss,
             "metrics": self.metrics,
-            "best_model_weights": self.best_model_weights # note this is may be diff from chkpt weights
+            "best_model_weights": self.best_model_weights, # note this is may be diff from chkpt weights
+            "best_epoch": self.best_epoch
         }
 
     def load_state_dict(self, state):
@@ -569,22 +571,21 @@ class EarlyStopper:
         self.min_validation_loss = state["min_validation_loss"]
         self.metrics = state["metrics"]
         self.best_model_weights = state["best_model_weights"]
+        self.best_epoch = state["best_epoch"]
 
-    def step(self, validation_loss, model):
+    def step(self, validation_loss, model, epoch, metrics=None):
         if validation_loss < self.min_validation_loss:
             self.min_validation_loss = validation_loss
             self.counter = 0
             self.best = True
             self.best_model_weights = copy.deepcopy(model.state_dict())
+            self.best_epoch = epoch
+            self.metrics = metrics
         elif validation_loss > (self.min_validation_loss + self.min_delta):
             self.counter += 1
             self.best = False
         else:
             self.best = False
-
-    def store_best_metrics(self, metrics):
-        """For storing any additional metrics besides loss during best epoch."""
-        self.metrics = metrics
 
     def get_best_metrics(self):
         """Retrieving additional metrics besides loss from best epoch."""
@@ -600,6 +601,10 @@ class EarlyStopper:
     def get_best_weights(self):
         """Return the best model weights."""
         return self.best_model_weights
+    
+    def get_best_epoch(self):
+        """Return the best epoch."""
+        return self.best_epoch
 
 class ADEarlyStopper:
     """This class supports regular early stopping as well as early stopping for VAE cyclical beta annealing
@@ -621,7 +626,7 @@ class ADEarlyStopper:
         self.patience = patience
         self.min_delta = min_delta
         self.counter = 0
-        self.best = True
+        self.best = False
         self.min_validation_loss = float('inf')
         self.best_model_weights = None
         self.best_epoch = 0 # newly added

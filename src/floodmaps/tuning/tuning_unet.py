@@ -14,7 +14,7 @@ from floodmaps.training.train_sar import run_experiment_s1
 from floodmaps.utils.tuning_utils import load_stopper_info, save_stopper_info, print_save_best_params, save_problem
 
 def run_s2(parameters, cfg: DictConfig):
-    cfg.wandb.project = 'S2_NoDEM_All_Clouds_Tuning'
+    cfg.wandb.project = 'S2_NoDEM_Tuning'
     cfg.wandb.group = 'UNet'
     cfg.train.loss = parameters['loss']
     cfg.train.lr = parameters['learning_rate']

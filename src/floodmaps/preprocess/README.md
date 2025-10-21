@@ -8,12 +8,14 @@ This directory contains scripts for preprocessing satellite imagery and labels i
    - Processes manually labeled tiles (human-annotated ground truth)
    - Uses hardcoded train/val/test label splits (YAML defined)
    - Sequential processing suitable for smaller datasets
+   - Applies `BOA_ADD_OFFSET` correction to S2 bands from 2022-01-25 onwards
 
 2. **Weak Label Preprocessing**: `preprocess_s2_weak.py` and `preprocess_sar_weak.py`
    - Processes machine-generated prediction tiles with optional manual label substitution
    - **Requires `pred_*.tif` files**: Generated using [`../inference/weak_labels.py`](../inference/weak_labels.py) script
    - Find valid tiles in list of sample directories (YAML defined)
    - Handles large-scale datasets (10,000+ tiles) using concurrent workers
+   - S2 preprocessing applies `BOA_ADD_OFFSET` correction to bands from 2022-01-25 onwards
 
 ### Prerequisites for Weak Label Preprocessing
 
@@ -46,6 +48,11 @@ Before running weak label preprocessing scripts, you must generate machine label
 - Channels 18-20: TCI (RGB scaled to [0,1])
 - Channel 21: NLCD land cover
 - Channel 22: SCL (Scene Classification Layer)
+
+**Processing Baseline Offset Correction**: 
+- ⚠️ **Critical**: S2 L2A products from 2022-01-25 onwards require `BOA_ADD_OFFSET` correction (-1000) to convert from scaled integer values to surface reflectance
+- The preprocessing scripts automatically apply this offset based on tile date
+- **Provider Consistency Warning**: Ensure the STAC provider does not already apply the offset. AWS Element 84 has known issues where products falsely indicate offset is not applied when it already is, leading to double-correction. Use Microsoft Planetary Computer (MPC) or Copernicus Data Space Ecosystem (CDSE) for reliable offset handling
 
 ### Configuration Files
 

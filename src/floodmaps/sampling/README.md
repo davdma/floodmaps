@@ -18,7 +18,7 @@ Discretizing the US Sentinel-2 and Sentinel-1 flood dataset:
 </p>
 
 The method for data collection is as follows:
-* Flood events are identified through high precipitation cells in the PRISM dataset from August 2016 onward. For cells that meet or exceed a specified precipitation threshold, the specific date, time, and georeferenced coordinates are then used to search for Sentinel-2 captures through Copernicus data providers (e.g. Planetary Computer or AWS).
+* Flood events are identified through high precipitation cells in the PRISM dataset from August 2016 onward. For cells that meet or exceed a specified precipitation threshold, the specific date, time, and georeferenced coordinates are then used to search for Sentinel-2 captures through STAC data providers (e.g. Microsoft Planetary Computer, Copernicus Data Space Ecosystem, or AWS).
 * The resulting captures are stored in event directories, where each "event" we denote simply as a cell we queried on a specified date with a high precipitation measurement.
 * Each event has an event id or `eid` in the format `YYYYMMDD_YCoord_XCoord` where `YCoord` and `XCoord` is the position of the cell on the grid defined by the PRISM dataset.
 * It may also be the case that some flood events and corresponding captures of interest have low precipitation (e.g. lie downstream of high precipitation cells or simply not caused by precipitation) and get filtered out by this method. To ensure these are still included, an option `manual` is added to the scripts to specify cells for download regardless of precipitation. To learn more about this option go to [manual download](#manual-download).
@@ -26,11 +26,12 @@ The method for data collection is as follows:
 
 ## Currently Supported Channels
 **S2 product channels:**
-* RGB reflectances
+* RGB reflectances (B04, B03, B02)
 * NIR band (B08)
-* NDWI layer (calculated as `(B03 - B08) / (B03 + B08)`)
+* SWIR bands (B11, B12)
+* Water indices: NDWI, MNDWI, AWEI_sh, AWEI_nsh (computed during preprocessing)
 * True Color Image (TCI) visual channels
-* Cloud mask layer
+* Scene Classification Layer (SCL) for cloud/shadow masks
 
 **S1 product channels:**
 * VV polarization layer
@@ -38,6 +39,7 @@ The method for data collection is as follows:
 
 **Product independent channels:**
 * DEM layer
+* Slope (derived from DEM)
 * Roads mask
 * Flowlines mask
 * Waterbody mask
@@ -85,8 +87,9 @@ Microsoft Planetary Computer:
 - Set in the `config.yaml` level with `mpc_api_key: ...`.
 - OR Set environment variable `PC_SDK_SUBSCRIPTION_KEY`.
 
-AWS:
-- Currently S3 requester pays bucket requires manual setup.
+Copernicus Data Space Ecosystem (CDSE) and AWS:
+- Require S3 credentials via environment variables: `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
+- Note: AWS has known issues with offset handling; MPC or CDSE recommended for reliability.
 
 ## Sampling Scripts
 There are several sampling scripts:

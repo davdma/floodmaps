@@ -8,6 +8,7 @@ All training runs automatically log to [Weights & Biases](https://wandb.ai) for 
 - Precision, recall, F1-score, accuracy, IoU, confusion matrices per epoch
 - Learning rate scheduling
 - Model parameters and memory usage
+- Final saved model val/test metrics logged to summary dictionary
 
 **Displays Model Results:**
 - Input channels (RGB, SAR, ancillary data)

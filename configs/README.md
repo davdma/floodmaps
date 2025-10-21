@@ -121,7 +121,8 @@ save_path:
 data:
     size: 64 # pixel width of dataset patches
     samples: 1000 # 1000
-    channels: "11111011111" # (R, G, B, B08, NDWI, DEM, SlopeY, SlopeX, Water, Roads, Flowlines)
+    channels: "1111111111111111" # Binary string selecting 16 available input channels
+                                  # (R, G, B, B08, B11, B12, NDWI, MNDWI, AWEI_sh, AWEI_nsh, DEM, SlopeY, SlopeX, Water, Roads, Flowlines)
     use_weak: False # Use s2_weak (machine labels) vs s2 (manual labels)
     suffix: "" # Optional suffix for preprocessing variant datasets
     random_flip: True
@@ -178,7 +179,8 @@ data:
     size: 68 # pixel width of dataset patches
     window: 64 # pixel width of model input/output
     samples: 1000 # [250, 500, 1000]
-    channels: "11011111" # (VV, VH, DEM, SlopeY, SlopeX, Water, Roads, Flowlines)
+    channels: "11111111" # Binary string selecting 8 available input channels
+                         # (VV, VH, DEM, SlopeY, SlopeX, Water, Roads, Flowlines)
     use_lee: False
     suffix: "" # Optional suffix for preprocessing variant datasets
     random_flip: True

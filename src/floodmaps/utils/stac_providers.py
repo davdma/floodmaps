@@ -108,6 +108,8 @@ class MicrosoftPlanetaryComputerProvider(STACProvider):
     def __init__(self, logger: Optional[logging.Logger] = None, api_key: Optional[str] = None):
         """Initialize with optional API key parameter."""
         self.api_key = api_key
+
+        os.environ["GDAL_HTTP_MAX_RETRY"] = "3"
         super().__init__(logger)
     
     def _initialize_catalog(self):
@@ -180,6 +182,8 @@ class AWSProvider(STACProvider):
             os.environ["AWS_ACCESS_KEY_ID"] = aws_access_key_id
             os.environ["AWS_SECRET_ACCESS_KEY"] = aws_secret_access_key
             os.environ["AWS_HTTPS"] = "YES"
+        
+        os.environ["GDAL_HTTP_MAX_RETRY"] = "3"
         super().__init__(logger)
     
     def _initialize_catalog(self):
@@ -243,6 +247,8 @@ class CDSEProvider(STACProvider):
             os.environ["AWS_SECRET_ACCESS_KEY"] = aws_secret_access_key
             os.environ["AWS_VIRTUAL_HOSTING"] = "FALSE"
             os.environ["AWS_HTTPS"] = "YES"
+        
+        os.environ["GDAL_HTTP_MAX_RETRY"] = "3"
         super().__init__(logger)
     
     def _initialize_catalog(self):

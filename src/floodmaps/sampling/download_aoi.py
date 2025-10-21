@@ -16,6 +16,7 @@ from pystac.extensions.projection import ProjectionExtension as pe
 import pystac_client
 import hydra
 from omegaconf import DictConfig
+import time
 
 from floodmaps.utils.sampling_utils import (
     PRISM_CRS,
@@ -123,15 +124,30 @@ def pipeline_TCI(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
     transform : rasterio.affine.Affine()
         Transformation matrix for mapping pixel coordinates in dest to coordinate system.
     """
+    logger = logging.getLogger('main')
     visual_name = stac_provider.get_asset_names("s2")["visual"]
     item_href = stac_provider.sign_asset_href(item.assets[visual_name].href)
 
-    out_image, out_transform = crop_to_bounds(item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            out_image, out_transform = crop_to_bounds(item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
 
-    with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=3, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=None) as dst:
-        dst.write(out_image)
+            # Check if data is all zeros
+            if np.all(out_image == 0):
+                raise ValueError("TCI raster is all zeros - likely failed download")
 
-    return (out_image.shape[-2], out_image.shape[-1]), out_transform
+            with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=3, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=None) as dst:
+                dst.write(out_image)
+
+            return (out_image.shape[-2], out_image.shape[-1]), out_transform
+
+        except (rasterio.errors.RasterioIOError, ValueError) as err:
+            if attempt == max_attempts:
+                raise RuntimeError(f"Failed to process TCI after {max_attempts} attempts: {err}") from err
+            else:
+                logger.warning(f"TCI processing attempt {attempt}/{max_attempts} failed: {err}. Retrying...")
+                time.sleep(2 ** attempt)
 
 def pipeline_SCL(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst_transform, item, bbox, cfg):
     """Generates Scene Classification Layer raster of S2 multispectral file and resamples to 10m resolution.
@@ -158,37 +174,54 @@ def pipeline_SCL(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst
     cfg : DictConfig
         Configuration object.
     """
+    logger = logging.getLogger('main')
     scl_name = stac_provider.get_asset_names("s2")["SCL"]
     item_href = stac_provider.sign_asset_href(item.assets[scl_name].href)
 
-    # Single-step resampling directly to TCI grid for perfect pixel alignment
     h, w = dst_shape
-    dest = np.zeros((1, h, w), dtype=np.uint8)
-    
-    with rasterio.open(item_href) as src:
-        reproject(
-            source=rasterio.band(src, 1),
-            destination=dest,
-            src_transform=src.transform,
-            src_crs=src.crs,
-            dst_transform=dst_transform,
-            dst_crs=dst_crs,
-            resampling=Resampling.nearest,
-            dst_nodata=0
-        )
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # Single-step resampling directly to TCI grid for perfect pixel alignment
+            dest = np.zeros((1, h, w), dtype=np.uint8)
+            
+            with rasterio.open(item_href) as src:
+                reproject(
+                    source=rasterio.band(src, 1),
+                    destination=dest,
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=dst_transform,
+                    dst_crs=dst_crs,
+                    resampling=Resampling.nearest,
+                    dst_nodata=0
+                )
 
-    # save SCL raster with all class values preserved
-    with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=h, width=w, crs=dst_crs, 
-                        dtype=dest.dtype, transform=dst_transform, nodata=0) as dst:
-        dst.write(dest)
+            # Check if data is all zeros
+            if np.all(dest == 0):
+                raise ValueError("SCL raster is all zeros - likely failed download")
 
-    if cfg.sampling.include_cmap:
-        # create RGB colormap from SCL using utility function
-        rgb_scl = scl_to_rgb(dest[0])
-        
-        with rasterio.open(dir_path / f'{save_as}_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_scl.shape[-2], width=rgb_scl.shape[-1], 
-                        crs=dst_crs, dtype=rgb_scl.dtype, transform=dst_transform, nodata=None) as dst:
-            dst.write(rgb_scl)
+            # save SCL raster with all class values preserved
+            with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=h, width=w, crs=dst_crs, 
+                                dtype=dest.dtype, transform=dst_transform, nodata=0) as dst:
+                dst.write(dest)
+            
+            if cfg.sampling.include_cmap:
+                # create RGB colormap from SCL using utility function
+                rgb_scl = scl_to_rgb(dest[0])
+                
+                with rasterio.open(dir_path / f'{save_as}_cmap.tif', 'w', driver='Gtiff', count=3, height=rgb_scl.shape[-2], width=rgb_scl.shape[-1], 
+                                crs=dst_crs, dtype=rgb_scl.dtype, transform=dst_transform, nodata=None) as dst:
+                    dst.write(rgb_scl)
+                    
+            break
+
+        except (rasterio.errors.RasterioIOError, ValueError) as err:
+            if attempt == max_attempts:
+                raise RuntimeError(f"Failed to process SCL after {max_attempts} attempts: {err}") from err
+            else:
+                logger.warning(f"SCL processing attempt {attempt}/{max_attempts} failed: {err}. Retrying...")
+                time.sleep(2 ** attempt)
 
 def pipeline_RGB(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
     """Generates B02 (B), B03 (G), B04 (R) rasters of S2 multispectral file.
@@ -209,6 +242,7 @@ def pipeline_RGB(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
         Tuple in the order minx, miny, maxx, maxy, representing bounding box,
         should be in CRS specified by dst_crs.
     """
+    logger = logging.getLogger('main')
     b02_name = stac_provider.get_asset_names("s2")["B02"]
     b03_name = stac_provider.get_asset_names("s2")["B03"]
     b04_name = stac_provider.get_asset_names("s2")["B04"]
@@ -216,15 +250,35 @@ def pipeline_RGB(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
     b03_item_href = stac_provider.sign_asset_href(item.assets[b03_name].href) # G
     b04_item_href = stac_provider.sign_asset_href(item.assets[b04_name].href) # R
 
-    # stack the three bands as rgb channels
-    blue_image, out_transform = crop_to_bounds(b02_item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
-    green_image, _ = crop_to_bounds(b03_item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
-    red_image, _ = crop_to_bounds(b04_item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # stack the three bands as rgb channels
+            blue_image, out_transform = crop_to_bounds(b02_item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
+            green_image, _ = crop_to_bounds(b03_item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
+            red_image, _ = crop_to_bounds(b04_item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
 
-    out_image = np.vstack((red_image, green_image, blue_image))
+            # Check if any channel is all zeros
+            if np.all(blue_image == 0):
+                raise ValueError("RGB Blue (B02) channel is all zeros - likely failed download")
+            if np.all(green_image == 0):
+                raise ValueError("RGB Green (B03) channel is all zeros - likely failed download")
+            if np.all(red_image == 0):
+                raise ValueError("RGB Red (B04) channel is all zeros - likely failed download")
 
-    with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=3, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=0) as dst:
-        dst.write(out_image)
+            out_image = np.vstack((red_image, green_image, blue_image))
+
+            with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=3, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=0) as dst:
+                dst.write(out_image)
+
+            break
+
+        except (rasterio.errors.RasterioIOError, ValueError) as err:
+            if attempt == max_attempts:
+                raise RuntimeError(f"Failed to process RGB after {max_attempts} attempts: {err}") from err
+            else:
+                logger.warning(f"RGB processing attempt {attempt}/{max_attempts} failed: {err}. Retrying...")
+                time.sleep(2 ** attempt)
 
 def pipeline_B08(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
     """Generates NIR B8 band raster of S2 multispectral file.
@@ -245,13 +299,30 @@ def pipeline_B08(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
         Tuple in the order minx, miny, maxx, maxy, representing bounding box,
         should be in CRS specified by dst_crs.
     """
+    logger = logging.getLogger('main')
     b08_name = stac_provider.get_asset_names("s2")["B08"]
     item_href = stac_provider.sign_asset_href(item.assets[b08_name].href)
 
-    out_image, out_transform = crop_to_bounds(item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            out_image, out_transform = crop_to_bounds(item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
 
-    with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=0) as dst:
-        dst.write(out_image)
+            # Check if data is all zeros
+            if np.all(out_image == 0):
+                raise ValueError("B08 raster is all zeros - likely failed download")
+
+            with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=out_image.shape[-2], width=out_image.shape[-1], crs=dst_crs, dtype=out_image.dtype, transform=out_transform, nodata=0) as dst:
+                dst.write(out_image)
+
+            break
+
+        except (rasterio.errors.RasterioIOError, ValueError) as err:
+            if attempt == max_attempts:
+                raise RuntimeError(f"Failed to process B08 after {max_attempts} attempts: {err}") from err
+            else:
+                logger.warning(f"B08 processing attempt {attempt}/{max_attempts} failed: {err}. Retrying...")
+                time.sleep(2 ** attempt)
 
 def pipeline_B11(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst_transform, item, bbox):
     """Generates SWIR1 B11 band raster of S2 multispectral file (resampled to 10m).
@@ -276,27 +347,44 @@ def pipeline_B11(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst
         Tuple in the order minx, miny, maxx, maxy, representing bounding box,
         should be in CRS specified by dst_crs.
     """
+    logger = logging.getLogger('main')
     b11_name = stac_provider.get_asset_names("s2")["B11"]
     item_href = stac_provider.sign_asset_href(item.assets[b11_name].href)
 
-    # Single-step resampling directly to TCI grid for perfect pixel alignment
     h, w = dst_shape
-    dest = np.zeros((1, h, w), dtype=np.uint16)
-    
-    with rasterio.open(item_href) as src:
-        reproject(
-            source=rasterio.band(src, 1),
-            destination=dest,
-            src_transform=src.transform,
-            src_crs=src.crs,
-            dst_transform=dst_transform,
-            dst_crs=dst_crs,
-            resampling=Resampling.bilinear,
-            dst_nodata=0
-        )
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # Single-step resampling directly to TCI grid for perfect pixel alignment
+            dest = np.zeros((1, h, w), dtype=np.uint16)
+            
+            with rasterio.open(item_href) as src:
+                reproject(
+                    source=rasterio.band(src, 1),
+                    destination=dest,
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=dst_transform,
+                    dst_crs=dst_crs,
+                    resampling=Resampling.bilinear,
+                    dst_nodata=0
+                )
 
-    with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=h, width=w, crs=dst_crs, dtype=dest.dtype, transform=dst_transform, nodata=0) as dst:
-        dst.write(dest)
+            # Check if data is all zeros
+            if np.all(dest == 0):
+                raise ValueError("B11 raster is all zeros - likely failed download")
+
+            with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=h, width=w, crs=dst_crs, dtype=dest.dtype, transform=dst_transform, nodata=0) as dst:
+                dst.write(dest)
+
+            break
+
+        except (rasterio.errors.RasterioIOError, ValueError) as err:
+            if attempt == max_attempts:
+                raise RuntimeError(f"Failed to process B11 after {max_attempts} attempts: {err}") from err
+            else:
+                logger.warning(f"B11 processing attempt {attempt}/{max_attempts} failed: {err}. Retrying...")
+                time.sleep(2 ** attempt)
 
 def pipeline_B12(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst_transform, item, bbox):
     """Generates SWIR2 B12 band raster of S2 multispectral file (resampled to 10m).
@@ -321,27 +409,44 @@ def pipeline_B12(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst
         Tuple in the order minx, miny, maxx, maxy, representing bounding box,
         should be in CRS specified by dst_crs.
     """
+    logger = logging.getLogger('main')
     b12_name = stac_provider.get_asset_names("s2")["B12"]
     item_href = stac_provider.sign_asset_href(item.assets[b12_name].href)
 
-    # Single-step resampling directly to TCI grid for perfect pixel alignment
     h, w = dst_shape
-    dest = np.zeros((1, h, w), dtype=np.uint16)
-    
-    with rasterio.open(item_href) as src:
-        reproject(
-            source=rasterio.band(src, 1),
-            destination=dest,
-            src_transform=src.transform,
-            src_crs=src.crs,
-            dst_transform=dst_transform,
-            dst_crs=dst_crs,
-            resampling=Resampling.bilinear,
-            dst_nodata=0
-        )
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # Single-step resampling directly to TCI grid for perfect pixel alignment
+            dest = np.zeros((1, h, w), dtype=np.uint16)
+            
+            with rasterio.open(item_href) as src:
+                reproject(
+                    source=rasterio.band(src, 1),
+                    destination=dest,
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=dst_transform,
+                    dst_crs=dst_crs,
+                    resampling=Resampling.bilinear,
+                    dst_nodata=0
+                )
 
-    with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=h, width=w, crs=dst_crs, dtype=dest.dtype, transform=dst_transform, nodata=0) as dst:
-        dst.write(dest)
+            # Check if data is all zeros
+            if np.all(dest == 0):
+                raise ValueError("B12 raster is all zeros - likely failed download")
+
+            with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=h, width=w, crs=dst_crs, dtype=dest.dtype, transform=dst_transform, nodata=0) as dst:
+                dst.write(dest)
+
+            break
+
+        except (rasterio.errors.RasterioIOError, ValueError) as err:
+            if attempt == max_attempts:
+                raise RuntimeError(f"Failed to process B12 after {max_attempts} attempts: {err}") from err
+            else:
+                logger.warning(f"B12 processing attempt {attempt}/{max_attempts} failed: {err}. Retrying...")
+                time.sleep(2 ** attempt)
 
 def pipeline_NDWI(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox, cfg):
     """Generates NDWI raster from S2 multispectral files.
@@ -364,47 +469,67 @@ def pipeline_NDWI(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox, c
     cfg : DictConfig
         Configuration object.
     """
+    logger = logging.getLogger('main')
     b03_name = stac_provider.get_asset_names("s2")["B03"]
     b08_name = stac_provider.get_asset_names("s2")["B08"]
     b03_item_href = stac_provider.sign_asset_href(item.assets[b03_name].href)
-
-    out_image1, _ = crop_to_bounds(b03_item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
-    green = out_image1[0].astype(np.int32)
-
     b08_item_href = stac_provider.sign_asset_href(item.assets[b08_name].href)
 
-    out_image2, out_transform = crop_to_bounds(b08_item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
-    nir = out_image2[0].astype(np.int32)
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            out_image1, _ = crop_to_bounds(b03_item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
+            green = out_image1[0].astype(np.int32)
 
-    missing_mask = (green == 0) | (nir == 0)
+            # Check if B03 is all zeros
+            if np.all(green == 0):
+                raise ValueError("NDWI B03 (green) band is all zeros - likely failed download")
 
-    # calculate ndwi with BOA offset for baseline-or-later captures
-    if item.datetime >= PROCESSING_BASELINE_UTC:
-        green_sr = (green.astype(np.float32) + BOA_ADD_OFFSET) / 10000.0
-        nir_sr = (nir.astype(np.float32) + BOA_ADD_OFFSET) / 10000.0
-        green_sr = np.clip(green_sr, 0, 1)
-        nir_sr = np.clip(nir_sr, 0, 1)
-        ndwi = np.where((green_sr + nir_sr) != 0, (green_sr - nir_sr) / (green_sr + nir_sr), -999999)
-    else:
-        green_sr = green.astype(np.float32) / 10000.0
-        nir_sr = nir.astype(np.float32) / 10000.0
-        green_sr = np.clip(green_sr, 0, 1)
-        nir_sr = np.clip(nir_sr, 0, 1)
-        ndwi = np.where((green + nir) != 0, (green - nir) / (green + nir), -999999)
-    
-    ndwi = np.where(missing_mask, -999999, ndwi)
+            out_image2, out_transform = crop_to_bounds(b08_item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
+            nir = out_image2[0].astype(np.int32)
 
-    # save raw
-    with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=ndwi.shape[-2], width=ndwi.shape[-1], crs=dst_crs, dtype=ndwi.dtype, transform=out_transform, nodata=-999999) as dst:
-        dst.write(ndwi, 1)
+            # Check if B08 is all zeros
+            if np.all(nir == 0):
+                raise ValueError("NDWI B08 (NIR) band is all zeros - likely failed download")
 
-    if cfg.sampling.include_cmap:
-        # before writing to file, we will make matplotlib colormap!
-        ndwi_colored = colormap_to_rgb(ndwi, cmap='seismic_r', r=(-1.0, 1.0), no_data=-999999)
+            missing_mask = (green == 0) | (nir == 0)
 
-        # nodata should not be set for cmap files
-        with rasterio.open(dir_path / f'{save_as}_cmap.tif', 'w', driver='Gtiff', count=3, height=ndwi_colored.shape[-2], width=ndwi_colored.shape[-1], crs=dst_crs, dtype=ndwi_colored.dtype, transform=out_transform, nodata=None) as dst:
-            dst.write(ndwi_colored)
+            # calculate ndwi with BOA offset for baseline-or-later captures
+            if item.datetime >= PROCESSING_BASELINE_UTC:
+                green_sr = (green.astype(np.float32) + BOA_ADD_OFFSET) / 10000.0
+                nir_sr = (nir.astype(np.float32) + BOA_ADD_OFFSET) / 10000.0
+                green_sr = np.clip(green_sr, 0, 1)
+                nir_sr = np.clip(nir_sr, 0, 1)
+                ndwi = np.where((green_sr + nir_sr) != 0, (green_sr - nir_sr) / (green_sr + nir_sr), -999999)
+            else:
+                green_sr = green.astype(np.float32) / 10000.0
+                nir_sr = nir.astype(np.float32) / 10000.0
+                green_sr = np.clip(green_sr, 0, 1)
+                nir_sr = np.clip(nir_sr, 0, 1)
+                ndwi = np.where((green + nir) != 0, (green - nir) / (green + nir), -999999)
+            
+            ndwi = np.where(missing_mask, -999999, ndwi)
+
+            # save raw
+            with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=ndwi.shape[-2], width=ndwi.shape[-1], crs=dst_crs, dtype=ndwi.dtype, transform=out_transform, nodata=-999999) as dst:
+                dst.write(ndwi, 1)
+            
+            if cfg.sampling.include_cmap:
+                # before writing to file, we will make matplotlib colormap!
+                ndwi_colored = colormap_to_rgb(ndwi, cmap='seismic_r', r=(-1.0, 1.0), no_data=-999999)
+
+                # nodata should not be set for cmap files
+                with rasterio.open(dir_path / f'{save_as}_cmap.tif', 'w', driver='Gtiff', count=3, height=ndwi_colored.shape[-2], width=ndwi_colored.shape[-1], crs=dst_crs, dtype=ndwi_colored.dtype, transform=out_transform, nodata=None) as dst:
+                    dst.write(ndwi_colored)
+
+            break
+
+        except (rasterio.errors.RasterioIOError, ValueError) as err:
+            if attempt == max_attempts:
+                raise RuntimeError(f"Failed to process NDWI after {max_attempts} attempts: {err}") from err
+            else:
+                logger.warning(f"NDWI processing attempt {attempt}/{max_attempts} failed: {err}. Retrying...")
+                time.sleep(2 ** attempt)
 
 def pipeline_roads(dir_path: Path, save_as, dst_shape, dst_crs, dst_transform, state, prism_bbox, cfg):
     """Generates raster with burned in geometries of roads given destination raster properties.
@@ -974,34 +1099,53 @@ def pipeline_S1(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox, cfg
     transform : rasterio.affine.Affine()
         Transformation matrix for mapping pixel coordinates in dest to coordinate system.
     """
+    logger = logging.getLogger('main')
     vv_name = stac_provider.get_asset_names("s1")["vv"]
     vh_name = stac_provider.get_asset_names("s1")["vh"]
     item_hrefs_vv = stac_provider.sign_asset_href(item.assets[vv_name].href)
     item_hrefs_vh = stac_provider.sign_asset_href(item.assets[vh_name].href)
 
-    out_image_vv, out_transform_vv = crop_to_bounds(item_hrefs_vv, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
-    out_image_vh, out_transform_vh = crop_to_bounds(item_hrefs_vh, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            out_image_vv, out_transform_vv = crop_to_bounds(item_hrefs_vv, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
+            out_image_vh, out_transform_vh = crop_to_bounds(item_hrefs_vh, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
 
-    with rasterio.open(dir_path / f'{save_as}_vv.tif', 'w', driver='Gtiff', count=1, height=out_image_vv.shape[-2], width=out_image_vv.shape[-1], crs=dst_crs, dtype=out_image_vv.dtype, transform=out_transform_vv, nodata=-9999) as dst:
-        db_vv = db_scale(out_image_vv[0])
-        dst.write(db_vv, 1)
+            # Check if VV polarization is all zeros
+            if np.all(out_image_vv == 0):
+                raise ValueError("S1 VV polarization is all zeros - likely failed download")
 
-    with rasterio.open(dir_path / f'{save_as}_vh.tif', 'w', driver='Gtiff', count=1, height=out_image_vh.shape[-2], width=out_image_vh.shape[-1], crs=dst_crs, dtype=out_image_vh.dtype, transform=out_transform_vh, nodata=-9999) as dst:
-        db_vh = db_scale(out_image_vh[0])
-        dst.write(db_vh, 1)
+            # Check if VH polarization is all zeros
+            if np.all(out_image_vh == 0):
+                raise ValueError("S1 VH polarization is all zeros - likely failed download")
 
-    # color maps
-    if cfg.sampling.include_cmap:
-        img_vv_cmap = colormap_to_rgb(db_vv, cmap='gray', no_data=-9999)
-        with rasterio.open(dir_path / f'{save_as}_vv_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vv_cmap.shape[-2], width=img_vv_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vv, nodata=None) as dst:
-            # get color map
-            dst.write(img_vv_cmap)
+            with rasterio.open(dir_path / f'{save_as}_vv.tif', 'w', driver='Gtiff', count=1, height=out_image_vv.shape[-2], width=out_image_vv.shape[-1], crs=dst_crs, dtype=out_image_vv.dtype, transform=out_transform_vv, nodata=-9999) as dst:
+                db_vv = db_scale(out_image_vv[0])
+                dst.write(db_vv, 1)
 
-        img_vh_cmap = colormap_to_rgb(db_vh, cmap='gray', no_data=-9999)
-        with rasterio.open(dir_path / f'{save_as}_vh_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vh_cmap.shape[-2], width=img_vh_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vh, nodata=None) as dst:
-            dst.write(img_vh_cmap)
+            with rasterio.open(dir_path / f'{save_as}_vh.tif', 'w', driver='Gtiff', count=1, height=out_image_vh.shape[-2], width=out_image_vh.shape[-1], crs=dst_crs, dtype=out_image_vh.dtype, transform=out_transform_vh, nodata=-9999) as dst:
+                db_vh = db_scale(out_image_vh[0])
+                dst.write(db_vh, 1)
 
-    return (out_image_vv.shape[-2], out_image_vv.shape[-1]), out_transform_vv
+            # color maps
+            if cfg.sampling.include_cmap:
+                img_vv_cmap = colormap_to_rgb(db_vv, cmap='gray', no_data=-9999)
+                with rasterio.open(dir_path / f'{save_as}_vv_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vv_cmap.shape[-2], width=img_vv_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vv, nodata=None) as dst:
+                    # get color map
+                    dst.write(img_vv_cmap)
+
+                img_vh_cmap = colormap_to_rgb(db_vh, cmap='gray', no_data=-9999)
+                with rasterio.open(dir_path / f'{save_as}_vh_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vh_cmap.shape[-2], width=img_vh_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vh, nodata=None) as dst:
+                    dst.write(img_vh_cmap)
+
+            return (out_image_vv.shape[-2], out_image_vv.shape[-1]), out_transform_vv
+
+        except (rasterio.errors.RasterioIOError, ValueError) as err:
+            if attempt == max_attempts:
+                raise RuntimeError(f"Failed to process S1 after {max_attempts} attempts: {err}") from err
+            else:
+                logger.warning(f"S1 processing attempt {attempt}/{max_attempts} failed: {err}. Retrying...")
+                time.sleep(2 ** attempt)
 
 def sar_missing_percentage(stac_provider, item, item_crs, bbox):
     """Calculates the percentage of pixels in the bounding box of the SAR image that are missing."""

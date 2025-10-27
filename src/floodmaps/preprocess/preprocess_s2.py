@@ -350,6 +350,17 @@ def load_tile_for_sampling(tile_info: Tuple):
     return stacked_tile
 
 
+def patch_contains_missing(patch: np.ndarray) -> bool:
+    """Check if a patch loaded from tile contains missing values.
+    
+    Parameters
+    ----------
+    patch : np.ndarray
+        Patch to check
+    """
+    return np.any(patch[22] == 1) or np.any(patch[6] == -999999) or np.any(patch[7] == -999999)
+
+
 def sample_patches_in_mem(tile_infos: List[Tuple], size: int, num_samples: int, 
                           seed: int, max_attempts: int = 10000) -> np.ndarray:
     """Sample patches and stores them in memory.
@@ -393,7 +404,7 @@ def sample_patches_in_mem(tile_infos: List[Tuple], size: int, num_samples: int,
             patch = tile_data[:, x : x + size, y : y + size]
             
             # Filter using missing mask (channel 22) and NDWI/MNDWI (channels 6, 7)
-            if np.any(patch[22] == 1) or np.any(patch[6] == -999999) or np.any(patch[7] == -999999):
+            if patch_contains_missing(patch):
                 continue
 
             dataset[i * num_samples + patches_sampled] = patch[:22]
@@ -455,7 +466,7 @@ def sample_patches_in_disk(tile_infos: List[Tuple], size: int, num_samples: int,
                 patch = tile_data[:, x : x + size, y : y + size]
                 
                 # Filter using missing mask (channel 22) and NDWI/MNDWI (channels 6, 7)
-                if np.any(patch[22] == 1) or np.any(patch[6] == -999999) or np.any(patch[7] == -999999):
+                if patch_contains_missing(patch):
                     continue
 
                 dataset[i * num_samples + patches_sampled] = patch[:22]
@@ -475,7 +486,7 @@ def sample_patches_in_disk(tile_infos: List[Tuple], size: int, num_samples: int,
 def sample_patches_parallel(label_paths: List[str], size: int, num_samples: int, 
                           output_file: Path, sample_dirs: List[str], cfg: DictConfig,
                           seed: int, n_workers: int = None) -> None:
-    """Sample patches in parallel. Strategy will depend on the memory available. If
+    """Sample patches in parallel with random sampling. Strategy will depend on the memory available. If
     memory is comfortably below the total node memory (on improv you get ~230GB regardless
     of how many cpus requested), then we can just have each worker fill out their own
     array and then concatenate them in the parent.
@@ -611,9 +622,143 @@ def sample_patches_parallel(label_paths: List[str], size: int, num_samples: int,
                 except Exception as cleanup_e:
                     logger.warning(f"Failed to clean up scratch directory: {cleanup_e}")
 
+def sample_patches_strided(tile_infos: List[Tuple], size: int, stride: int) -> np.ndarray:
+    """Sample patches using a sliding window with stride and complete edge coverage.
+    
+    This function uses a sliding window approach that moves by stride pixels
+    in both x and y directions. It ensures complete coverage by explicitly including
+    positions that cover the right and bottom edges of each tile.
+    
+    Parameters
+    ----------
+    tile_infos : List[Tuple]
+        List of tile info tuples to process
+    size : int
+        Patch size (e.g., 64)
+    stride : int
+        Stride for sliding window sampling (e.g., 5)
+    
+    Returns
+    -------
+    dataset : np.ndarray
+        Array of sampled patches (filtered for valid patches only)
+    """
+    all_patches = []
+    
+    for i, tile_info in enumerate(tile_infos):
+        try:
+            tile_data = load_tile_for_sampling(tile_info)
+        except Exception as e:
+            label_rel, _, _ = tile_info
+            raise RuntimeError(f"Worker failed to load tile {i} ({label_rel}): {e}") from e
+        
+        _, HEIGHT, WIDTH = tile_data.shape
+        
+        # Check if tile is large enough for patch size
+        if HEIGHT < size or WIDTH < size:
+            label_rel, _, _ = tile_info
+            raise RuntimeError(f"Tile {i} ({label_rel}) is too small ({HEIGHT}x{WIDTH}) for patch size {size}x{size}")
+        
+        # Generate all window positions with edge coverage
+        x_positions = list(range(0, HEIGHT - size + 1, stride))
+        # Ensure rightmost edge is included
+        if x_positions and x_positions[-1] != HEIGHT - size:
+            x_positions.append(HEIGHT - size)
+        
+        y_positions = list(range(0, WIDTH - size + 1, stride))
+        # Ensure bottom edge is included
+        if y_positions and y_positions[-1] != WIDTH - size:
+            y_positions.append(WIDTH - size)
+        
+        # Sample all patches at these positions
+        for x in x_positions:
+            for y in y_positions:
+                patch = tile_data[:, x:x+size, y:y+size]
+                
+                # Filter using missing mask (channel 22) and NDWI/MNDWI (channels 6, 7)
+                if patch_contains_missing(patch):
+                    continue
+                
+                all_patches.append(patch[:22])
+    
+    if len(all_patches) == 0:
+        raise RuntimeError("No valid patches found after filtering")
+    
+    return np.array(all_patches, dtype=np.float32)
 
-def save_event_splits(train_labels: List[str], val_labels: List[str], test_labels: List[str],
-                      output_dir: Path, seed: int, timestamp: str, data_type: str = "s2_manual") -> None:
+def sample_patches_parallel_strided(label_paths: List[str], size: int, stride: int, 
+                          output_file: Path, sample_dirs: List[str], cfg: DictConfig,
+                          n_workers: int = None) -> None:
+    """Sample patches in parallel with strided sliding window sampling. Each worker samples
+    patches strided, and results are concatenated.
+
+    NOTE: No memory mapping strategy for strided sampling.
+    
+    Parameters
+    ----------
+    label_paths : List[str]
+        List of label file paths to process
+    size : int
+        Patch size (e.g., 64)
+    stride : int
+        Stride for sliding window sampling (e.g., 5)
+    output_file : Path
+        Path to save the output .npy file
+    sample_dirs : List[str]
+        List of sample directories
+    cfg : DictConfig
+        Configuration object
+    n_workers : int, optional
+        Number of worker processes (defaults to 1)
+    """
+    logger = logging.getLogger('preprocessing')
+    
+    if n_workers is None:
+        n_workers = 1
+    
+    logger.info(f'Specified {n_workers} workers for patch sampling.')
+    n_workers = min(n_workers, len(label_paths))
+    logger.info(f'Using {n_workers} workers for {len(label_paths)} labels...')
+    
+    # divide up the labels into n_workers chunks
+    worker_tile_infos = []
+    batch_sizes = []
+    start_idx = 0
+    labels_per_worker = len(label_paths) // n_workers
+    labels_remainder = len(label_paths) % n_workers
+    for worker_id in range(n_workers):
+        worker_label_count = labels_per_worker + (1 if worker_id < labels_remainder else 0)
+        end_idx = start_idx + worker_label_count
+        labels_chunk = label_paths[start_idx:end_idx]
+        # Convert to tile_info tuples
+        tile_infos_chunk = [(label_path, sample_dirs, cfg) for label_path in labels_chunk]
+        worker_tile_infos.append(tile_infos_chunk)
+        batch_sizes.append(worker_label_count)
+        start_idx += worker_label_count
+        
+    # Log batch distribution
+    logger.info(f'Label distribution per worker: {batch_sizes}')
+    
+    logger.info('Strided sampling uses in-memory arrays and concatenation.')
+
+    try:
+        with mp.Pool(n_workers) as pool:
+            results = pool.starmap(sample_patches_strided, [(tile_infos, size, stride) for i, tile_infos in enumerate(worker_tile_infos)])
+    except Exception as e:
+        logger.error(f"Failed during parallel strided patch sampling: {e}")
+        logger.error("One or more worker processes failed during strided patch sampling")
+        raise RuntimeError(f"Strided patch sampling failed: {e}") from e
+
+    try:
+        final_arr = np.concatenate(results, axis=0)
+        np.save(output_file, final_arr)
+        logger.info('Sampling complete.')
+    except Exception as e:
+        logger.exception(f"Failed to concatenate results or save output.")
+        raise RuntimeError(f"Failed to save final array: {e}") from e
+
+def save_event_splits(train_labels: List[str], val_labels: List[str], test_labels: List[str], cfg: DictConfig,
+        output_dir: Path, timestamp: str, data_type: str = "s2_manual") -> None:
     """Save event splits to a YAML file for reproducibility and reference.
     
     Parameters
@@ -624,10 +769,10 @@ def save_event_splits(train_labels: List[str], val_labels: List[str], test_label
         List of validation label file paths
     test_labels : List[str]
         List of test label file paths
+    cfg : DictConfig
+        Configuration object
     output_dir : Path
         Directory to save the splits file
-    seed : int
-        Random seed used (though splits are predefined, not random)
     timestamp : str
         Timestamp when preprocessing started
     data_type : str
@@ -641,7 +786,7 @@ def save_event_splits(train_labels: List[str], val_labels: List[str], test_label
     test_events = extract_events_from_labels(test_labels)
     
     # Create splits file path
-    splits_file = output_dir / f'event_splits_{data_type}_{seed}.yaml'
+    splits_file = output_dir / f'metadata.yaml'
     
     # Prepare splits data structure
     event_splits = {
@@ -650,7 +795,11 @@ def save_event_splits(train_labels: List[str], val_labels: List[str], test_label
         'test': test_events,
         'metadata': {
             'data_type': data_type,
-            'seed': seed,
+            'method': cfg.preprocess.method,
+            'size': cfg.preprocess.size,
+            'samples': getattr(cfg.preprocess, 'samples', None),
+            'stride': getattr(cfg.preprocess, 'stride', None),
+            'seed': getattr(cfg.preprocess, 'seed', None),
             'total_events': len(train_events) + len(val_events) + len(test_events),
             'train_count': len(train_events),
             'val_count': len(val_events),
@@ -680,7 +829,18 @@ def save_event_splits(train_labels: List[str], val_labels: List[str], test_label
 def main(cfg: DictConfig) -> None:
     """Preprocesses raw S2 tiles and corresponding labels into smaller patches. The data will be stored
     as separate npy files for train, val, and test sets, along with a mean_std.pkl file containing the
-    mean and std of the training tiles."""
+    mean and std of the training tiles.
+    
+    cfg.preprocess Parameters:
+    - size: int (pixel width of patch)
+    - method: str ['random', 'strided']
+    - samples: int (number of samples per image for random method)
+    - stride: int (for strided method)
+    - seed: int (random number generator seed for random method)
+    - n_workers: int (number of workers for parallel processing)
+    - sample_dirs: List[str] (list of sample directories under cfg.data.imagery_dir)
+    - suffix: str (optional suffix to append to preprocessed folder)
+    """
     logger = logging.getLogger('preprocessing')
     logger.setLevel(logging.DEBUG)
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -698,19 +858,21 @@ def main(cfg: DictConfig) -> None:
     logger.info(f'''Starting S2 manual labeling preprocessing:
         Date:            {timestamp}
         Patch size:      {cfg.preprocess.size}
-        Samples per tile: {cfg.preprocess.samples}
         Sampling method: {cfg.preprocess.method}
-        Random seed:     {cfg.preprocess.seed}
+        Samples per tile (Random method): {getattr(cfg.preprocess, 'samples', None)}
+        Stride (Strided method): {getattr(cfg.preprocess, 'stride', None)}
+        Random seed:     {getattr(cfg.preprocess, 'seed', None)}
         Workers:         {n_workers}
         Sample dir(s):   {cfg.preprocess.s2.sample_dirs}
         Suffix:          {getattr(cfg.preprocess, 'suffix', None)}
     ''')
 
     # make our preprocess directory
+    sampling_param = cfg.preprocess.samples if cfg.preprocess.method == 'random' else cfg.preprocess.stride
     if getattr(cfg.preprocess, 'suffix', None):
-        pre_sample_dir = Path(cfg.paths.preprocess_dir) / 's2' / f'samples_{cfg.preprocess.size}_{cfg.preprocess.samples}_{cfg.preprocess.suffix}'
+        pre_sample_dir = Path(cfg.paths.preprocess_dir) / 's2' / f'{cfg.preprocess.method}_{cfg.preprocess.size}_{sampling_param}_{cfg.preprocess.suffix}'
     else:
-        pre_sample_dir = Path(cfg.paths.preprocess_dir) / 's2' / f'samples_{cfg.preprocess.size}_{cfg.preprocess.samples}'
+        pre_sample_dir = Path(cfg.paths.preprocess_dir) / 's2' / f'{cfg.preprocess.method}_{cfg.preprocess.size}_{sampling_param}'
     pre_sample_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f'Preprocess directory: {pre_sample_dir.name}')
 
@@ -727,7 +889,7 @@ def main(cfg: DictConfig) -> None:
         raise ValueError('Train, val, test labels, and sample directories must be non empty.')
 
     # Save the event splits for reproducibility and reference
-    save_event_splits(train_labels, val_labels, test_labels, pre_sample_dir, cfg.preprocess.seed, timestamp, "s2_manual")
+    save_event_splits(train_labels, val_labels, test_labels, cfg, pre_sample_dir, timestamp, "s2_manual")
 
     # get event directories from the training labels for mean and std calculation
     p = re.compile('label_(\d{8})_(.+).tif')
@@ -753,7 +915,7 @@ def main(cfg: DictConfig) -> None:
     std = np.concatenate([std_spectral, std_dem_slopes, std_binary])
 
     # also store training mean std statistics in file
-    stats_file = pre_sample_dir / f'mean_std_{cfg.preprocess.size}_{cfg.preprocess.samples}.pkl'
+    stats_file = pre_sample_dir / f'mean_std.pkl'
     with open(stats_file, 'wb') as f:
         pickle.dump((mean, std), f)
     logger.info('Training mean and std statistics saved.')
@@ -771,6 +933,22 @@ def main(cfg: DictConfig) -> None:
             sample_patches_parallel(
                 labels, cfg.preprocess.size, cfg.preprocess.samples, output_file,
                 sample_dirs_list, cfg, cfg.preprocess.seed, n_workers
+            )
+        
+        logger.info('Parallel patch sampling complete.')
+    elif cfg.preprocess.method == 'strided':
+        # Process each split using parallel sampling
+        for split_name, labels in [('train', train_labels), ('val', val_labels), ('test', test_labels)]:
+            if len(labels) == 0:
+                logger.warning(f'No labels for {split_name} split, skipping...')
+                continue
+            
+            output_file = pre_sample_dir / f'{split_name}_patches.npy'
+            logger.info(f'Processing {split_name} split with {len(labels)} labels...')
+            
+            sample_patches_parallel_strided(
+                labels, cfg.preprocess.size, cfg.preprocess.stride, output_file,
+                sample_dirs_list, cfg, n_workers
             )
         
         logger.info('Parallel patch sampling complete.')

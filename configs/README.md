@@ -119,8 +119,10 @@ seed: 831002
 save: True
 save_path:
 data:
+    method: "random" # ["random", "strided"]
     size: 64 # pixel width of dataset patches
-    samples: 1000 # 1000
+    samples: 1000 # Number of patches per tile (for "random" method)
+    stride: 5 # Stride for sliding window (for "strided" method)
     channels: "1111111111111111" # Binary string selecting 16 available input channels
                                   # (R, G, B, B08, B11, B12, NDWI, MNDWI, AWEI_sh, AWEI_nsh, DEM, SlopeY, SlopeX, Water, Roads, Flowlines)
     use_weak: False # Use s2_weak (machine labels) vs s2 (manual labels)

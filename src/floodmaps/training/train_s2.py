@@ -1,3 +1,4 @@
+from operator import methodcaller
 import wandb
 import torch
 import logging
@@ -552,20 +553,21 @@ def run_experiment_s2(cfg):
     # dataset and transforms
     print(f"Using {device} device")
     model_name = cfg.model.classifier
+    method = cfg.data.method
     size = cfg.data.size
-    samples = cfg.data.samples
+    sample_param = cfg.data.samples if cfg.data.method == 'random' else cfg.data.stride
     suffix = getattr(cfg.data, 'suffix', '')
     # Use weak labeled dataset if specified, otherwise use manual labeled dataset
     use_weak = getattr(cfg.data, 'use_weak', False)
     dataset_type = 's2_weak' if use_weak else 's2'
     if suffix:
-        sample_dir = Path(cfg.paths.preprocess_dir) / dataset_type / f'samples_{size}_{samples}_{suffix}/'
+        sample_dir = Path(cfg.paths.preprocess_dir) / dataset_type / f'{method}_{size}_{sample_param}_{suffix}/'
     else:
-        sample_dir = Path(cfg.paths.preprocess_dir) / dataset_type / f'samples_{size}_{samples}/'
+        sample_dir = Path(cfg.paths.preprocess_dir) / dataset_type / f'{method}_{size}_{sample_param}/'
 
     # load in mean and std
     channels = [bool(int(x)) for x in cfg.data.channels]
-    with open(sample_dir / f'mean_std_{size}_{samples}.pkl', 'rb') as f:
+    with open(sample_dir / f'mean_std.pkl', 'rb') as f:
         train_mean, train_std = pickle.load(f)
 
         train_mean = torch.from_numpy(train_mean[channels])
@@ -670,6 +672,7 @@ def validate_config(cfg):
         return type(s) == str and len(s) == 16 and all(c in '01' for c in s)
 
     # Add checks
+    assert cfg.data.method in ['random', 'strided'], "Sampling method must be one of ['random', 'strided']"
     assert cfg.save in [True, False], "Save must be a boolean"
     if cfg.train.loss == 'TverskyLoss':
         assert 0.0 <= cfg.train.tversky.alpha <= 1.0, "Tversky alpha must be in [0, 1]"

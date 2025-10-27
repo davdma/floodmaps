@@ -252,19 +252,20 @@ def main(cfg: DictConfig):
     model.eval()
 
     # dataset and transforms
+    method = cfg.data.method
     size = cfg.data.size
-    samples = cfg.data.samples
+    sample_param = cfg.data.samples if cfg.data.method == 'random' else cfg.data.stride
     suffix = getattr(cfg.data, 'suffix', '')
     # Use weak labeled dataset if specified, otherwise use manual labeled dataset
     use_weak = getattr(cfg.data, 'use_weak', False)
     dataset_type = 's2_weak' if use_weak else 's2'
     if suffix:
-        sample_dir = Path(cfg.paths.preprocess_dir) / dataset_type / f'samples_{size}_{samples}_{suffix}/'
+        sample_dir = Path(cfg.paths.preprocess_dir) / dataset_type / f'{method}_{size}_{sample_param}_{suffix}/'
     else:
-        sample_dir = Path(cfg.paths.preprocess_dir) / dataset_type / f'samples_{size}_{samples}/'
+        sample_dir = Path(cfg.paths.preprocess_dir) / dataset_type / f'{method}_{size}_{sample_param}/'
 
     channels = [bool(int(x)) for x in cfg.data.channels]
-    with open(sample_dir / f'mean_std_{size}_{samples}.pkl', 'rb') as f:
+    with open(sample_dir / f'mean_std.pkl', 'rb') as f:
         train_mean, train_std = pickle.load(f)
 
         train_mean = torch.from_numpy(train_mean[channels])

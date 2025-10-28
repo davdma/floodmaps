@@ -625,7 +625,7 @@ def run_experiment_ad(cfg):
 
     # datasets
     train_set = ConditionalSARDataset(sample_dir, typ="train", transform=standardize, random_flip=cfg.data.random_flip,
-                                        seed=cfg.seed+1)
+                                        seed=cfg.seed+1, mmap_mode='r' if cfg.data.mmap else None)
     val_set = ConditionalSARDataset(sample_dir, typ="val", transform=standardize)
     test_set = ConditionalSARDataset(sample_dir, typ="test", transform=standardize) if cfg.eval.mode == 'test' else None
 

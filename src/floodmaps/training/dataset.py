@@ -35,16 +35,17 @@ class ConditionalSARDataset(Dataset):
     seed : int
         Random seed.
     """
-    def __init__(self, sample_dir, typ="train", random_flip=False, transform=None, include_dem=False, seed=3200):
+    def __init__(self, sample_dir, typ="train", random_flip=False, transform=None, include_dem=False, seed=3200, mmap_mode=None):
         self.sample_dir = Path(sample_dir)
         self.typ = typ
         self.random_flip = random_flip
         self.transform = transform
         self.include_dem = include_dem
         self.seed = seed
+        self.mmap_mode = mmap_mode
 
         # first load data in
-        self.dataset = np.load(self.sample_dir / f"{typ}_patches.npy")
+        self.dataset = np.load(self.sample_dir / f"{typ}_patches.npy", mmap_mode=mmap_mode)
         self.speckled = self.dataset[:, :2, :, :]
         self.composite = self.dataset[:, 2:4, :, :]
         # self.dem = self.dataset[:, 4:, :, :]
@@ -120,16 +121,17 @@ class DespecklerSARDataset(Dataset):
     seed : int
         Random seed.
     """
-    def __init__(self, sample_dir, typ="train", random_flip=False, transform=None, include_dem=False, seed=3200):
+    def __init__(self, sample_dir, typ="train", random_flip=False, transform=None, include_dem=False, seed=3200, mmap_mode=None):
         self.sample_dir = Path(sample_dir)
         self.typ = typ
         self.random_flip = random_flip
         self.transform = transform
         self.include_dem = include_dem
         self.seed = seed
+        self.mmap_mode = mmap_mode
 
         # first load data in
-        self.dataset = np.load(self.sample_dir / f"{typ}_patches.npy")
+        self.dataset = np.load(self.sample_dir / f"{typ}_patches.npy", mmap_mode=mmap_mode)
         self.sar = self.dataset[:, :4, :, :]
         self.dem = self.dataset[:, 4:, :, :]
 
@@ -216,15 +218,16 @@ class FloodSampleSARDataset(Dataset):
     supplementary : torch.Tensor
         The TCI (3 channels) + NLCD (1 channel).
     """
-    def __init__(self, sample_dir, channels=[True] * 8, typ="train", random_flip=False, transform=None, seed=3200):
+    def __init__(self, sample_dir, channels=[True] * 8, typ="train", random_flip=False, transform=None, seed=3200, mmap_mode=None):
         self.sample_dir = Path(sample_dir)
         self.channels = channels + [True] * 5 # always keep label, tci, nlcd
         self.typ = typ
         self.random_flip = random_flip
         self.transform = transform
         self.seed = seed
+        self.mmap_mode = mmap_mode
 
-        base = np.load(self.sample_dir / f"{typ}_patches.npy")
+        base = np.load(self.sample_dir / f"{typ}_patches.npy", mmap_mode=mmap_mode)
 
         # One-time channel selection to avoid per-sample advanced indexing copies
         if not all(self.channels):
@@ -320,15 +323,16 @@ class FloodSampleS2Dataset(Dataset):
     supplementary : torch.Tensor
         The TCI (3 channels) + NLCD (1 channel) + SCL (1 channel) = 5 channels.
     """
-    def __init__(self, sample_dir, channels=[True] * 16, typ="train", random_flip=False, transform=None, seed=3200):
+    def __init__(self, sample_dir, channels=[True] * 16, typ="train", random_flip=False, transform=None, seed=3200, mmap_mode=None):
         self.sample_dir = Path(sample_dir)
         self.channels = channels + [True] * 6 # always keep label, tci, nlcd, scl
         self.typ = typ
         self.random_flip = random_flip
         self.transform = transform
         self.seed = seed
+        self.mmap_mode = mmap_mode
 
-        base = np.load(self.sample_dir / f"{typ}_patches.npy")
+        base = np.load(self.sample_dir / f"{typ}_patches.npy", mmap_mode=mmap_mode)
 
         # One-time channel selection to avoid per-sample advanced indexing copies
         if not all(self.channels):

@@ -282,9 +282,9 @@ def test_loop(model, dataloader, device, loss_config, ad_cfg, c, run, epoch):
     metric_collection.reset()
 
     metrics_dict = {
-        'core metrics': core_metrics_dict,
-        'confusion matrix': confusion_matrix_dict,
-        'nlcd metrics': nlcd_metrics_dict
+        'core_metrics': core_metrics_dict,
+        'confusion_matrix': confusion_matrix_dict,
+        'nlcd_metrics': nlcd_metrics_dict
     }
 
     return epoch_vloss, epoch_cls_vloss, metrics_dict
@@ -357,9 +357,9 @@ def evaluate(model, dataloader, device, loss_config, ad_cfg, c):
     metric_collection.reset()
 
     metrics_dict = {
-        'core metrics': core_metrics_dict,
-        'confusion matrix': confusion_matrix_dict,
-        'nlcd metrics': nlcd_metrics_dict
+        'core_metrics': core_metrics_dict,
+        'confusion_matrix': confusion_matrix_dict,
+        'nlcd_metrics': nlcd_metrics_dict
     }
 
     return epoch_vloss, metrics_dict
@@ -451,7 +451,7 @@ def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, a
         fmetrics.save_metrics('val', partition=partition,
                               loss=early_stopper.get_min_validation_loss(),
                               **best_val_metrics)
-        run.summary.update({f'final model {key}': value for key, value in best_val_metrics['core metrics'].items()})
+        run.summary.update({f'final model {key}': value for key, value in best_val_metrics['core_metrics'].items()})
         run.summary[f"best_epoch"] = early_stopper.get_best_epoch()
     else:
         cls_weights = model.classifier.state_dict()
@@ -460,13 +460,13 @@ def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, a
         fmetrics.save_metrics('val', partition=partition,
                               loss=avg_vloss,
                               **val_set_metrics)
-        run.summary.update({f'final model {key}': value for key, value in val_set_metrics['core metrics'].items()})
+        run.summary.update({f'final model {key}': value for key, value in val_set_metrics['core_metrics'].items()})
 
     # for benchmarking purposes
     if cfg.eval.mode == 'test':
         test_loss, test_set_metrics = evaluate(model, test_loader, device, loss_cfg, ad_cfg, c)
         fmetrics.save_metrics('test', partition=partition, loss=test_loss, **test_set_metrics)
-        run.summary.update({f'final model {key}': value for key, value in test_set_metrics['core metrics'].items()})
+        run.summary.update({f'final model {key}': value for key, value in test_set_metrics['core_metrics'].items()})
 
     return cls_weights, ad_weights, fmetrics
 
@@ -733,7 +733,7 @@ def run_experiment_s1(cfg, ad_cfg=None):
     # datasets
     train_set = FloodSampleSARDataset(sample_dir, channels=channels,
                                         typ="train", transform=standardize, random_flip=cfg.data.random_flip,
-                                        seed=cfg.seed+1)
+                                        seed=cfg.seed+1, mmap_mode='r' if cfg.data.mmap else None)
     val_set = FloodSampleSARDataset(sample_dir, channels=channels,
                                     typ="val", transform=standardize)
     test_set = FloodSampleSARDataset(sample_dir, channels=channels,

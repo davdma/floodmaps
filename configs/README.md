@@ -37,11 +37,12 @@ save: true
 save_path: null
 data:
   size: 64
+  method: random
   samples: 1000
-  channels: '11111011111'
+  stride:
+  channels: '1111111111111111'
   use_weak: false
-  suffix: all
-  random_flip: true
+  # ...
 model:
   classifier: unet
   discriminator: null
@@ -122,12 +123,13 @@ data:
     method: "random" # ["random", "strided"]
     size: 64 # pixel width of dataset patches
     samples: 1000 # Number of patches per tile (for "random" method)
-    stride: 5 # Stride for sliding window (for "strided" method)
+    stride: # Stride for sliding window (for "strided" method)
     channels: "1111111111111111" # Binary string selecting 16 available input channels
                                   # (R, G, B, B08, B11, B12, NDWI, MNDWI, AWEI_sh, AWEI_nsh, DEM, SlopeY, SlopeX, Water, Roads, Flowlines)
     use_weak: False # Use s2_weak (machine labels) vs s2 (manual labels)
     suffix: "" # Optional suffix for preprocessing variant datasets
-    random_flip: True
+    random_flip: true
+    mmap: False # Use memory-mapped file loading for large training datasets
 model:
     classifier: "unet" # ['unet', 'unet++']
     discriminator: # ['classifier1', 'classifier2', 'classifier3']
@@ -153,13 +155,13 @@ train:
     LR_scheduler: Constant # ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR']
     LR_patience:
     LR_T_max: 200
-    early_stopping: True
+    early_stopping: true
     patience: 20
     num_workers: 7
     checkpoint:
-        load_chkpt: False # whether to train from a checkpoint specified in load_chkpt_path
+        load_chkpt: false # whether to train from a checkpoint specified in load_chkpt_path
         load_chkpt_path:
-        save_chkpt: True # whether to save checkpoints
+        save_chkpt: true # whether to save checkpoints
         save_chkpt_path:
         save_chkpt_interval: 20 # save checkpoint every N epochs
 eval:
@@ -178,14 +180,17 @@ seed: 831002
 save: False
 save_path:
 data:
+    method: random
     size: 68 # pixel width of dataset patches
     window: 64 # pixel width of model input/output
     samples: 1000 # [250, 500, 1000]
+    stride:
     channels: "11111111" # Binary string selecting 8 available input channels
                          # (VV, VH, DEM, SlopeY, SlopeX, Water, Roads, Flowlines)
     use_lee: False
     suffix: "" # Optional suffix for preprocessing variant datasets
     random_flip: True
+    mmap: False # Use memory-mapped file loading for large training datasets
 model:
     classifier: "unet++" # ['unet', 'unet++']
     weights:
@@ -206,7 +211,7 @@ train:
     use_pos_weight: false  # enable positive class weighting for BCE/BCEDice
     pos_weight:            # null -> auto-compute from train labels; set float to override
     pos_weight_clip: 10.0  # clip auto-computed weight to [1, clip]
-    shift_invariant: True
+    shift_invariant: true
     balance_coeff:
     tversky:
       alpha:
@@ -216,14 +221,14 @@ train:
     LR_scheduler: Constant # ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR']
     LR_patience:
     LR_T_max:
-    early_stopping: True
+    early_stopping: true
     patience: 10
     subset: 0.15
     num_workers: 5
     checkpoint:
-        load_chkpt: False # whether to train from a checkpoint specified in load_chkpt_path
+        load_chkpt: false # whether to train from a checkpoint specified in load_chkpt_path
         load_chkpt_path:
-        save_chkpt: True # whether to save checkpoints
+        save_chkpt: true # whether to save checkpoints
         save_chkpt_path:
         save_chkpt_interval: 20 # save checkpoint every N epochs
 eval:

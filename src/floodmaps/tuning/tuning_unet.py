@@ -22,7 +22,7 @@ def run_s2(parameters, cfg: DictConfig):
     cfg.model.unet.dropout = parameters['dropout']
     fmetrics = run_experiment_s2(cfg)
     results = fmetrics.get_metrics(split='val')
-    return results['core metrics']['val f1']
+    return results['core_metrics']['val f1']
 
 def tuning_s2(cfg: DictConfig) -> None:
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -107,7 +107,7 @@ def run_s1(parameters, cfg: DictConfig):
     ad_cfg = getattr(cfg, 'ad', None)
     fmetrics = run_experiment_s1(cfg, ad_cfg=ad_cfg)
     results = fmetrics.get_metrics(split='val', partition='shift_invariant')
-    return results['core metrics']['val f1']
+    return results['core_metrics']['val f1']
 
 def tuning_s1(cfg: DictConfig) -> None:
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')

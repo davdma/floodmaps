@@ -1,52 +1,56 @@
-import torch
 from torch import nn
 from .blocks import DoubleConv2d, UpConv2d
 
 class UNet(nn.Module):
-    def __init__(self, n_channels, dropout=0.5):
+    """UNet implementation.
+    
+    Parameters
+    ----------
+    n_channels: int
+        Number of input channels
+    num_classes: int
+        Number of output classes (default: 1 for binary segmentation)
+    dropout: float
+        Dropout probability (default: 0.5 to match UNet)
+    nb_filter: list
+        List of filter sizes for the UNet blocks (default: [16, 32, 64, 128, 256])
+    """
+    def __init__(self, n_channels, num_classes=1, dropout=0.5, nb_filter=[16, 32, 64, 128, 256], **kwargs):
         super().__init__()
+        self.num_classes = num_classes
         self.n_channels = n_channels
+        self.nb_filter = nb_filter
 
-        self.conv1 = DoubleConv2d(n_channels, 16)
+        self.conv1 = DoubleConv2d(n_channels, nb_filter[0])
         self.pool1 = nn.MaxPool2d(2)
-        self.drop1 = nn.Dropout(p=dropout)
 
-        self.conv2 = DoubleConv2d(16, 32)
+        self.conv2 = DoubleConv2d(nb_filter[0], nb_filter[1])
         self.pool2 = nn.MaxPool2d(2)
-        self.drop2 = nn.Dropout(p=dropout)
 
-        self.conv3 = DoubleConv2d(32, 64)
+        self.conv3 = DoubleConv2d(nb_filter[1], nb_filter[2])
         self.pool3 = nn.MaxPool2d(2)
-        self.drop3 = nn.Dropout(p=dropout)
+        self.drop3 = nn.Dropout2d(p=dropout)
 
-        self.conv4 = DoubleConv2d(64, 128)
+        self.conv4 = DoubleConv2d(nb_filter[2], nb_filter[3])
         self.pool4 = nn.MaxPool2d(2)
-        self.drop4 = nn.Dropout(p=dropout)
+        self.drop4 = nn.Dropout2d(p=dropout)
 
-        self.convm = DoubleConv2d(128, 256)
+        self.convm = DoubleConv2d(nb_filter[3], nb_filter[4])
 
-        self.upconv4 = UpConv2d(256, 128, dropout=dropout)
-        self.upconv3 = UpConv2d(128, 64, dropout=dropout)
-        self.upconv2 = UpConv2d(64, 32, dropout=dropout)
-        self.upconv1 = UpConv2d(32, 16, dropout=dropout)
+        self.upconv4 = UpConv2d(nb_filter[4], nb_filter[3])
+        self.upconv3 = UpConv2d(nb_filter[3], nb_filter[2])
+        self.upconv2 = UpConv2d(nb_filter[2], nb_filter[1])
+        self.upconv1 = UpConv2d(nb_filter[1], nb_filter[0])
 
         # output layer
-        self.out = nn.Conv2d(16, 1, kernel_size=1)
+        self.out = nn.Conv2d(16, num_classes, kernel_size=1)
 
     def forward(self, x):
         x1 = self.conv1(x)
-        out = self.pool1(x1)
-        out = self.drop1(out)
-        x2 = self.conv2(out)
-        out = self.pool2(x2)
-        out = self.drop2(out)
-        x3 = self.conv3(out)
-        out = self.pool3(x3)
-        out = self.drop3(out)
-        x4 = self.conv4(out)
-        out = self.pool4(x4)
-        out = self.drop4(out)
-        x5 = self.convm(out)
+        x2 = self.conv2(self.pool1(x1))
+        x3 = self.conv3(self.pool2(x2))
+        x4 = self.conv4(self.drop3(self.pool3(x3)))
+        x5 = self.convm(self.drop4(self.pool4(x4)))
 
         x = self.upconv4(x5, x4)
         x = self.upconv3(x, x3)

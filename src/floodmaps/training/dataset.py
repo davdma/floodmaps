@@ -73,11 +73,11 @@ class ConditionalSARDataset(Dataset):
         # add random flips and rotations? Could help prevent learning constant shift...
         if self.random_flip and self.typ == "train":
             # perform the same flip on both the speckled and clean SAR images
-            sar_image, clean_sar_image = self.hv_random_flip(sar_image, clean_sar_image)
+            sar_image, clean_sar_image = self.hv_random_flip_rotate(sar_image, clean_sar_image)
 
         return sar_image, clean_sar_image
 
-    def hv_random_flip(self, x, y):
+    def hv_random_flip_rotate(self, x, y):
         # Random horizontal flipping
         if self.random.random() > 0.5:
             x = torch.flip(x, [2])
@@ -87,6 +87,12 @@ class ConditionalSARDataset(Dataset):
         if self.random.random() > 0.5:
             x = torch.flip(x, [1])
             y = torch.flip(y, [1])
+
+        # Random 90-degree rotations (0, 90, 180, or 270 degrees)
+        k = self.random.randint(0, 3)  # number of 90° rotations
+        if k > 0:
+            x = torch.rot90(x, k, [1, 2])
+            y = torch.rot90(y, k, [1, 2])
 
         return x, y
 
@@ -156,11 +162,11 @@ class DespecklerSARDataset(Dataset):
 
         # add random flips and rotations? Could help prevent learning constant shift...
         if self.random_flip and self.typ == "train":
-            sar_image = self.hv_random_flip(sar_image)
+            sar_image = self.hv_random_flip_rotate(sar_image)
 
         return sar_image
 
-    def hv_random_flip(self, x):
+    def hv_random_flip_rotate(self, x):
         # Random horizontal flipping
         if self.random.random() > 0.5:
             x = torch.flip(x, [2])
@@ -168,6 +174,11 @@ class DespecklerSARDataset(Dataset):
         # Random vertical flipping
         if self.random.random() > 0.5:
             x = torch.flip(x, [1])
+
+        # Random 90-degree rotations (0, 90, 180, or 270 degrees)
+        k = self.random.randint(0, 3)  # number of 90° rotations
+        if k > 0:
+            x = torch.rot90(x, k, [1, 2])
 
         return x
 
@@ -253,11 +264,11 @@ class FloodSampleSARDataset(Dataset):
 
         # add random flips and rotations? Could help prevent learning constant shift...
         if self.random_flip and self.typ == "train":
-            image, label, supplementary = self.hv_random_flip(image, label, supplementary)
+            image, label, supplementary = self.hv_random_flip_rotate(image, label, supplementary)
 
         return image, label, supplementary
 
-    def hv_random_flip(self, x, y, z):
+    def hv_random_flip_rotate(self, x, y, z):
         # Random horizontal flipping
         if self.random.random() > 0.5:
             x = torch.flip(x, [2])
@@ -269,6 +280,13 @@ class FloodSampleSARDataset(Dataset):
             x = torch.flip(x, [1])
             y = torch.flip(y, [1])
             z = torch.flip(z, [1])
+
+        # Random 90-degree rotations (0, 90, 180, or 270 degrees)
+        k = self.random.randint(0, 3)  # number of 90° rotations
+        if k > 0:
+            x = torch.rot90(x, k, [1, 2])
+            y = torch.rot90(y, k, [1, 2])
+            z = torch.rot90(z, k, [1, 2])
 
         return x, y, z
 
@@ -358,11 +376,11 @@ class FloodSampleS2Dataset(Dataset):
 
         # add random flips and rotations? Could help prevent learning constant shift...
         if self.random_flip and self.typ == "train":
-            image, label, supplementary = self.hv_random_flip(image, label, supplementary)
+            image, label, supplementary = self.hv_random_flip_rotate(image, label, supplementary)
 
         return image, label, supplementary
 
-    def hv_random_flip(self, x, y, z):
+    def hv_random_flip_rotate(self, x, y, z):
         # Random horizontal flipping
         if self.random.random() > 0.5:
             x = torch.flip(x, [2])
@@ -374,6 +392,13 @@ class FloodSampleS2Dataset(Dataset):
             x = torch.flip(x, [1])
             y = torch.flip(y, [1])
             z = torch.flip(z, [1])
+
+        # Random 90-degree rotations (0, 90, 180, or 270 degrees)
+        k = self.random.randint(0, 3)  # number of 90° rotations
+        if k > 0:
+            x = torch.rot90(x, k, [1, 2])
+            y = torch.rot90(y, k, [1, 2])
+            z = torch.rot90(z, k, [1, 2])
 
         return x, y, z
 

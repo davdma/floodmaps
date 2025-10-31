@@ -1318,7 +1318,6 @@ def main(cfg: DictConfig) -> None:
 
     rootLogger.debug(f"Number of events already completed: {alr_completed}")
     rootLogger.debug(f"Number of successful events sampled from this run: {count}")
-    return 0
 
 if __name__ == '__main__':
     main()

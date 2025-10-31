@@ -151,7 +151,8 @@ train:
       alpha:
     clip: 1.0
     lr: 0.0057555553918297
-    optimizer: Adam # ['Adam', 'SGD']
+    optimizer: Adam # ['Adam', 'SGD', 'AdamW']
+    weight_decay:
     LR_scheduler: Constant # ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR']
     LR_patience:
     LR_T_max: 200
@@ -217,7 +218,8 @@ train:
       alpha:
     clip: 1.0
     lr: 0.0005913
-    optimizer: Adam # ['Adam', 'SGD']
+    optimizer: Adam # ['Adam', 'SGD', 'AdamW']
+    weight_decay:
     LR_scheduler: Constant # ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR']
     LR_patience:
     LR_T_max:

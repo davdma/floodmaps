@@ -635,7 +635,7 @@ def run_experiment_ad(cfg):
                             num_workers=cfg.train.num_workers,
                             persistent_workers=cfg.train.num_workers>0,
                             pin_memory=True,
-                            shuffle=True,
+                            shuffle=False,
                             drop_last=False)
 
     test_loader = DataLoader(test_set,
@@ -643,7 +643,7 @@ def run_experiment_ad(cfg):
                             num_workers=cfg.train.num_workers,
                             persistent_workers=cfg.train.num_workers>0,
                             pin_memory=True,
-                            shuffle=True,
+                            shuffle=False,
                             drop_last=False) if cfg.eval.mode == 'test' else None
 
     # initialize wandb run

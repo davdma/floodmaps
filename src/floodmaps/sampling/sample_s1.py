@@ -82,6 +82,10 @@ def sar_missing_percentage(stac_provider, item, item_crs, bbox):
 def pipeline_S1(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
     """Generates dB scale raster of SAR data in VV and VH polarizations.
 
+    NOTE: This pipeline only works for Microsoft Planetary Computer RTC S1 data
+    where it is raw intensity. CDSE GRD data is stored as DN in uint16 format which is not
+    compatible here.
+
     Parameters
     ----------
     stac_provider : STACProvider

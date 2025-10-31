@@ -412,18 +412,20 @@ def has_date_after_PRISM(dates: List[datetime], event_date_str: datetime) -> boo
             return True
     return False
 
-def db_scale(x: np.ndarray) -> np.ndarray:
-    """Scales SAR data to dB scale. Sets invalid values to -9999.
+def db_scale(x: np.ndarray, no_data: int = -9999) -> np.ndarray:
+    """Scales SAR data to dB scale. Sets invalid values to no_data.
     
     Parameters
     ----------
     x : np.ndarray
         Array of SAR data.
+    no_data : int
+        No_data value to set invalid values to.
     """
     nonzero_mask = x > 0
     missing_mask = x <= 0
     x[nonzero_mask] = 10 * np.log10(x[nonzero_mask])
-    x[missing_mask] = -9999
+    x[missing_mask] = no_data
     return x
 
 def setup_logging(

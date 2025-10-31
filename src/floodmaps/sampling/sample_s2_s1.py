@@ -1,5 +1,6 @@
 from datetime import datetime
 from pathlib import Path
+import math
 import sys
 import logging
 import numpy as np
@@ -1029,26 +1030,61 @@ def coincident_with(items_s2, item_s1, hours):
         List of S2 Item objects.
     item_s1 : Item
         S1 Item object.
+    hours : float
+        Maximum time difference in hours for coincidence.
 
     Returns
     -------
     datetime
-        The datetime object of the S2 item that the S1 item is coincident with,
+        The datetime object of the closest S2 item within the specified hours,
         otherwise returns None.
     """
     coincident_dt = None
+    min_time_difference = None
     dt_sar = item_s1.datetime
+    
     for s2 in items_s2:
         dt_s2 = s2.datetime
         time_difference = abs(dt_sar - dt_s2)
         hours_difference = time_difference.total_seconds() / 3600
+        
         if hours_difference < hours:
-            coincident_dt = dt_s2
-            break
+            if min_time_difference is None or time_difference < min_time_difference:
+                min_time_difference = time_difference
+                coincident_dt = dt_s2
+    
     return coincident_dt
+
+def is_coincident(target_item, lst_items, hours):
+    """Checks if the target item is coincident with any of the list of items within given number of hours.
+
+    Parameters
+    ----------
+    target_item : Item
+        Target item to check for coincidence.
+    lst_items : list[Item]
+        List of items to check for coincidence.
+    hours : int
+        Number of hours to check for coincidence.
+
+    Returns
+    -------
+    bool
+        True if the target item is coincident with any of the list of items within given number of hours, False otherwise.
+    """
+    for item in lst_items:
+        time_difference = abs(target_item.datetime - item.datetime)
+        hours_difference = time_difference.total_seconds() / 3600
+        if hours_difference < hours:
+            return True
+    return False
 
 def pipeline_S1(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
     """Generates dB scale raster of SAR data in VV and VH polarizations.
+
+    NOTE: This pipeline only works for Microsoft Planetary Computer RTC S1 data
+    where it is raw intensity. CDSE GRD data is stored as DN in uint16 format which is not
+    compatible here.
 
     Parameters
     ----------
@@ -1082,11 +1118,11 @@ def pipeline_S1(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
     out_image_vh, out_transform_vh = crop_to_bounds(item_hrefs_vh, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
 
     with rasterio.open(dir_path / f'{save_as}_vv.tif', 'w', driver='Gtiff', count=1, height=out_image_vv.shape[-2], width=out_image_vv.shape[-1], crs=dst_crs, dtype=out_image_vv.dtype, transform=out_transform_vv, nodata=-9999) as dst:
-        db_vv = db_scale(out_image_vv[0])
+        db_vv = db_scale(out_image_vv[0], no_data=-9999)
         dst.write(db_vv, 1)
 
     with rasterio.open(dir_path / f'{save_as}_vh.tif', 'w', driver='Gtiff', count=1, height=out_image_vh.shape[-2], width=out_image_vh.shape[-1], crs=dst_crs, dtype=out_image_vh.dtype, transform=out_transform_vh, nodata=-9999) as dst:
-        db_vh = db_scale(out_image_vh[0])
+        db_vh = db_scale(out_image_vh[0], no_data=-9999)
         dst.write(db_vh, 1)
 
     # color maps
@@ -1099,7 +1135,7 @@ def pipeline_S1(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
     with rasterio.open(dir_path / f'{save_as}_vh_cmap.tif', 'w', driver='Gtiff', count=3, height=img_vh_cmap.shape[-2], width=img_vh_cmap.shape[-1], crs=dst_crs, dtype=np.uint8, transform=out_transform_vh, nodata=None) as dst:
         dst.write(img_vh_cmap)
 
-def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_path: Path, cfg, manual_crs=None):
+def event_sample(s2_stac_provider, s1_stac_provider, event_date, event_precip, prism_bbox, eid, dir_path: Path, cfg, manual_crs=None):
     """Samples S2 and S1 coincident imagery for a high precipitation event based on parameters and generates accompanying rasters.
 
     Note to developers: the script simplifies normalization onto a consistent grid by finding any common CRS shared by S2 and S1 products.
@@ -1110,8 +1146,10 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
 
     Parameters
     ----------
-    stac_provider : STACProvider
-        STAC provider object.
+    s2_stac_provider : STACProvider
+        STAC provider object for Sentinel-2 data.
+    s1_stac_provider : STACProvider
+        STAC provider object for Sentinel-1 SAR data.
     event_date : str
         Date of high precipitation event in format YYYYMMDD.
     event_precip: float
@@ -1149,12 +1187,12 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
     bbox = (conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1])
     event_dir_path = dir_path / eid
     time_of_interest = get_date_interval(event_date, cfg.sampling.before, cfg.sampling.after)
-    time_of_interest_sar = get_date_interval(event_date, 0, cfg.sampling.after + 1)
+    time_of_interest_sar = get_date_interval(event_date, cfg.sampling.before, cfg.sampling.after + math.ceil(cfg.sampling.within_hours / 24))
 
     # STAC catalog search
     logger.info('Beginning catalog search...')
-    items_s2 = stac_provider.search_s2(bbox, time_of_interest)
-    items_s1 = stac_provider.search_s1(bbox, time_of_interest_sar, query={"sar:instrument_mode": {"eq": "IW"}})
+    items_s2 = s2_stac_provider.search_s2(bbox, time_of_interest)
+    items_s1 = s1_stac_provider.search_s1(bbox, time_of_interest_sar, query={"sar:instrument_mode": {"eq": "IW"}})
 
     logger.info('Filtering catalog search results...')
     if len(items_s2) == 0 or len(items_s1) == 0:
@@ -1163,21 +1201,31 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
         if len(items_s1) == 0:
             logger.info(f'No S1 products found for date interval {time_of_interest}.')
         return False
-    elif not has_date_after_PRISM([item.datetime for item in items_s2], event_date):
-        logger.info(f'Products found but only before precipitation event date {event_date}.')
-        return False
     elif not coincident_items(items_s2, items_s1, cfg.sampling.within_hours):
         logger.info(f'No coincident S1 and S2 products found within {cfg.sampling.within_hours} hours of each other.')
         return False
+    
+    # pair off s2 and s1 products, get rid of any items that have not been paired off
+    s2_items_paired = []
+    for item_s2 in items_s2:
+        if is_coincident(item_s2, items_s1, cfg.sampling.within_hours):
+            logger.debug(f'S2 product {item_s2.id} is coincident with an S1 product')
+            s2_items_paired.append(item_s2)
+    s1_items_paired = []
+    for item_s1 in items_s1:
+        if is_coincident(item_s1, s2_items_paired, cfg.sampling.within_hours):
+            logger.debug(f'S1 product {item_s1.id} is coincident with an S2 product')
+            s1_items_paired.append(item_s1)
 
     # filter out s2 cloudy/missing tiles and group items by dates in dictionary
     logger.info(f'Checking s2 cloud null percentage...')
     s2_by_date_crs = DateCRSOrganizer()
-    for item in items_s2:
+    for item in s2_items_paired:
         # filter out those w/ cloud null via cloud null percentage checks
         item_crs = get_item_crs(item)
         try:
-            coverpercentage = cloud_null_percentage(stac_provider, item, item_crs, prism_bbox)
+            coverpercentage = cloud_null_percentage(s2_stac_provider, item, item_crs, prism_bbox)
+            logger.info(f'Cloud null percentage for item {item.id}: {coverpercentage}')
         except Exception as err:
             logger.exception(f'Cloud null percentage calculation error for item {item.id}.')
             raise err
@@ -1193,9 +1241,6 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
     if s2_by_date_crs.is_empty():
         logger.debug(f'No s2 images left after filtering...')
         return False
-    elif not has_date_after_PRISM(s2_dates, event_date):
-        logger.debug(f'No s2 images post event date after filtering...')
-        return False
 
     # either use specified CRS or choose first CRS in alphabetical order for rasters
     main_crs = s2_by_date_crs.get_all_crs()[0] if manual_crs is None else manual_crs
@@ -1206,7 +1251,7 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
     s1_by_date_crs = DateCRSOrganizer()
     # peak ahead at the s2 items that will be selected with our crs
     s2_items_used = s2_by_date_crs.get_all_primary_items(preferred_crs=main_crs)
-    for item in items_s1:
+    for item in s1_items_paired:
         item_crs = get_item_crs(item)
 
         # filter out non coincident sar products with s2 products we've selected
@@ -1216,7 +1261,7 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
             continue
 
         try:
-            coverpercentage = sar_missing_percentage(stac_provider, item, item_crs, prism_bbox)
+            coverpercentage = sar_missing_percentage(s1_stac_provider, item, item_crs, prism_bbox)
         except Exception as err:
             logger.exception(f'Missing percentage calculation error for item {item.id}.')
             raise err
@@ -1256,19 +1301,19 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
             # use one item for date in preferred CRS
             item = s2_by_date_crs.get_primary_item_for_date(date, preferred_crs=main_crs)
 
-            dst_shape, dst_transform = pipeline_TCI(stac_provider, event_dir_path, f'tci_{dt}_{eid}', main_crs, item, cbbox)
+            dst_shape, dst_transform = pipeline_TCI(s2_stac_provider, event_dir_path, f'tci_{dt}_{eid}', main_crs, item, cbbox)
             logger.debug(f'TCI raster completed for {dt}.')
-            pipeline_RGB(stac_provider, event_dir_path, f'rgb_{dt}_{eid}', main_crs, item, cbbox)
+            pipeline_RGB(s2_stac_provider, event_dir_path, f'rgb_{dt}_{eid}', main_crs, item, cbbox)
             logger.debug(f'RGB raster completed for {dt}.')
-            pipeline_B08(stac_provider, event_dir_path, f'b08_{dt}_{eid}', main_crs, item, cbbox)
+            pipeline_B08(s2_stac_provider, event_dir_path, f'b08_{dt}_{eid}', main_crs, item, cbbox)
             logger.debug(f'B08 raster completed for {dt}.')
-            pipeline_B11(stac_provider, event_dir_path, f'b11_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox)
+            pipeline_B11(s2_stac_provider, event_dir_path, f'b11_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox)
             logger.debug(f'B11 raster completed for {dt}.')
-            pipeline_B12(stac_provider, event_dir_path, f'b12_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox)
+            pipeline_B12(s2_stac_provider, event_dir_path, f'b12_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox)
             logger.debug(f'B12 raster completed for {dt}.')
-            pipeline_NDWI(stac_provider, event_dir_path, f'ndwi_{dt}_{eid}', main_crs, item, cbbox)
+            pipeline_NDWI(s2_stac_provider, event_dir_path, f'ndwi_{dt}_{eid}', main_crs, item, cbbox)
             logger.debug(f'NDWI raster completed for {dt}.')
-            pipeline_SCL(stac_provider, event_dir_path, f'scl_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox)
+            pipeline_SCL(s2_stac_provider, event_dir_path, f'scl_{dt}_{eid}', dst_shape, main_crs, dst_transform, item, cbbox)
             logger.debug(f'SCL raster completed for {dt}.')
 
             # record S2 product ID for this date
@@ -1285,7 +1330,7 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
             item = s1_by_date_crs.get_primary_item_for_date(date, preferred_crs=main_crs)
             dt = item.datetime.strftime('%Y%m%d')
 
-            pipeline_S1(stac_provider, event_dir_path, f'sar_{cdt}_{dt}_{eid}', main_crs, item, cbbox)
+            pipeline_S1(s1_stac_provider, event_dir_path, f'sar_{cdt}_{dt}_{eid}', main_crs, item, cbbox)
             logger.debug(f'S1 raster completed for {dt} coincident with S2 product at {cdt}.')
 
             # record S1 product ID for coincident date
@@ -1337,7 +1382,8 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
         "S1 Products": s1_date_to_product,
         "S2, S1 Coincident Within (hours)": cfg.sampling.within_hours,
         "Max Cloud/Nodata Cover Percentage (%)": cfg.sampling.maxcoverpercentage,
-        "Source": cfg.sampling.source
+        "S2 Source": cfg.sampling.s2_source,
+        "S1 Source": cfg.sampling.s1_source
     }
 
     with open(event_dir_path / 'metadata.json', "w") as json_file:
@@ -1349,8 +1395,11 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
 def run_sample_s2_s1(cfg: DictConfig) -> None:
     """
     Samples imagery of events queried from PRISM using a given minimum precipitation threshold.
-    Downloaded samples will contain multispectral data and sar data from within specified interval of event date,
-    their respective NDWI rasters. Samples will also have a raster of roads from TIGER roads dataset, DEM raster from USGS,
+    Downloaded samples will contain multispectral data and sar data from within specified interval of event date between
+    event date - before days, event date + after days]. It will find S2 and S1 product pairs that are coincident within
+    X hours of each other, and download each pair. 
+    
+    Samples will also have a raster of roads from TIGER roads dataset, DEM raster from USGS,
     flowlines and waterbody rasters from NHDPlus dataset. All rasters will be approximately 4km x 4km at 10m resolution.
 
     Manual file
@@ -1398,7 +1447,8 @@ def run_sample_s2_s1(cfg: DictConfig) -> None:
         f"  S1 and S2 coincidence must be within # hours: {cfg.sampling.within_hours}\n"
         f"  Region: {cfg.sampling.region}\n"
         f"  Manual indices: {cfg.sampling.manual}\n"
-        f"  Source: {cfg.sampling.source}\n"
+        f"  S2 Source: {cfg.sampling.s2_source}\n"
+        f"  S1 Source: {cfg.sampling.s1_source}\n"
     )
 
     # history set of tuples
@@ -1423,8 +1473,13 @@ def run_sample_s2_s1(cfg: DictConfig) -> None:
     alr_completed = 0
     try:
         rootLogger.info(f"Searching through {num_candidates} candidate indices/events...")
-        # get stac provider
-        stac_provider = get_stac_provider(cfg.sampling.source.lower(),
+        # get stac providers
+        s2_stac_provider = get_stac_provider(cfg.sampling.s2_source.lower(),
+                                        mpc_api_key=getattr(cfg, "mpc_api_key", None),
+                                        aws_access_key_id=getattr(cfg, "aws_access_key_id", None),
+                                        aws_secret_access_key=getattr(cfg, "aws_secret_access_key", None),
+                                        logger=logger)
+        s1_stac_provider = get_stac_provider(cfg.sampling.s1_source.lower(),
                                         mpc_api_key=getattr(cfg, "mpc_api_key", None),
                                         aws_access_key_id=getattr(cfg, "aws_access_key_id", None),
                                         aws_secret_access_key=getattr(cfg, "aws_secret_access_key", None),
@@ -1442,7 +1497,7 @@ def run_sample_s2_s1(cfg: DictConfig) -> None:
             max_attempts = 3
             for attempt in range(1, max_attempts + 1):
                 try:
-                    if event_sample(stac_provider, event_date, event_precip,
+                    if event_sample(s2_stac_provider, s1_stac_provider, event_date, event_precip,
                                 prism_bbox, eid, Path(cfg.sampling.dir_path), cfg,
                                 manual_crs=crs):
                         count += 1

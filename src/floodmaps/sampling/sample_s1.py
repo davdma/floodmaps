@@ -15,7 +15,7 @@ import sys
 import hydra
 from omegaconf import DictConfig
 
-from floodmaps.utils.sampling_utils import PRISM_CRS, SEARCH_CRS, db_scale, setup_logging, colormap_to_rgb, crop_to_bounds, DateCRSOrganizer, get_item_crs
+from floodmaps.utils.sampling_utils import PRISM_CRS, SEARCH_CRS, db_scale, setup_logging, colormap_to_rgb, crop_to_bounds, DateCRSOrganizer, get_item_crs, MissingAssetError
 from floodmaps.utils.stac_providers import get_stac_provider
 from floodmaps.utils.validate import validate_event_rasters
 
@@ -71,6 +71,10 @@ def get_date_interval(event_dt, latest_dt, days_after):
 def sar_missing_percentage(stac_provider, item, item_crs, bbox):
     """Calculates the percentage of pixels in the bounding box of the SAR image that are missing."""
     vv_name = stac_provider.get_asset_names("s1")["vv"]
+    
+    if vv_name not in item.assets:
+        raise MissingAssetError(f"Asset '{vv_name}' not found in S1 item {item.id}")
+    
     item_href = stac_provider.sign_asset_href(item.assets[vv_name].href)
 
     conversion = transform(PRISM_CRS, item_crs, (bbox[0], bbox[2]), (bbox[1], bbox[3]))
@@ -111,6 +115,12 @@ def pipeline_S1(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
     """
     vv_name = stac_provider.get_asset_names("s1")["vv"]
     vh_name = stac_provider.get_asset_names("s1")["vh"]
+    
+    if vv_name not in item.assets:
+        raise MissingAssetError(f"Asset '{vv_name}' not found in S1 item {item.id}")
+    if vh_name not in item.assets:
+        raise MissingAssetError(f"Asset '{vh_name}' not found in S1 item {item.id}")
+    
     item_hrefs_vv = stac_provider.sign_asset_href(item.assets[vv_name].href)
     item_hrefs_vh = stac_provider.sign_asset_href(item.assets[vh_name].href)
 
@@ -233,6 +243,9 @@ def downloadS1(stac_provider, sample: Path, cfg):
 
         try:
             coverpercentage = sar_missing_percentage(stac_provider, item, item_crs, prism_bbox)
+        except MissingAssetError as err:
+            logger.error(f'Missing required asset in item {item.id}: {err}')
+            continue
         except Exception as err:
             logger.error(f'Missing percentage calculation error for item {item.id}: {err}, {type(err)}')
             raise err
@@ -258,8 +271,12 @@ def downloadS1(stac_provider, sample: Path, cfg):
         item = s1_by_date_crs.get_primary_item_for_date(date, preferred_crs=crs)
         dt = item.datetime.strftime('%Y%m%d')
 
-        pipeline_S1(stac_provider, sample, f'sar_{cdt}_{dt}_{eid}', crs, item, cbbox)
-        logger.debug(f'S1 raster completed for {dt} coincident with S2 product at {cdt}.')
+        try:
+            pipeline_S1(stac_provider, sample, f'sar_{cdt}_{dt}_{eid}', crs, item, cbbox)
+            logger.debug(f'S1 raster completed for {dt} coincident with S2 product at {cdt}.')
+        except MissingAssetError as err:
+            logger.error(f'Missing required asset: {err}. Skipping SAR download for date {cdt}.')
+            continue
             
     logger.debug(f'All S1 rasters downloaded.')
 

@@ -41,7 +41,8 @@ from floodmaps.utils.sampling_utils import (
     colormap_to_rgb,
     NoElevationError,
     crop_to_bounds,
-    get_item_crs
+    get_item_crs,
+    MissingAssetError
 )
 from floodmaps.utils.stac_providers import get_stac_provider
 from floodmaps.utils.validate import validate_event_rasters
@@ -141,6 +142,10 @@ def GetHU4Codes(prism_bbox, cfg):
 def null_percentage(stac_provider, item, item_crs, bbox):
     """Calculates the percentage of pixels in the bounding box of the S2 image that are missing."""
     b02_name = stac_provider.get_asset_names("s2")["B02"]
+    
+    if b02_name not in item.assets:
+        raise MissingAssetError(f"Asset '{b02_name}' not found in S2 item {item.id}")
+    
     item_href = stac_provider.sign_asset_href(item.assets[b02_name].href)
 
     conversion = transform(PRISM_CRS, item_crs, (bbox[0], bbox[2]), (bbox[1], bbox[3]))
@@ -171,6 +176,10 @@ def scl_class_percentage(stac_provider, item, item_crs, bbox, scl_classes):
         Percentage of pixels matching the specified SCL classes.
     """
     scl_name = stac_provider.get_asset_names("s2")["SCL"]
+    
+    if scl_name not in item.assets:
+        raise MissingAssetError(f"Asset '{scl_name}' not found in S2 item {item.id}")
+    
     item_href = stac_provider.sign_asset_href(item.assets[scl_name].href)
 
     conversion = transform(PRISM_CRS, item_crs, (bbox[0], bbox[2]), (bbox[1], bbox[3]))
@@ -207,6 +216,10 @@ def pipeline_TCI(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
         Transformation matrix for mapping pixel coordinates in dest to coordinate system.
     """
     visual_name = stac_provider.get_asset_names("s2")["visual"]
+    
+    if visual_name not in item.assets:
+        raise MissingAssetError(f"Asset '{visual_name}' not found in S2 item {item.id}")
+    
     item_href = stac_provider.sign_asset_href(item.assets[visual_name].href)
 
     out_image, out_transform = crop_to_bounds(item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
@@ -240,6 +253,10 @@ def pipeline_SCL(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst
         should be in CRS specified by dst_crs.
     """
     scl_name = stac_provider.get_asset_names("s2")["SCL"]
+    
+    if scl_name not in item.assets:
+        raise MissingAssetError(f"Asset '{scl_name}' not found in S2 item {item.id}")
+    
     item_href = stac_provider.sign_asset_href(item.assets[scl_name].href)
 
     # Single-step resampling directly to TCI grid for perfect pixel alignment
@@ -293,6 +310,14 @@ def pipeline_RGB(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
     b02_name = stac_provider.get_asset_names("s2")["B02"]
     b03_name = stac_provider.get_asset_names("s2")["B03"]
     b04_name = stac_provider.get_asset_names("s2")["B04"]
+    
+    if b02_name not in item.assets:
+        raise MissingAssetError(f"Asset '{b02_name}' not found in S2 item {item.id}")
+    if b03_name not in item.assets:
+        raise MissingAssetError(f"Asset '{b03_name}' not found in S2 item {item.id}")
+    if b04_name not in item.assets:
+        raise MissingAssetError(f"Asset '{b04_name}' not found in S2 item {item.id}")
+    
     b02_item_href = stac_provider.sign_asset_href(item.assets[b02_name].href) # B
     b03_item_href = stac_provider.sign_asset_href(item.assets[b03_name].href) # G
     b04_item_href = stac_provider.sign_asset_href(item.assets[b04_name].href) # R
@@ -327,6 +352,10 @@ def pipeline_B08(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
         should be in CRS specified by dst_crs.
     """
     b08_name = stac_provider.get_asset_names("s2")["B08"]
+    
+    if b08_name not in item.assets:
+        raise MissingAssetError(f"Asset '{b08_name}' not found in S2 item {item.id}")
+    
     item_href = stac_provider.sign_asset_href(item.assets[b08_name].href)
 
     out_image, out_transform = crop_to_bounds(item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
@@ -358,6 +387,10 @@ def pipeline_B11(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst
         should be in CRS specified by dst_crs.
     """
     b11_name = stac_provider.get_asset_names("s2")["B11"]
+    
+    if b11_name not in item.assets:
+        raise MissingAssetError(f"Asset '{b11_name}' not found in S2 item {item.id}")
+    
     item_href = stac_provider.sign_asset_href(item.assets[b11_name].href)
 
     # Single-step resampling directly to TCI grid for perfect pixel alignment
@@ -387,7 +420,7 @@ def pipeline_B12(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst
     stac_provider : STACProvider
         STAC provider object.
     dir_path : Path
-        Path for saving generated raster. 
+        Path for saving generated raster.
     save_as : str
         Name of file to be saved (do not include extension!).
     dst_shape : (int, int)
@@ -403,6 +436,10 @@ def pipeline_B12(stac_provider, dir_path: Path, save_as, dst_shape, dst_crs, dst
         should be in CRS specified by dst_crs.
     """
     b12_name = stac_provider.get_asset_names("s2")["B12"]
+    
+    if b12_name not in item.assets:
+        raise MissingAssetError(f"Asset '{b12_name}' not found in S2 item {item.id}")
+    
     item_href = stac_provider.sign_asset_href(item.assets[b12_name].href)
 
     # Single-step resampling directly to TCI grid for perfect pixel alignment
@@ -445,6 +482,12 @@ def pipeline_NDWI(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
     """
     b03_name = stac_provider.get_asset_names("s2")["B03"]
     b08_name = stac_provider.get_asset_names("s2")["B08"]
+    
+    if b03_name not in item.assets:
+        raise MissingAssetError(f"Asset '{b03_name}' not found in S2 item {item.id}")
+    if b08_name not in item.assets:
+        raise MissingAssetError(f"Asset '{b08_name}' not found in S2 item {item.id}")
+    
     b03_item_href = stac_provider.sign_asset_href(item.assets[b03_name].href)
 
     out_image1, _ = crop_to_bounds(b03_item_href, bbox, dst_crs, nodata=0, resampling=Resampling.bilinear)
@@ -1382,6 +1425,10 @@ def main(cfg: DictConfig) -> None:
                         rootLogger.info(f'Retrying ({attempt}/{max_attempts})...')
                 except NoElevationError as err:
                     rootLogger.error(f'Elevation file missing, skipping event...')
+                    history.add(indices)
+                    break
+                except MissingAssetError as err:
+                    rootLogger.error(f'Missing required asset: {err}. Skipping event...')
                     history.add(indices)
                     break
                 except Exception as err:

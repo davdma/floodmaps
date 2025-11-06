@@ -85,6 +85,10 @@ SCL_CODE_TO_RGB = {
     for code, hex_color in SCL_COLORS.items()
 }
 
+class MissingAssetError(Exception):
+    """Raised when a required asset is not found in a STAC item."""
+    pass
+
 @dataclass
 class PRISMData:
     """Container for PRISM netCDF data."""

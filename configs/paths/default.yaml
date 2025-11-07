@@ -9,7 +9,7 @@ output_dir: ${.base_dir}/outputs
 ### Sampling data paths
 # data folders
 supplementary_dir: ${.data_dir}/supplementary
-imagery_dir: ${.data_dir}/imagery
+imagery_dir: ${.data_dir}/imagery_swir
 setup_dir: ${.data_dir}/setup
 shape_dir: ${.data_dir}/shapes
 labels_dir: ${.data_dir}/labels
@@ -33,6 +33,7 @@ checkpoint_dir: ${.output_dir}/chkpt
 experiment_dir: ${.output_dir}/experiments
 benchmarks_dir: ${.output_dir}/benchmarks
 tuning_dir: ${.output_dir}/tuning
+analysis_dir: ${.output_dir}/analysis
 
 ### Model paths
 model_dir: ${.data_dir}/models

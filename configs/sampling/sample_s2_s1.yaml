@@ -8,4 +8,5 @@ within_hours: 12 # floods event must have S1 and S2 data within this many hours
 region: None # filter precipitation only from supported regions: ["ceser"]
 config_file: None # specify a custom configuration file path
 manual: None # text file for parsing manual event indices with format: time, y, x
-source: mpc # specify a provider (Microsoft Planetary Computer, AWS) for the ESA data ['mpc', 'aws']
+s2_source: mpc # specify a provider for s2 data (Microsoft Planetary Computer, AWS) for the ESA data ['mpc', 'aws', 'cdse']
+s1_source: mpc # specify a provider for s1 data (Microsoft Planetary Computer, AWS) for the ESA data ['mpc', 'aws', 'cdse']

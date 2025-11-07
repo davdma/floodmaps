@@ -60,7 +60,13 @@ As a result, we were able to produce 111+ 4km 4km manually labeled flood tiles s
 
 Given that each of the 111+ labeled tiles produced are around 400 x 400 in size, we needed a patching strategy to break these tiles down into digestable patches (e.g. of size 64 x 64) that the model can train on. An initial exploratory [notebook](notebooks/unet.ipynb) found that discretely patching the tile (zero overlap) performed much worse than a random sampling strategy where 500 64 x 64 patches were randomly chosen from the larger tile to be added to the dataset.
 
-However, the random sampling strategy also has its pitfalls. Since patches sampled must fall within bounds, random sampling has a bias towards the interior of the tile over the edges. Another issue was choosing the number of patches to sample from each tile, as it was easy to oversample patches and create redundancy in the dataset. After running benchmarks on different strategies, we ultimately found that a **strided patch sampling strategy** outperformed random patch sampling with a stride of 16 being the most optimal.
+However, the random sampling strategy also has its pitfalls. Since patches sampled must fall within bounds, random sampling has a bias towards the interior of the tile over the edges. Furthermore, when choosing the number of patches to sample it was hard not to oversample and create redundancy (too many similar patches) in the dataset. After running benchmarks on different strategies, we ultimately found that a **strided patch sampling strategy** outperformed random patch sampling with a **stride of 16** being the most optimal.
+
+<div align="center">
+<img width="75%" alt="sampling_benchmarks" src="https://github.com/user-attachments/assets/fb13a9fe-b3a7-4fbc-bae4-787c8111227e" />
+<p style="width: 60%; margin: 0 auto;"><em>Figure 2.4: Benchmarked metrics of UNet trained on the same S2 dataset across different patching strategies. For random sampling, `N` is the number of patches sampled from each tile with uniform distribution across coordinates. For strided sampling, `S` is the stride of individual patches across the tile.
+</em></p>
+</div>
 
 ## S2 Model
 For our water pixel detection model, we tested multiple built-in architectures that have been used in the flood modelling literature extensively, most commonly UNet and UNet++. Our model input consists of the RGB spectral bands, the NIR B8 band, the SWIR B11-12 bands, water indices like NDWI, MNDWI, AWEI, as well as the option of selecting additional channels such as the Digital Elevation Map (DEM), slope, roads, waterbodies, and flowlines.

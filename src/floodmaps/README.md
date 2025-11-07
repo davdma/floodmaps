@@ -7,6 +7,7 @@ This directory contains the complete machine learning pipeline for training floo
 ## Directory Structure
 ```
 floodmaps/
+├── analysis/             # Permutation importance, model analyses
 ├── benchmarking/         # Multi-trial statistical evaluation
 ├── inference/            # Inference floodmaps from areas of interest
 ├── models/               # Model architectures and utilities
@@ -22,7 +23,7 @@ floodmaps/
 ### Prerequisites
 1. **Environment**: Python environment with `torch`, `wandb`, `hydra`, and other dependencies installed via `envs/` conda environment yml files
 2. **Wandb Account**: For experiment tracking and visualization
-3. **API Key(s)**: Needed if using the repo to download new satellite data using Microsoft PlanetarySTAC or AWS S3 bucket
+3. **API Key(s)**: Needed if using the repo to download new satellite data using Microsoft PlanetarySTAC (recommended) or Copernicus STAC or AWS S3 bucket
 
 ### Workflow
 ```

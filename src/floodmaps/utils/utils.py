@@ -120,8 +120,18 @@ class ChannelIndexer:
     """
     def __init__(self, channels):
         self.channels = channels
-        self.names = names = ["rgb", "nir", "swir1", "swir2", "ndwi", "mndwi", "awei_sh", "awei_nsh", 
-                               "dem", "slope_y", "slope_x", "waterbody", "roads", "flowlines"]
+        self.channel_names = ["red", "green", "blue", "nir", "swir1", "swir2", "ndwi", "mndwi",
+                            "awei_sh", "awei_nsh", "dem", "slope_y", "slope_x", "waterbody",
+                            "roads", "flowlines"]
+    
+    def has_red(self):
+        return self.channels[0]
+
+    def has_green(self):
+        return self.channels[1]
+
+    def has_blue(self):
+        return self.channels[2]
 
     def has_rgb(self):
         return all(self.channels[:3])
@@ -166,7 +176,7 @@ class ChannelIndexer:
         return self.channels[15]
 
     def get_channel_names(self):
-        return self.names
+        return self.channel_names
 
     def get_display_channels(self):
         """Channels specifically for sampling predictions."""
@@ -189,6 +199,11 @@ class ChannelIndexer:
         if self.has_flowlines():
             display_names.append("flowlines")
         return display_names
+    
+    def get_name_to_index(self):
+        """Return dictionary mapping channel name to input index."""
+        filtered_channels = [channel_name for channel_name, include in zip(self.channel_names, self.channels) if include]
+        return {channel_name: idx for idx, channel_name in enumerate(filtered_channels)}
 
 
 class ChannelIndexerDeprecated:
@@ -267,7 +282,7 @@ class SARChannelIndexer:
     """
     def __init__(self, channels):
         self.channels = channels
-        self.names = names = ["vv", "vh", "dem", "slope_y", "slope_x", "waterbody", "roads", "flowlines"]
+        self.channel_names = ["vv", "vh", "dem", "slope_y", "slope_x", "waterbody", "roads", "flowlines"]
 
     def has_vv(self):
         return self.channels[0]
@@ -294,10 +309,14 @@ class SARChannelIndexer:
         return self.channels[7]
 
     def get_channel_names(self):
-        return self.names
+        return self.channel_names
     
     def get_display_channels(self):
-        return [name for name, include in zip(self.names, self.channels) if include]
+        return [name for name, include in zip(self.channel_names, self.channels) if include]
+
+    def get_name_to_index(self):
+        """Return dictionary mapping channel name to input index."""
+        return list(range())
 
 def flatten_dict(d, parent_key='', sep='.'):
     """

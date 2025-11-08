@@ -182,21 +182,8 @@ def run_permutation_importance(cfg):
 
     standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
 
-    # train set loaded just to calculate pos weight for loss function
-    train_set = FloodSampleS2Dataset(sample_dir, channels=channels,
-                                    typ="train", transform=standardize,
-                                    mmap_mode='r' if cfg.data.mmap else None)
-
     test_set = FloodSampleS2Dataset(sample_dir, channels=channels,
                                     typ="test", transform=standardize)
-    
-    train_loader = DataLoader(train_set,
-                             batch_size=cfg.train.batch_size,
-                             num_workers=cfg.train.num_workers,
-                             persistent_workers=cfg.train.num_workers>0,
-                             pin_memory=True,
-                             shuffle=False,
-                             drop_last=False)
 
     test_loader = DataLoader(test_set,
                             batch_size=cfg.train.batch_size,
@@ -212,6 +199,17 @@ def run_permutation_importance(cfg):
         if getattr(cfg.train, 'pos_weight', None) is not None:
             pos_weight_val = float(cfg.train.pos_weight)
         else:
+            # train set loaded just to calculate pos weight for loss function
+            train_set = FloodSampleS2Dataset(sample_dir, channels=channels,
+                                            typ="train", transform=standardize,
+                                            mmap_mode='r' if cfg.data.mmap else None)
+            train_loader = DataLoader(train_set,
+                             batch_size=cfg.train.batch_size,
+                             num_workers=cfg.train.num_workers,
+                             persistent_workers=cfg.train.num_workers>0,
+                             pin_memory=True,
+                             shuffle=False,
+                             drop_last=False)
             label_np = train_loader.dataset.dataset[:, -6, :, :]
             pos = float(label_np.sum())
             total = float(label_np.size)

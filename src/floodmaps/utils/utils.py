@@ -176,7 +176,9 @@ class ChannelIndexer:
         return self.channels[15]
 
     def get_channel_names(self):
-        return self.channel_names
+        """Get list of channel names included in this configuration.
+        Can index the list to get the channel name of the configuration given channel index."""
+        return [channel_name for channel_name, include in zip(self.channel_names, self.channels) if include]
 
     def get_display_channels(self):
         """Channels specifically for sampling predictions."""

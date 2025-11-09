@@ -24,7 +24,7 @@ What it does:
 * Additional water indices such as Modified Normalized Difference Water Index (MNDWI) and Automated Water Extraction Index (AWEI) are also added later during the preprocessing stage.
 
 ![image](https://github.com/davdma/floodmaps/assets/42689743/05168f81-c560-456e-9df3-87530d4b1def)
-**Figure 1:** Sample of files collected and processed for each geographic tile. The figure does not include SWIR, 
+**Figure 1:** Sample of files collected and processed for each geographic tile. The figure omits SWIR, NLCD, SCL, MNDWI, AWEI layers which are also included in the data.
 
 However, by themselves these raw satellite images lack the labels we need for modeling. So we must label water pixels manually.
 

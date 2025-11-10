@@ -22,6 +22,11 @@ from floodmaps.utils.preprocess_utils import (
     WelfordAccumulator,
     PROCESSING_BASELINE_NAIVE,
     BOA_ADD_OFFSET,
+    compute_awei_sh,
+    compute_awei_nsh,
+    compute_ndwi,
+    compute_mndwi
+    
 )
 
 def discover_all_tiles(events: List[Path], label_idx: Optional[Dict[Tuple[str, str], Path]] = None) -> List[Tuple]:
@@ -323,34 +328,22 @@ def load_tile_for_sampling(tile_info: Tuple):
             b12_raster_sr = np.clip(b12_raster / 10000.0, 0, 1)
     
     # Recompute NDWI using surface reflectance: (Green - NIR) / (Green + NIR)
-    recompute_ndwi = np.where(
-        (rgb_raster_sr[1] + b08_raster_sr[0]) != 0,
-        (rgb_raster_sr[1] - b08_raster_sr[0]) / (rgb_raster_sr[1] + b08_raster_sr[0]),
-        -999999
-    )
+    recompute_ndwi = compute_ndwi(rgb_raster_sr[1], b08_raster_sr[0], missing_val=-999999)
     ndwi_raster = np.expand_dims(recompute_ndwi, axis = 0)
     ndwi_raster = np.where(missing_mask, -999999, ndwi_raster)
 
     # Compute MNDWI (Modified NDWI): (Green - SWIR1) / (Green + SWIR1)
-    mndwi_raster = np.where(
-        (rgb_raster_sr[1] + b11_raster_sr[0]) != 0,
-        (rgb_raster_sr[1] - b11_raster_sr[0]) / (rgb_raster_sr[1] + b11_raster_sr[0]),
-        -999999
-    )
+    mndwi_raster = compute_mndwi(rgb_raster_sr[1], b11_raster_sr[0], missing_val=-999999)
     mndwi_raster = np.expand_dims(mndwi_raster, axis=0)
     mndwi_raster = np.where(missing_mask, -999999, mndwi_raster)
 
     # Compute AWEI_sh (Automated Water Extraction Index - shadow): Blue + 2.5*Green - 1.5*(NIR + SWIR1) - 0.25*SWIR2
-    awei_sh_raster = (rgb_raster_sr[2] + 2.5 * rgb_raster_sr[1] - 
-                       1.5 * (b08_raster_sr[0] + b11_raster_sr[0]) - 
-                       0.25 * b12_raster_sr[0])
+    awei_sh_raster = compute_awei_sh(rgb_raster_sr[2], rgb_raster_sr[1], b08_raster_sr[0], b11_raster_sr[0], b12_raster_sr[0])
     awei_sh_raster = np.expand_dims(awei_sh_raster, axis=0)
     awei_sh_raster = np.where(missing_mask, -999999, awei_sh_raster)
 
-    # Compute AWEI_nsh (Automated Water Extraction Index - no shadow): 4*(Green - SWIR1) - 0.25*NIR + 2.75*SWIR2
-    awei_nsh_raster = (4 * (rgb_raster_sr[1] - b11_raster_sr[0]) - 
-                        0.25 * b08_raster_sr[0] + 
-                        2.75 * b12_raster_sr[0])
+    # Compute AWEI_nsh (Automated Water Extraction Index - no shadow): 4*(Green - SWIR1) - (0.25*NIR + 2.75*SWIR2)
+    awei_nsh_raster = compute_awei_nsh(rgb_raster_sr[1], b11_raster_sr[0], b08_raster_sr[0], b12_raster_sr[0])
     awei_nsh_raster = np.expand_dims(awei_nsh_raster, axis=0)
     awei_nsh_raster = np.where(missing_mask, -999999, awei_nsh_raster)
 

@@ -38,6 +38,7 @@ from floodmaps.utils.sampling_utils import (
     get_extreme_events,
     event_completed,
     get_state,
+    compute_ndwi,
     colormap_to_rgb,
     NoElevationError,
     crop_to_bounds,
@@ -472,13 +473,13 @@ def pipeline_NDWI(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox):
         nir_sr = (nir.astype(np.float32) + BOA_ADD_OFFSET) / 10000.0
         green_sr = np.clip(green_sr, 0, 1)
         nir_sr = np.clip(nir_sr, 0, 1)
-        ndwi = np.where((green_sr + nir_sr) != 0, (green_sr - nir_sr) / (green_sr + nir_sr), -999999)
+        ndwi = compute_ndwi(green_sr, nir_sr, missing_val=-999999)
     else:
         green_sr = green.astype(np.float32) / 10000.0
         nir_sr = nir.astype(np.float32) / 10000.0
         green_sr = np.clip(green_sr, 0, 1)
         nir_sr = np.clip(nir_sr, 0, 1)
-        ndwi = np.where((green + nir) != 0, (green - nir) / (green + nir), -999999)
+        ndwi = compute_ndwi(green, nir, missing_val=-999999)
     
     ndwi = np.where(missing_mask, -999999, ndwi)
 

@@ -1170,3 +1170,26 @@ def get_item_crs(item: Item) -> Optional[str]:
             return crs
 
     return None
+
+def compute_ndwi(green: np.ndarray, nir: np.ndarray, missing_val=-999999) -> np.ndarray:
+    """Compute NDWI (Normalized Difference Water Index).
+    
+    Parameters
+    ----------
+    green : np.ndarray
+        Green band reflectance values.
+    nir : np.ndarray
+        Near-infrared band reflectance values.
+    missing_val : float, optional
+        Value to use for missing/invalid data, by default -999999.
+    
+    Returns
+    -------
+    np.ndarray
+        NDWI values in range [-1, 1], with missing_val for invalid pixels.
+    """
+    return np.where(
+        (green + nir) != 0,
+        (green - nir) / (green + nir),
+        missing_val
+    )

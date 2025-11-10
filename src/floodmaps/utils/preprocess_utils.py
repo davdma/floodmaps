@@ -96,3 +96,28 @@ class WelfordAccumulator:
         variance = self.m2 / (self.count - 1)
         std = np.sqrt(variance)
         return self.mean.astype(np.float32), std.astype(np.float32)
+
+
+def compute_awei_sh(blue: np.ndarray, green: np.ndarray, nir: np.ndarray, swir1: np.ndarray, swir2: np.ndarray) -> np.ndarray:
+    """Compute AWEI_sh (Automated Water Extraction Index - shadow)."""
+    return blue + 2.5 * green - 1.5 * (nir + swir1) - 0.25 * swir2
+
+def compute_awei_nsh(green: np.ndarray, swir1: np.ndarray, nir: np.ndarray, swir2: np.ndarray) -> np.ndarray:
+    """Compute AWEI_nsh (Automated Water Extraction Index - no shadow)."""
+    return 4 * (green - swir1) - (0.25 * nir + 2.75 * swir2)
+
+def compute_ndwi(green: np.ndarray, nir: np.ndarray, missing_val=-999999) -> np.ndarray:
+    """Compute NDWI (Normalized Difference Water Index)."""
+    return np.where(
+        (green + nir) != 0,
+        (green - nir) / (green + nir),
+        missing_val
+    )
+
+def compute_mndwi(green: np.ndarray, swir1: np.ndarray, missing_val=-999999) -> np.ndarray:
+    """Compute MNDWI (Modified Normalized Difference Water Index)."""
+    return np.where(
+        (green + swir1) != 0,
+        (green - swir1) / (green + swir1),
+        missing_val
+    )

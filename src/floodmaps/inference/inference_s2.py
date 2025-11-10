@@ -11,7 +11,14 @@ from datetime import datetime
 
 from floodmaps.utils.utils import ChannelIndexer
 from floodmaps.models.model import S2WaterDetector
-from floodmaps.utils.preprocess_utils import PROCESSING_BASELINE_NAIVE, BOA_ADD_OFFSET
+from floodmaps.utils.preprocess_utils import (
+    PROCESSING_BASELINE_NAIVE,
+    BOA_ADD_OFFSET,
+    compute_awei_sh,
+    compute_awei_nsh,
+    compute_ndwi,
+    compute_mndwi
+)
 
 
 def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_path, dt, eid, threshold=0.5):
@@ -96,40 +103,28 @@ def generate_prediction_s2(model, device, cfg, standardize, train_mean, event_pa
 
     if my_channels.has_ndwi():
         # Recompute NDWI using surface reflectance: (Green - NIR) / (Green + NIR)
-        recompute_ndwi = np.where(
-            (rgb_tile_sr[1] + b08_tile_sr[0]) != 0,
-            (rgb_tile_sr[1] - b08_tile_sr[0]) / (rgb_tile_sr[1] + b08_tile_sr[0]),
-            -999999
-        )
+        recompute_ndwi = compute_ndwi(rgb_tile_sr[1], b08_tile_sr[0], missing_val=-999999)
         ndwi_tile = np.expand_dims(recompute_ndwi, axis = 0)
         ndwi_tile = np.where(missing_vals, -999999, ndwi_tile)
         layers.append(ndwi_tile)
 
     # Compute MNDWI (Modified NDWI): (Green - SWIR1) / (Green + SWIR1)
     if my_channels.has_mndwi():
-        mndwi_tile = np.where(
-            (rgb_tile_sr[1] + b11_tile_sr[0]) != 0,
-            (rgb_tile_sr[1] - b11_tile_sr[0]) / (rgb_tile_sr[1] + b11_tile_sr[0]),
-            -999999
-        )
+        mndwi_tile = compute_mndwi(rgb_tile_sr[1], b11_tile_sr[0], missing_val=-999999)
         mndwi_tile = np.expand_dims(mndwi_tile, axis=0)
         mndwi_tile = np.where(missing_vals, -999999, mndwi_tile)
         layers.append(mndwi_tile)
 
     # Compute AWEI_sh (Automated Water Extraction Index - shadow): Blue + 2.5*Green - 1.5*(NIR + SWIR1) - 0.25*SWIR2
     if my_channels.has_awei_sh():
-        awei_sh_tile = (rgb_tile_sr[2] + 2.5 * rgb_tile_sr[1] - 
-                        1.5 * (b08_tile_sr[0] + b11_tile_sr[0]) - 
-                        0.25 * b12_tile_sr[0])
+        awei_sh_tile = compute_awei_sh(rgb_tile_sr[2], rgb_tile_sr[1], b08_tile_sr[0], b11_tile_sr[0], b12_tile_sr[0])
         awei_sh_tile = np.expand_dims(awei_sh_tile, axis=0)
         awei_sh_tile = np.where(missing_vals, -999999, awei_sh_tile)
         layers.append(awei_sh_tile)
 
     # Compute AWEI_nsh (Automated Water Extraction Index - no shadow): 4*(Green - SWIR1) - 0.25*NIR + 2.75*SWIR2
     if my_channels.has_awei_nsh():
-        awei_nsh_tile = (4 * (rgb_tile_sr[1] - b11_tile_sr[0]) - 
-                         0.25 * b08_tile_sr[0] + 
-                         2.75 * b12_tile_sr[0])
+        awei_nsh_tile = compute_awei_nsh(rgb_tile_sr[1], b11_tile_sr[0], b08_tile_sr[0], b12_tile_sr[0])
         awei_nsh_tile = np.expand_dims(awei_nsh_tile, axis=0)
         awei_nsh_tile = np.where(missing_vals, -999999, awei_nsh_tile)
         layers.append(awei_nsh_tile)

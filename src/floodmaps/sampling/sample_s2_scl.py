@@ -761,6 +761,7 @@ exact_fcodes=['46000', '46003', '46006', '46007', '55800', '33600', '33601', '33
     exact_fcodes : list[str], optional
         List of flowline feature FCodes to filter for e.g. ["42801", "42805", "46002"].
     """
+    logger = logging.getLogger('events')
     where_clause = f"FCode IN ({','.join(exact_fcodes)})"
     minx, miny, maxx, maxy = prism_bbox
 
@@ -780,23 +781,26 @@ exact_fcodes=['46000', '46003', '46006', '46007', '55800', '33600', '33601', '33
         mem_layer.CreateField(field_defn)
 
         for code in GetHU4Codes(prism_bbox, cfg):
-            with gdal.OpenEx(Path(cfg.paths.nhd_dir) / f'NHDPLUS_H_{code}_HU4_GDB.gdb') as ds:
-                layer = ds.GetLayerByName('NHDFlowline')
-                layer.SetSpatialFilterRect(minx, miny, maxx, maxy)
-                if exact_fcodes:
-                    layer.SetAttributeFilter(where_clause)
+            if (Path(cfg.paths.nhd_dir) / f'NHDPLUS_H_{code}_HU4_GDB.gdb').exists():
+                with gdal.OpenEx(Path(cfg.paths.nhd_dir) / f'NHDPLUS_H_{code}_HU4_GDB.gdb') as ds:
+                    layer = ds.GetLayerByName('NHDFlowline')
+                    layer.SetSpatialFilterRect(minx, miny, maxx, maxy)
+                    if exact_fcodes:
+                        layer.SetAttributeFilter(where_clause)
 
-                ct = osr.CoordinateTransformation(layer.GetSpatialRef(), dst_srs)
+                    ct = osr.CoordinateTransformation(layer.GetSpatialRef(), dst_srs)
 
-                for feat in layer:
-                    geom = feat.GetGeometryRef().Clone()
-                    geom.Transform(ct)
-                    out_feature = ogr.Feature(mem_layer.GetLayerDefn())
-                    out_feature.SetGeometry(geom)
-                    out_feature.SetField('burn_value', 1)  # Value to burn into raster
-                    mem_layer.CreateFeature(out_feature)
-                    out_feature = None
-                    geom = None
+                    for feat in layer:
+                        geom = feat.GetGeometryRef().Clone()
+                        geom.Transform(ct)
+                        out_feature = ogr.Feature(mem_layer.GetLayerDefn())
+                        out_feature.SetGeometry(geom)
+                        out_feature.SetField('burn_value', 1)  # Value to burn into raster
+                        mem_layer.CreateFeature(out_feature)
+                        out_feature = None
+                        geom = None
+            else:
+                logger.info(f'NHD file does not exist for code {code}, skipping.')
         
         # Check if we have any features
         feature_count = mem_layer.GetFeatureCount()
@@ -883,6 +887,7 @@ def pipeline_waterbody(dir_path: Path, save_as, dst_shape, dst_crs, dst_transfor
     cfg : DictConfig
         Configuration object.
     """
+    logger = logging.getLogger('events')
     # filter out estuary
     where_clause = "FCode <> 49300"
 
@@ -903,22 +908,25 @@ def pipeline_waterbody(dir_path: Path, save_as, dst_shape, dst_crs, dst_transfor
         mem_layer.CreateField(field_defn)
 
         for code in GetHU4Codes(prism_bbox, cfg):
-            with gdal.OpenEx(Path(cfg.paths.nhd_dir) / f'NHDPLUS_H_{code}_HU4_GDB.gdb') as ds:
-                layer = ds.GetLayerByName('NHDWaterbody')
-                layer.SetSpatialFilterRect(minx, miny, maxx, maxy)
-                layer.SetAttributeFilter(where_clause)
+            if (Path(cfg.paths.nhd_dir) / f'NHDPLUS_H_{code}_HU4_GDB.gdb').exists():
+                with gdal.OpenEx(Path(cfg.paths.nhd_dir) / f'NHDPLUS_H_{code}_HU4_GDB.gdb') as ds:
+                    layer = ds.GetLayerByName('NHDWaterbody')
+                    layer.SetSpatialFilterRect(minx, miny, maxx, maxy)
+                    layer.SetAttributeFilter(where_clause)
 
-                ct = osr.CoordinateTransformation(layer.GetSpatialRef(), dst_srs)
+                    ct = osr.CoordinateTransformation(layer.GetSpatialRef(), dst_srs)
 
-                for feat in layer:
-                    geom = feat.GetGeometryRef().Clone()
-                    geom.Transform(ct)
-                    out_feature = ogr.Feature(mem_layer.GetLayerDefn())
-                    out_feature.SetGeometry(geom)
-                    out_feature.SetField('burn_value', 1)  # Value to burn into raster
-                    mem_layer.CreateFeature(out_feature)
-                    out_feature = None
-                    geom = None
+                    for feat in layer:
+                        geom = feat.GetGeometryRef().Clone()
+                        geom.Transform(ct)
+                        out_feature = ogr.Feature(mem_layer.GetLayerDefn())
+                        out_feature.SetGeometry(geom)
+                        out_feature.SetField('burn_value', 1)  # Value to burn into raster
+                        mem_layer.CreateFeature(out_feature)
+                        out_feature = None
+                        geom = None
+            else:
+                logger.info(f'NHD file does not exist for code {code}, skipping.')
         
         # Check if we have any features
         feature_count = mem_layer.GetFeatureCount()

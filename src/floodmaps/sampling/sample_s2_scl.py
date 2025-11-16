@@ -551,93 +551,102 @@ def pipeline_roads(dir_path: Path, save_as, dst_shape, dst_crs, dst_transform, s
     cfg : DictConfig
         Configuration object.
     """
+    logger = logging.getLogger('events')
     mem_ds = None
     raster_ds = None
     minx, miny, maxx, maxy = prism_bbox
-    try:
-        with gdal.OpenEx(Path(cfg.paths.roads_dir) / f'{state.strip().upper()}.shp') as ds:
-            layer = ds.GetLayer()
-            layer.SetSpatialFilterRect(minx, miny, maxx, maxy)
 
-            dst_srs = osr.SpatialReference()
-            dst_srs.SetFromUserInput(dst_crs)
+    # if state file does not exist, save blank raster
+    if (Path(cfg.paths.roads_dir) / f'{state.strip().upper()}.shp').exists():
+        try:
+            with gdal.OpenEx(Path(cfg.paths.roads_dir) / f'{state.strip().upper()}.shp') as ds:
+                layer = ds.GetLayer()
+                layer.SetSpatialFilterRect(minx, miny, maxx, maxy)
 
-            ct = osr.CoordinateTransformation(layer.GetSpatialRef(), dst_srs)
+                dst_srs = osr.SpatialReference()
+                dst_srs.SetFromUserInput(dst_crs)
 
-            # Create in-memory layer with transformed geometries
-            mem_driver = ogr.GetDriverByName('Memory')
-            mem_ds = mem_driver.CreateDataSource('memData')
-            mem_layer = mem_ds.CreateLayer('roads', dst_srs, ogr.wkbLineString)
+                ct = osr.CoordinateTransformation(layer.GetSpatialRef(), dst_srs)
 
-            # Add a field for burn values
-            field_defn = ogr.FieldDefn('burn_value', ogr.OFTInteger)
-            mem_layer.CreateField(field_defn)
-            
-            # get transformed geometries in GeoJSON like format or Obj
-            for feat in layer:
-                geom = feat.GetGeometryRef().Clone()
-                geom.Transform(ct)
-                out_feature = ogr.Feature(mem_layer.GetLayerDefn())
-                out_feature.SetGeometry(geom)
-                out_feature.SetField('burn_value', 1)  # Value to burn into raster
-                mem_layer.CreateFeature(out_feature)
-                out_feature = None
-                geom = None
+                # Create in-memory layer with transformed geometries
+                mem_driver = ogr.GetDriverByName('Memory')
+                mem_ds = mem_driver.CreateDataSource('memData')
+                mem_layer = mem_ds.CreateLayer('roads', dst_srs, ogr.wkbLineString)
 
-        # Check if we have any features
-        feature_count = mem_layer.GetFeatureCount()
-        if feature_count > 0:
-            # Create in-memory raster dataset
-            height, width = dst_shape
-            
-            # Convert rasterio transform to GDAL geotransform
-            # rasterio: (x_offset, x_scale, xy_skew, y_offset, yx_skew, y_scale)
-            # GDAL: (x_offset, x_scale, xy_skew, y_offset, yx_skew, y_scale)
-            geotransform = (
-                dst_transform.c,    # x_offset (top-left x)
-                dst_transform.a,    # x_scale (pixel width)
-                dst_transform.b,    # xy_skew (rotation)
-                dst_transform.f,    # y_offset (top-left y)
-                dst_transform.d,    # yx_skew (rotation) 
-                dst_transform.e     # y_scale (pixel height, usually negative)
-            )
-            
-            # Create raster dataset in memory
-            raster_driver = gdal.GetDriverByName('MEM')
-            raster_ds = raster_driver.Create('', width, height, 1, gdal.GDT_Byte)
-            raster_ds.SetGeoTransform(geotransform)
-            raster_ds.SetProjection(dst_srs.ExportToWkt())
-            
-            # Get the raster band
-            band = raster_ds.GetRasterBand(1)
-            band.SetNoDataValue(0)
-            band.Fill(0)  # Initialize with 0
-            
-            # Burn value of 1 for all features
-            gdal.RasterizeLayer(raster_ds, [1], mem_layer, 
-                                burn_values=[1], options=['ALL_TOUCHED=TRUE'])
+                # Add a field for burn values
+                field_defn = ogr.FieldDefn('burn_value', ogr.OFTInteger)
+                mem_layer.CreateField(field_defn)
+                
+                # get transformed geometries in GeoJSON like format or Obj
+                for feat in layer:
+                    geom = feat.GetGeometryRef().Clone()
+                    geom.Transform(ct)
+                    out_feature = ogr.Feature(mem_layer.GetLayerDefn())
+                    out_feature.SetGeometry(geom)
+                    out_feature.SetField('burn_value', 1)  # Value to burn into raster
+                    mem_layer.CreateFeature(out_feature)
+                    out_feature = None
+                    geom = None
 
-            # Read the rasterized data
-            rasterize_roads = band.ReadAsArray()
+            # Check if we have any features
+            feature_count = mem_layer.GetFeatureCount()
+            if feature_count > 0:
+                # Create in-memory raster dataset
+                height, width = dst_shape
+                
+                # Convert rasterio transform to GDAL geotransform
+                # rasterio: (x_offset, x_scale, xy_skew, y_offset, yx_skew, y_scale)
+                # GDAL: (x_offset, x_scale, xy_skew, y_offset, yx_skew, y_scale)
+                geotransform = (
+                    dst_transform.c,    # x_offset (top-left x)
+                    dst_transform.a,    # x_scale (pixel width)
+                    dst_transform.b,    # xy_skew (rotation)
+                    dst_transform.f,    # y_offset (top-left y)
+                    dst_transform.d,    # yx_skew (rotation) 
+                    dst_transform.e     # y_scale (pixel height, usually negative)
+                )
+                
+                # Create raster dataset in memory
+                raster_driver = gdal.GetDriverByName('MEM')
+                raster_ds = raster_driver.Create('', width, height, 1, gdal.GDT_Byte)
+                raster_ds.SetGeoTransform(geotransform)
+                raster_ds.SetProjection(dst_srs.ExportToWkt())
+                
+                # Get the raster band
+                band = raster_ds.GetRasterBand(1)
+                band.SetNoDataValue(0)
+                band.Fill(0)  # Initialize with 0
+                
+                # Burn value of 1 for all features
+                gdal.RasterizeLayer(raster_ds, [1], mem_layer, 
+                                    burn_values=[1], options=['ALL_TOUCHED=TRUE'])
 
-            # Create RGB raster
-            rgb_roads = np.zeros((3, rasterize_roads.shape[0], rasterize_roads.shape[1]), dtype=np.uint8)
-            
-            # Set values in the 3D array based on the binary_array
-            rgb_roads[0, :, :] = rasterize_roads * 255
-            rgb_roads[1, :, :] = rasterize_roads * 255
-            rgb_roads[2, :, :] = rasterize_roads * 255
-        else:
-            # if no shapes to rasterize
-            rasterize_roads = np.zeros(dst_shape, dtype=np.uint8)
-            rgb_roads = np.zeros((3, *dst_shape), dtype=np.uint8)
-    except Exception as e:
-        raise e
-    finally:
-        if mem_ds:
-            mem_ds = None
-        if raster_ds:
-            raster_ds = None
+                # Read the rasterized data
+                rasterize_roads = band.ReadAsArray()
+
+                # Create RGB raster
+                rgb_roads = np.zeros((3, rasterize_roads.shape[0], rasterize_roads.shape[1]), dtype=np.uint8)
+                
+                # Set values in the 3D array based on the binary_array
+                rgb_roads[0, :, :] = rasterize_roads * 255
+                rgb_roads[1, :, :] = rasterize_roads * 255
+                rgb_roads[2, :, :] = rasterize_roads * 255
+            else:
+                # if no shapes to rasterize
+                logger.info(f'No road geometries to rasterize, saving blank roads raster.')
+                rasterize_roads = np.zeros(dst_shape, dtype=np.uint8)
+                rgb_roads = np.zeros((3, *dst_shape), dtype=np.uint8)
+        except Exception as e:
+            raise e
+        finally:
+            if mem_ds:
+                mem_ds = None
+            if raster_ds:
+                raster_ds = None
+    else:
+        logger.info(f'State file does not exist for {state}, saving blank raster.')
+        rasterize_roads = np.zeros(dst_shape, dtype=np.uint8)
+        rgb_roads = np.zeros((3, *dst_shape), dtype=np.uint8)
 
     with rasterio.open(dir_path / f'{save_as}.tif', 'w', driver='Gtiff', count=1, height=rasterize_roads.shape[-2], width=rasterize_roads.shape[-1], 
                        crs=dst_crs, dtype=rasterize_roads.dtype, transform=dst_transform, nodata=0) as dst:
@@ -1387,6 +1396,7 @@ def main(cfg: DictConfig) -> None:
 
     rootLogger.info("Initializing event sampling...")
     count = 0
+    search_count = 0
     alr_completed = 0
     try:
         rootLogger.info(f"Searching through {num_candidates} candidate indices/events...")
@@ -1397,6 +1407,7 @@ def main(cfg: DictConfig) -> None:
                                         aws_secret_access_key=getattr(cfg, "aws_secret_access_key", None),
                                         logger=logger)
         for event_date, event_precip, prism_bbox, eid, indices, crs in events:
+            search_count += 1
             if (Path(cfg.sampling.dir_path) / eid).is_dir():
                 if event_completed(Path(cfg.sampling.dir_path) / eid, regex_patterns, pattern_dict, logger=rootLogger):
                     rootLogger.debug(f'Event {eid} index {indices} has already been processed before. Moving on to the next event...')
@@ -1447,7 +1458,7 @@ def main(cfg: DictConfig) -> None:
             pickle.dump(history, f)
 
     rootLogger.debug(f"Number of events already completed: {alr_completed}")
-    rootLogger.debug(f"Number of successful events sampled from this run: {count}")
+    rootLogger.debug(f"Number of successful events sampled from this run: {count}/{search_count}")
     return 0
 
 if __name__ == '__main__':

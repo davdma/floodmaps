@@ -1193,3 +1193,28 @@ def compute_ndwi(green: np.ndarray, nir: np.ndarray, missing_val=-999999) -> np.
         (green - nir) / (green + nir),
         missing_val
     )
+
+def walltime_seconds(walltime: str) -> float:
+    """
+    Converts a walltime string in the format of HH:MM:SS to seconds.
+    
+    Parameters
+    ----------
+    walltime : str
+        Walltime in the format of HH:MM:SS.
+    
+    Returns
+    -------
+    float
+        Seconds from walltime.
+    """
+    pattern = r'^\d{1,2}:\d{2}:\d{2}$'
+    if not re.match(pattern, walltime):
+        raise ValueError(f"Invalid walltime format: {walltime}. Expected format: HH:MM:SS")
+
+    hours, minutes, seconds = map(int, walltime.split(':'))
+
+    if not (0 <= minutes < 60 and 0 <= seconds < 60):
+        raise ValueError(f"Invalid minutes/seconds value in walltime: {walltime}")
+
+    return float(hours * 3600 + minutes * 60 + seconds)

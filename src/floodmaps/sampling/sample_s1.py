@@ -6,6 +6,7 @@ import re
 import numpy as np
 import json
 import logging
+import time
 from datetime import datetime, timedelta
 from rasterio.warp import Resampling
 import rasterio.merge
@@ -15,7 +16,7 @@ import sys
 import hydra
 from omegaconf import DictConfig
 
-from floodmaps.utils.sampling_utils import PRISM_CRS, SEARCH_CRS, db_scale, setup_logging, colormap_to_rgb, crop_to_bounds, DateCRSOrganizer, get_item_crs, MissingAssetError
+from floodmaps.utils.sampling_utils import PRISM_CRS, SEARCH_CRS, db_scale, setup_logging, colormap_to_rgb, crop_to_bounds, DateCRSOrganizer, get_item_crs, MissingAssetError, walltime_seconds
 from floodmaps.utils.stac_providers import get_stac_provider
 from floodmaps.utils.validate import validate_event_rasters
 
@@ -320,8 +321,17 @@ def main(cfg: DictConfig) -> None:
     rootLogger.info(
         "S1 sampling parameters used:\n"
         f"  Within days of S2 dates: {cfg.sampling.within_days}\n"
-        f"  Replace existing SAR files: {cfg.sampling.replace}"
+        f"  Replace existing SAR files: {cfg.sampling.replace}\n"
+        f"  Max runtime: {getattr(cfg.sampling, 'max_runtime', 'Unlimited')}"
     )
+
+    # to track runtime
+    max_runtime_seconds = (
+        walltime_seconds(cfg.sampling.max_runtime)
+        if hasattr(cfg.sampling, 'max_runtime') and cfg.sampling.max_runtime is not None
+        else float('inf')
+    )
+    start_time = time.time()
 
     # loop over samples in directory
     rootLogger.info("Initializing SAR event sampling...")
@@ -332,6 +342,10 @@ def main(cfg: DictConfig) -> None:
                                         aws_secret_access_key=getattr(cfg, "aws_secret_access_key", None),
                                         logger=logger)
     for sample in samples:
+        if time.time() - start_time > max_runtime_seconds:
+            rootLogger.info(f'Maximum runtime of {getattr(cfg.sampling, 'max_runtime', 'Unlimited')} reached. Stopping sample processing...')
+            break
+
         downloadS1(stac_provider, sample, cfg)
 
 if __name__ == '__main__':

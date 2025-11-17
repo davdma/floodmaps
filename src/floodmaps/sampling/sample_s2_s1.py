@@ -19,6 +19,7 @@ from fiona.transform import transform
 import pystac_client
 import hydra
 from omegaconf import DictConfig
+import time
 
 from floodmaps.utils.sampling_utils import (
     PRISM_CRS,
@@ -44,7 +45,8 @@ from floodmaps.utils.sampling_utils import (
     NoElevationError,
     crop_to_bounds,
     get_item_crs,
-    MissingAssetError
+    MissingAssetError,
+    walltime_seconds
 )
 
 from floodmaps.utils.stac_providers import get_stac_provider
@@ -1513,12 +1515,21 @@ def run_sample_s2_s1(cfg: DictConfig) -> None:
         f"  Days after precipitation event: {cfg.sampling.after}\n"
         f"  Max cloud/nodata cover percentage: {cfg.sampling.maxcoverpercentage}\n"
         f"  Max events to sample: {cfg.sampling.maxevents}\n"
+        f"  Max runtime: {getattr(cfg.sampling, 'max_runtime', 'Unlimited')}\n"
         f"  S1 and S2 coincidence must be within # hours: {cfg.sampling.within_hours}\n"
         f"  Region: {cfg.sampling.region}\n"
         f"  Manual indices: {cfg.sampling.manual}\n"
         f"  S2 Source: {cfg.sampling.s2_source}\n"
         f"  S1 Source: {cfg.sampling.s1_source}\n"
     )
+
+    # to track runtime
+    max_runtime_seconds = (
+        walltime_seconds(cfg.sampling.max_runtime)
+        if hasattr(cfg.sampling, 'max_runtime') and cfg.sampling.max_runtime is not None
+        else float('inf')
+    )
+    start_time = time.time()
 
     # history set of tuples
     history = get_history(Path(cfg.sampling.dir_path) / 'history.pickle')
@@ -1555,6 +1566,10 @@ def run_sample_s2_s1(cfg: DictConfig) -> None:
                                         aws_secret_access_key=getattr(cfg, "aws_secret_access_key", None),
                                         logger=logger)
         for event_date, event_precip, prism_bbox, eid, indices, crs in events:
+            if time.time() - start_time > max_runtime_seconds:
+                rootLogger.info(f'Maximum runtime of {getattr(cfg.sampling, 'max_runtime', 'Unlimited')} reached. Stopping event sampling...')
+                break
+
             search_count += 1
             if (Path(cfg.sampling.dir_path) / eid).is_dir():
                 if event_completed(Path(cfg.sampling.dir_path) / eid, regex_patterns, pattern_dict, logger=rootLogger):

@@ -2,6 +2,7 @@ from pathlib import Path
 import numpy as np
 import json
 import logging
+import time
 from datetime import datetime, timedelta
 import pystac_client
 import planetary_computer
@@ -16,7 +17,7 @@ from fiona.transform import transform
 import hydra
 from omegaconf import DictConfig
 
-from floodmaps.utils.sampling_utils import PRISM_CRS, SEARCH_CRS, setup_logging, get_item_crs
+from floodmaps.utils.sampling_utils import PRISM_CRS, SEARCH_CRS, setup_logging, get_item_crs, walltime_seconds
 
 def is_completed(sample_dir: Path) -> bool:
     """Check if the sample has already been processed."""
@@ -433,6 +434,17 @@ def main(cfg: DictConfig) -> None:
     )
     logger.info("Starting multitemporal SAR data collection")
     
+    # log sampling parameters
+    logger.info(f"Max runtime: {getattr(cfg.sampling, 'max_runtime', 'Unlimited')}")
+    
+    # to track runtime
+    max_runtime_seconds = (
+        walltime_seconds(cfg.sampling.max_runtime)
+        if hasattr(cfg.sampling, 'max_runtime') and cfg.sampling.max_runtime is not None
+        else float('inf')
+    )
+    start_time = time.time()
+    
     # global search space:
     search_start_dt = datetime(2016, 9, 20)
     search_end_dt = datetime(2025, 4, 29)
@@ -452,6 +464,10 @@ def main(cfg: DictConfig) -> None:
         # get all bboxes in the sample directory
         samples = glob('samples_200_6_4_10_sar/*_*_*/')
         for sample in samples:
+            if time.time() - start_time > max_runtime_seconds:
+                logger.info(f'Maximum runtime of {getattr(cfg.sampling, 'max_runtime', 'Unlimited')} reached. Stopping sample processing...')
+                break
+
             # first check if the sample has already been processed
             eid = sample.split('/')[-2]
             sample_dir = Path(cfg.sampling.output_dir) / eid

@@ -353,9 +353,9 @@ def get_sample_prediction_s2(model, device, cfg: DictConfig, standardize, train_
 
             output = model(batch)
             if isinstance(output, dict):
-                pred = output['classifier_output'].squeeze()
+                pred = output['classifier_output'].squeeze(1)
             else:
-                pred = output.squeeze()
+                pred = output.squeeze(1)
             
             # Accumulate probabilities
             prob = torch.sigmoid(pred).float()

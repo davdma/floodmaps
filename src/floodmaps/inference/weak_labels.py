@@ -1,4 +1,8 @@
 import torch
+import concurrent.futures
+from concurrent.futures import as_completed
+from itertools import product
+from typing import List
 from torch import nn
 from torchvision import transforms
 from datetime import datetime, timezone, timedelta
@@ -8,7 +12,10 @@ import rasterio
 import pickle
 from pathlib import Path
 import hydra
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
+from tqdm import tqdm
+import multiprocessing
+import time
 
 from floodmaps.models.model import S2WaterDetector, SARWaterDetector
 from floodmaps.utils.utils import ChannelIndexer, SARChannelIndexer
@@ -158,7 +165,7 @@ def get_sample_prediction_sar(model, device, cfg: DictConfig, standardize, train
     label[missing_vals] = 0
     return label
 
-def get_sample_prediction_s2(model, device, cfg: DictConfig, standardize, train_mean, event_path, dt, eid, threshold=0.5):
+def get_sample_prediction_s2(model, device, cfg: DictConfig, standardize, train_mean, event_path, dt, eid, threshold=0.5, batch_size=128):
     """Generate new predictions on unseen data using water detector model.
     Predictions are made using a sliding window with 25% overlap.
 
@@ -180,6 +187,8 @@ def get_sample_prediction_s2(model, device, cfg: DictConfig, standardize, train_
         Event ID of the sample.
     threshold : float
         Threshold for the prediction.
+    batch_size : int
+        Batch size for inference.
     Returns
     -------
     label : ndarray
@@ -323,37 +332,38 @@ def get_sample_prediction_s2(model, device, cfg: DictConfig, standardize, train_
     count_map = torch.zeros((H, W), dtype=torch.float32, device=device)
 
     with torch.no_grad():
-        hit_y_edge = False
-        for y in range(0, H, stride):
-            # if patch moves out of image, change patch bounds to start from edges backward
-            if hit_y_edge:
-                break
-            if y + patch_size >= H:
-                y = H - patch_size
-                hit_y_edge = True
+        lst_y = list(range(0, H - patch_size + 1, stride))
+        if lst_y[-1] != H - patch_size:
+            lst_y.append(H - patch_size)
 
-            hit_x_edge = False
-            for x in range(0, W, stride):
-                if hit_x_edge:
-                    break
-                if x + patch_size >= W:
-                    x = W - patch_size
-                    hit_x_edge = True
-                
-                # Extract patch
-                patch = X[:, y:y+patch_size, x:x+patch_size].unsqueeze(0)
-                
-                # Make prediction
-                output = model(patch)
-                if isinstance(output, dict):
-                    pred = output['classifier_output'].squeeze()
-                else:
-                    pred = output.squeeze()
-                
-                # Accumulate probabilities
-                prob = torch.sigmoid(pred).float()
-                pred_map[y:y+patch_size, x:x+patch_size] += prob
-                count_map[y:y+patch_size, x:x+patch_size] += 1.0
+        lst_x = list(range(0, W - patch_size + 1, stride))
+        if lst_x[-1] != W - patch_size:
+            lst_x.append(W - patch_size)
+
+        patches = []
+        positions = list(product(lst_y, lst_x))
+        for y, x in positions:
+            # Stack the patches
+            patches.append(X[:, y:y+patch_size, x:x+patch_size])
+
+        all_patches = torch.stack(patches, dim=0)
+        for i in range(0, all_patches.shape[0], batch_size):
+            end_idx = min(i + batch_size, all_patches.shape[0])
+            batch = all_patches[i:end_idx]
+
+            output = model(batch)
+            if isinstance(output, dict):
+                pred = output['classifier_output'].squeeze()
+            else:
+                pred = output.squeeze()
+            
+            # Accumulate probabilities
+            prob = torch.sigmoid(pred).float()
+
+            for j in range(end_idx - i):
+                cur_y, cur_x = positions[i + j]
+                pred_map[cur_y:cur_y+patch_size, cur_x:cur_x+patch_size] += prob[j]
+                count_map[cur_y:cur_y+patch_size, cur_x:cur_x+patch_size] += 1.0
     
     # Average overlapping predictions
     pred_map = torch.where(count_map > 0, pred_map / count_map, pred_map)
@@ -370,27 +380,14 @@ def parse_manual_file(manual_file):
         eids = [line.strip() for line in f]
     return eids
 
-def run_weak_labeling(cfg: DictConfig):
-    """Generates machine labels for dataset using the rgb S2 optical model.
+def init_worker(cfg_dict: dict, num_threads: int):
+    """Set up model and necessary variables for worker"""
+    global model, cfg, standardize, train_mean
 
-    Note: run with conda environment 'floodmaps-training'.
-
-    Parameters
-    ----------
-    cfg : DictConfig
-        Configuration object containing model and data parameters.
-    """
-    device = (
-        "cuda"
-        if torch.cuda.is_available()
-        else "cpu"
-    )
-    print(f"Using {device} device")
-
-    model = S2WaterDetector(cfg).to(device)
+    torch.set_num_threads(num_threads)
+    cfg = OmegaConf.create(cfg_dict)
+    model = S2WaterDetector(cfg).to("cpu")
     model.eval()
-
-    # dataset and transforms
     method = cfg.data.method
     size = cfg.data.size
     sample_param = cfg.data.samples if cfg.data.method == 'random' else cfg.data.stride
@@ -411,24 +408,24 @@ def run_weak_labeling(cfg: DictConfig):
 
     standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
 
-    # get list of events to predict
-    lst = []
-    manual = getattr(cfg.inference, 'manual', None)
-    if manual is not None:
-        eids = parse_manual_file(manual)
-        lst.extend([Path(cfg.inference.data_dir) / eid for eid in eids])
-    else:
-        # iterate over all events in dataset dir
-        lst.extend((Path(cfg.inference.data_dir)).glob("[0-9]*"))
-
+def label_event(event_paths: List[Path]):
+    """Worker function that inferences a specific event and saves predictions to file.
+    
+    Parameters
+    ----------
+    event_paths : List[Path]
+        Event directory to predict.
+    """
     # get eid then use to find the rgb dates for each event
     p = re.compile('rgb_(\d{8})_(\d{8})_(.+).tif')
-    for event_path in lst:
+    for event_path in event_paths:
         if event_path.is_dir():
             eid = event_path.name
             # check for existence of predictions
             for rgb_file in event_path.glob('rgb_*.tif'):
                 m = p.search(rgb_file.name)
+                if not m:
+                    continue
                 dt = m.group(1)
 
                 # PRISM EVENT DATE IS ACTUALLY DEFINED AS 12:00 UTC OF THE DAY BEFORE (IMG_DT IS UTC) HENCE SUBTRACT 1 DAY
@@ -442,8 +439,9 @@ def run_weak_labeling(cfg: DictConfig):
                 if not cfg.inference.replace and (event_path / f'pred_{dt}_{eid}.tif').exists():
                     continue
                 else:
-                    print("Generating prediction for:", rgb_file.name)
-                    pred = get_sample_prediction_s2(model, device, cfg, standardize, train_mean, event_path, dt, eid, threshold=cfg.inference.threshold)
+                    pred = get_sample_prediction_s2(model, "cpu", cfg, standardize, train_mean, event_path,
+                                                    dt, eid, threshold=cfg.inference.threshold,
+                                                    batch_size=getattr(cfg.inference, 'batch_size', 256))
 
                     if cfg.inference.format == "tif":
                         # save result of prediction as .tif file
@@ -460,6 +458,66 @@ def run_weak_labeling(cfg: DictConfig):
                         np.save(event_path / f'pred_{dt}_{eid}.npy', pred)
                     else:
                         raise Exception("format unknown")
+
+def run_weak_labeling(cfg: DictConfig):
+    """Generates machine labels for dataset using the rgb S2 optical model.
+
+    Important cfg.inference parameters:
+    cfg.inference.n_workers: number of worker processes
+    cfg.inference.threads_per_worker: number of threads per worker
+    cfg.inference.batch_size: batch size for inference
+
+    Recommended to pick n_workers and threads_per_worker such that
+    n_workers * threads_per_worker = resources_used.ncpus, and so
+    that you only use as many threads as needed to keep inference within a process
+    fast while still allowing for high parallelization I/O and inference.
+
+    For batch size try to maximize it for inference speed also. With 400 x 400
+    tile shape, batch size of 128 pretty much batches the entire tile at once.
+
+    Note: run with conda environment 'floodmaps-training'.
+
+    Parameters
+    ----------
+    cfg : DictConfig
+        Configuration object containing model and data parameters.
+    """
+    # get list of events to predict
+    lst = []
+    manual = getattr(cfg.inference, 'manual', None)
+    if manual is not None:
+        eids = parse_manual_file(manual)
+        lst.extend([Path(cfg.inference.data_dir) / eid for eid in eids])
+    else:
+        # iterate over all events in dataset dir
+        lst.extend((Path(cfg.inference.data_dir)).glob("[0-9]*_*_*"))
+
+    # split into chunks for worker processes to finish
+    n_workers = getattr(cfg.inference, 'n_workers', 1)
+    n_workers = min(n_workers, len(lst))
+    print(f'Using {n_workers} workers for {len(lst)} events...')
+
+    start_idx = 0
+    events_per_worker = len(lst) // n_workers
+    remainder = len(lst) % n_workers
+    worker_event_paths = []
+    for i in range(n_workers):
+        end_idx = start_idx + events_per_worker + (1 if i < remainder else 0)
+        event_paths = lst[start_idx:end_idx]
+        start_idx = end_idx
+        worker_event_paths.append(event_paths)
+
+    # tqdm progress tracking
+    cfg_dict = OmegaConf.to_container(cfg, resolve=True)
+    threads_per_worker = getattr(cfg.inference, 'threads_per_worker', 8)
+    print(f"Using {threads_per_worker} threads per worker")
+    with concurrent.futures.ProcessPoolExecutor(max_workers = n_workers,
+                                                initializer=init_worker, 
+                                                initargs=(cfg_dict, threads_per_worker),
+                                                mp_context=multiprocessing.get_context("forkserver")) as executor:
+        futures = [executor.submit(label_event, event_paths) for event_paths in worker_event_paths]
+        for fut in tqdm(as_completed(futures), total=len(futures), desc="Workers in progress"):
+            result = fut.result()
 
 @hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig):

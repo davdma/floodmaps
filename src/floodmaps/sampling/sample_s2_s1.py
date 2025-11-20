@@ -1567,7 +1567,7 @@ def run_sample_s2_s1(cfg: DictConfig) -> None:
                                         logger=logger)
         for event_date, event_precip, prism_bbox, eid, indices, crs in events:
             if time.time() - start_time > max_runtime_seconds:
-                rootLogger.info(f'Maximum runtime of {getattr(cfg.sampling, 'max_runtime', 'Unlimited')} reached. Stopping event sampling...')
+                rootLogger.info(f"Maximum runtime of {getattr(cfg.sampling, 'max_runtime', 'Unlimited')} reached. Stopping event sampling...")
                 break
 
             search_count += 1

@@ -19,6 +19,7 @@ dependencies:
   - pip
   - pip:
     - "rasterio[s3]"
+    - tqdm
     - torcheval
     - Pillow
     - -e ..

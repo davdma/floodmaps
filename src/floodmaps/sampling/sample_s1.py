@@ -343,7 +343,7 @@ def main(cfg: DictConfig) -> None:
                                         logger=logger)
     for sample in samples:
         if time.time() - start_time > max_runtime_seconds:
-            rootLogger.info(f'Maximum runtime of {getattr(cfg.sampling, 'max_runtime', 'Unlimited')} reached. Stopping sample processing...')
+            rootLogger.info(f"Maximum runtime of {getattr(cfg.sampling, 'max_runtime', 'Unlimited')} reached. Stopping sample processing...")
             break
 
         downloadS1(stac_provider, sample, cfg)

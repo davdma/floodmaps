@@ -465,7 +465,7 @@ def main(cfg: DictConfig) -> None:
         samples = glob('samples_200_6_4_10_sar/*_*_*/')
         for sample in samples:
             if time.time() - start_time > max_runtime_seconds:
-                logger.info(f'Maximum runtime of {getattr(cfg.sampling, 'max_runtime', 'Unlimited')} reached. Stopping sample processing...')
+                logger.info(f"Maximum runtime of {getattr(cfg.sampling, 'max_runtime', 'Unlimited')} reached. Stopping sample processing...")
                 break
 
             # first check if the sample has already been processed

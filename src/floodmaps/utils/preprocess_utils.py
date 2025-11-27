@@ -121,3 +121,30 @@ def compute_mndwi(green: np.ndarray, swir1: np.ndarray, missing_val=-999999) -> 
         (green - swir1) / (green + swir1),
         missing_val
     )
+
+def impute_missing_values(arr, missing_mask):
+    """Imputes the missing values in the array using the mean of the non-missing values.
+    Raises error if all values are missing.
+
+    Missing mask should be the same shape as the array.
+    
+    Can take either H, W or C, H, W arrays. In the C, H, W case, each channel is imputed separately."""
+    # modify copy of array
+    new_arr = arr.copy()
+    if arr.ndim == 2:
+        H, W = arr.shape
+        if missing_mask.all():
+            raise ValueError(f"All values are missing for imputation")
+        mean = arr[~missing_mask].mean()
+        new_arr[missing_mask] = mean
+        return new_arr
+    elif arr.ndim == 3:
+        C, H, W = arr.shape
+        for i in range(C):
+            if missing_mask[i].all():
+                raise ValueError(f"All values are missing for imputation")
+            mean = arr[i][~missing_mask[i]].mean()
+            new_arr[i][missing_mask[i]] = mean
+        return new_arr
+    else:
+        raise ValueError(f"Array must be either H, W or C, H, W")

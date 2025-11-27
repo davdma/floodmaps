@@ -25,7 +25,8 @@ from floodmaps.utils.preprocess_utils import (
     compute_awei_sh,
     compute_awei_nsh,
     compute_ndwi,
-    compute_mndwi
+    compute_mndwi,
+    impute_missing_values
 )
 
 def get_sample_prediction_sar(model, device, cfg: DictConfig, standardize, train_mean, event_path, s2_dt, s1_dt, eid, threshold=0.5):
@@ -165,34 +166,7 @@ def get_sample_prediction_sar(model, device, cfg: DictConfig, standardize, train
     label[missing_vals] = 0
     return label
 
-def impute_missing_values(arr, missing_mask):
-    """Imputes the missing values in the array using the mean of the non-missing values.
-    Raises error if all values are missing.
-
-    Missing mask should be the same shape as the array.
-    
-    Can take either H, W or C, H, W arrays. In the C, H, W case, each channel is imputed separately."""
-    # modify copy of array
-    new_arr = arr.copy()
-    if arr.ndim == 2:
-        H, W = arr.shape
-        if missing_mask.all():
-            raise ValueError(f"All values are missing for imputation")
-        mean = arr[~missing_mask].mean()
-        new_arr[missing_mask] = mean
-        return new_arr
-    elif arr.ndim == 3:
-        C, H, W = arr.shape
-        for i in range(C):
-            if missing_mask[i].all():
-                raise ValueError(f"All values are missing for imputation")
-            mean = arr[i][~missing_mask[i]].mean()
-            new_arr[i][missing_mask[i]] = mean
-        return new_arr
-    else:
-        raise ValueError(f"Array must be either H, W or C, H, W")
-
-def get_sample_prediction_s2(model, device, cfg: DictConfig, standardize, train_mean, event_path, dt, eid, threshold=0.5, batch_size=128):
+def get_sample_prediction_s2(model, device, cfg: DictConfig, standardize, event_path, dt, eid, threshold=0.5, batch_size=128):
     """Generate new predictions on unseen data using water detector model.
     Predictions are made using a sliding window with 25% overlap.
 
@@ -210,8 +184,6 @@ def get_sample_prediction_s2(model, device, cfg: DictConfig, standardize, train_
         Configuration object containing model and data parameters.
     standardize : obj
         Standardization of input channels before being fed into the model.
-    train_mean : float
-        Channel means of model training set for imputing missing data.
     event_path : Path
         Path to the event directory where the raw sample data is stored.
     dt : str
@@ -431,7 +403,7 @@ def parse_manual_file(manual_file):
 
 def init_worker(cfg_dict: dict, num_threads: int):
     """Set up model and necessary variables for worker"""
-    global model, cfg, standardize, train_mean
+    global model, cfg, standardize
 
     torch.set_num_threads(num_threads)
     cfg = OmegaConf.create(cfg_dict)
@@ -488,7 +460,7 @@ def label_event(event_paths: List[Path]):
                 if not cfg.inference.replace and (event_path / f'pred_{dt}_{eid}.tif').exists():
                     continue
                 else:
-                    pred = get_sample_prediction_s2(model, "cpu", cfg, standardize, train_mean, event_path,
+                    pred = get_sample_prediction_s2(model, "cpu", cfg, standardize, event_path,
                                                     dt, eid, threshold=cfg.inference.threshold,
                                                     batch_size=getattr(cfg.inference, 'batch_size', 256))
 

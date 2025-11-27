@@ -165,9 +165,42 @@ def get_sample_prediction_sar(model, device, cfg: DictConfig, standardize, train
     label[missing_vals] = 0
     return label
 
+def impute_missing_values(arr, missing_mask):
+    """Imputes the missing values in the array using the mean of the non-missing values.
+    Raises error if all values are missing.
+
+    Missing mask should be the same shape as the array.
+    
+    Can take either H, W or C, H, W arrays. In the C, H, W case, each channel is imputed separately."""
+    # modify copy of array
+    new_arr = arr.copy()
+    if arr.ndim == 2:
+        H, W = arr.shape
+        if missing_mask.all():
+            raise ValueError(f"All values are missing for imputation")
+        mean = arr[~missing_mask].mean()
+        new_arr[missing_mask] = mean
+        return new_arr
+    elif arr.ndim == 3:
+        C, H, W = arr.shape
+        for i in range(C):
+            if missing_mask[i].all():
+                raise ValueError(f"All values are missing for imputation")
+            mean = arr[i][~missing_mask[i]].mean()
+            new_arr[i][missing_mask[i]] = mean
+        return new_arr
+    else:
+        raise ValueError(f"Array must be either H, W or C, H, W")
+
 def get_sample_prediction_s2(model, device, cfg: DictConfig, standardize, train_mean, event_path, dt, eid, threshold=0.5, batch_size=128):
     """Generate new predictions on unseen data using water detector model.
     Predictions are made using a sliding window with 25% overlap.
+
+    For missing data, impute with tile specific mean of each channel in order to allow for inference.
+    Save missing mask in order to zero out predictions in final output.
+
+    NOTE: Negative reflectances are clipped to 0 but not treated as missing values.
+    Only explicit DN 0 and undefined water indices are treated as missing values and imputed.
 
     Parameters
     ----------
@@ -200,17 +233,21 @@ def get_sample_prediction_s2(model, device, cfg: DictConfig, standardize, train_
 
     rgb_file = event_path / f'rgb_{dt}_{eid}.tif'
     with rasterio.open(rgb_file) as src:
+        # Rgb tile is 3, H, W
         rgb_tile = src.read().astype(np.float32)
     
-    # Extract missing values mask BEFORE applying offset (raw DN 0 = missing)
-    missing_vals = rgb_tile[0] == 0
-    
-    if img_dt_obj >= PROCESSING_BASELINE_NAIVE:
-        rgb_tile_sr = np.clip((rgb_tile + BOA_ADD_OFFSET) / 10000.0, 0, 1)
-    else:
-        rgb_tile_sr = np.clip(rgb_tile / 10000.0, 0, 1)
+        # Extract initial missing values (raw DN 0 = initial missing)
+        tot_missing_vals = np.zeros(rgb_tile[0].shape, dtype=bool)
+        
+        if img_dt_obj >= PROCESSING_BASELINE_NAIVE:
+            rgb_tile_sr = np.clip((rgb_tile + BOA_ADD_OFFSET) / 10000.0, 0, 1)
+        else:
+            rgb_tile_sr = np.clip(rgb_tile / 10000.0, 0, 1)
+        rgb_tile_missing = (rgb_tile == 0)
+        rgb_tile_sr = impute_missing_values(rgb_tile_sr, rgb_tile_missing)
 
     if my_channels.has_rgb():
+        tot_missing_vals = tot_missing_vals | rgb_tile_missing.any(axis=0)
         layers.append(rgb_tile_sr)
     
     b08_file = event_path / f'b08_{dt}_{eid}.tif'
@@ -220,8 +257,11 @@ def get_sample_prediction_s2(model, device, cfg: DictConfig, standardize, train_
             b08_tile_sr = np.clip((b08_tile + BOA_ADD_OFFSET) / 10000.0, 0, 1)
         else:
             b08_tile_sr = np.clip(b08_tile / 10000.0, 0, 1)
+        b08_tile_missing = (b08_tile == 0)
+        b08_tile_sr = impute_missing_values(b08_tile_sr, b08_tile_missing)
 
     if my_channels.has_b08():
+        tot_missing_vals = tot_missing_vals | b08_tile_missing.squeeze(axis=0)
         layers.append(b08_tile_sr)
 
     # Load SWIR1 (B11)
@@ -232,8 +272,11 @@ def get_sample_prediction_s2(model, device, cfg: DictConfig, standardize, train_
             b11_tile_sr = np.clip((b11_tile + BOA_ADD_OFFSET) / 10000.0, 0, 1)
         else:
             b11_tile_sr = np.clip(b11_tile / 10000.0, 0, 1)
+        b11_tile_missing = (b11_tile == 0)
+        b11_tile_sr = impute_missing_values(b11_tile_sr, b11_tile_missing)
 
     if my_channels.has_swir1():
+        tot_missing_vals = tot_missing_vals | b11_tile_missing.squeeze(axis=0)
         layers.append(b11_tile_sr)
 
     # Load SWIR2 (B12)
@@ -244,36 +287,47 @@ def get_sample_prediction_s2(model, device, cfg: DictConfig, standardize, train_
             b12_tile_sr = np.clip((b12_tile + BOA_ADD_OFFSET) / 10000.0, 0, 1)
         else:
             b12_tile_sr = np.clip(b12_tile / 10000.0, 0, 1)
+        b12_tile_missing = (b12_tile == 0)
+        b12_tile_sr = impute_missing_values(b12_tile_sr, b12_tile_missing)
 
     if my_channels.has_swir2():
+        tot_missing_vals = tot_missing_vals | b12_tile_missing.squeeze(axis=0)
         layers.append(b12_tile_sr)
 
     if my_channels.has_ndwi():
         # Recompute NDWI using surface reflectance: (Green - NIR) / (Green + NIR)
-        recompute_ndwi = compute_ndwi(rgb_tile_sr[1], b08_tile_sr[0], missing_val=-999999)
-        ndwi_tile = np.expand_dims(recompute_ndwi, axis = 0)
-        ndwi_tile = np.where(missing_vals, -999999, ndwi_tile)
+        ndwi_tile = compute_ndwi(rgb_tile_sr[1], b08_tile_sr[0], missing_val=-999999)
+        ndwi_missing = rgb_tile_missing[1] | b08_tile_missing[0] | (ndwi_tile == -999999)
+        ndwi_tile = impute_missing_values(ndwi_tile, ndwi_missing)
+        tot_missing_vals = tot_missing_vals | ndwi_missing
+        ndwi_tile = np.expand_dims(ndwi_tile, axis = 0)
         layers.append(ndwi_tile)
 
     # Compute MNDWI (Modified NDWI): (Green - SWIR1) / (Green + SWIR1)
     if my_channels.has_mndwi():
         mndwi_tile = compute_mndwi(rgb_tile_sr[1], b11_tile_sr[0], missing_val=-999999)
+        mndwi_missing = rgb_tile_missing[1] | b11_tile_missing[0] | (mndwi_tile == -999999)
+        mndwi_tile = impute_missing_values(mndwi_tile, mndwi_missing)
+        tot_missing_vals = tot_missing_vals | mndwi_missing
         mndwi_tile = np.expand_dims(mndwi_tile, axis=0)
-        mndwi_tile = np.where(missing_vals, -999999, mndwi_tile)
         layers.append(mndwi_tile)
 
     # Compute AWEI_sh (Automated Water Extraction Index - shadow): Blue + 2.5*Green - 1.5*(NIR + SWIR1) - 0.25*SWIR2
     if my_channels.has_awei_sh():
         awei_sh_tile = compute_awei_sh(rgb_tile_sr[2], rgb_tile_sr[1], b08_tile_sr[0], b11_tile_sr[0], b12_tile_sr[0])
+        awei_sh_missing = rgb_tile_missing[2] | rgb_tile_missing[1] | b08_tile_missing[0] | b11_tile_missing[0] | b12_tile_missing[0]
+        awei_sh_tile = impute_missing_values(awei_sh_tile, awei_sh_missing)
+        tot_missing_vals = tot_missing_vals | awei_sh_missing
         awei_sh_tile = np.expand_dims(awei_sh_tile, axis=0)
-        awei_sh_tile = np.where(missing_vals, -999999, awei_sh_tile)
         layers.append(awei_sh_tile)
 
     # Compute AWEI_nsh (Automated Water Extraction Index - no shadow): 4*(Green - SWIR1) - (0.25*NIR + 2.75*SWIR2)
     if my_channels.has_awei_nsh():
         awei_nsh_tile = compute_awei_nsh(rgb_tile_sr[1], b11_tile_sr[0], b08_tile_sr[0], b12_tile_sr[0])
+        awei_nsh_missing = rgb_tile_missing[1] | b11_tile_missing[0] | b08_tile_missing[0] | b12_tile_missing[0]
+        awei_nsh_tile = impute_missing_values(awei_nsh_tile, awei_nsh_missing)
+        tot_missing_vals = tot_missing_vals | awei_nsh_missing
         awei_nsh_tile = np.expand_dims(awei_nsh_tile, axis=0)
-        awei_nsh_tile = np.where(missing_vals, -999999, awei_nsh_tile)
         layers.append(awei_nsh_tile)
 
     # need dem for slope regardless if in channels or not
@@ -306,11 +360,6 @@ def get_sample_prediction_s2(model, device, cfg: DictConfig, standardize, train_
         layers.append(flowlines_tile)
 
     X = np.vstack(layers, dtype=np.float32)
-
-    # impute missing values in each channel with its mean
-    train_mean = train_mean.tolist()
-    for i, mean in enumerate(train_mean):
-        X[i][missing_vals] = mean
 
     X = torch.from_numpy(X)
     X = X.to(device)
@@ -370,7 +419,7 @@ def get_sample_prediction_s2(model, device, cfg: DictConfig, standardize, train_
     
     # Convert to final binary prediction
     label = torch.where(pred_map >= threshold, 1.0, 0.0).byte().cpu().numpy()
-    label[missing_vals] = 0
+    label[tot_missing_vals] = 0
     return label
 
 def parse_manual_file(manual_file):

@@ -113,6 +113,10 @@ class PRISMData:
     def get_event_datetime(self, time_index: int) -> datetime:
         """Get datetime.datetime object for specific time index in PRISM data."""
         return datetime.fromisoformat(num2date(time_index, units=self.time_info[0], calendar=self.time_info[1]).isoformat())
+    
+    def get_days_since_reference(self, dt: datetime) -> int:
+        """Get the integer number of days since the reference date (day 0) for a given datetime object."""
+        return int(date2num(dt, units=self.time_info[0], calendar=self.time_info[1]))
 
     def get_event_cftime(self, time_index: int) -> cftime.datetime:
         """Get cftime.datetime object for specific time index in PRISM data."""

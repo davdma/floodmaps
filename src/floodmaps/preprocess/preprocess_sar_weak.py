@@ -16,108 +16,10 @@ from numpy.lib.format import open_memmap
 from datetime import datetime
 import hydra
 from omegaconf import DictConfig
-
-try:
-    import yaml
-except Exception:
-    yaml = None
-
-from floodmaps.utils.utils import enhanced_lee_filter
+import yaml
 from floodmaps.utils.preprocess_utils import WelfordAccumulator
 
-
-def discover_all_tiles(events: List[Path], label_idx: Optional[Dict[Tuple[str, str], Path]] = None, tile_cloud_threshold: float = 0.25) -> List[Tuple]:
-    """Discover all individual tiles across a list of events.
-    
-    Parameters
-    ----------
-    events: List[Path]
-        List of event directory paths
-    label_idx: Optional[Dict[Tuple[str, str], Path]]
-        Optional dictionary mapping (img_dt, eid) to manual label paths
-    tile_cloud_threshold: float
-        Threshold for filtering out cloudy tiles (default: 0.25)
-
-    Returns
-    -------
-    tiles: List[Tuple]
-        List of tuples in form (event_path, sar_vv_file, label_file, eid, img_dt)
-    """
-    logger = logging.getLogger('preprocessing')
-    tiles = []
-    
-    p1 = re.compile(r'\d{8}_\d+_\d+')
-    p2 = re.compile(r'pred_(\d{8})_.+\.tif')
-    
-    for event in events:
-        # Extract event ID
-        m = p1.search(event.name)
-        if not m:
-            logger.error(f'No matching eid in {event.name}. Skipping...')
-            continue
-        eid = m.group(0)
-        
-        # Find all prediction files and their corresponding SAR files
-        for label in event.glob('pred_*.tif'):
-            m = p2.search(label.name)
-            if not m:
-                continue
-            img_dt = m.group(1)
-            
-            # Find corresponding SAR VV file
-            sar_vv_files = list(event.glob(f'sar_{img_dt}_*_vv.tif'))
-            if len(sar_vv_files) == 0:
-                logger.debug(f'SAR VV file not found for {label.name} in {event.name} (event in folder {event.parent})')
-                continue
-            
-            sar_vv_file = sar_vv_files[0]
-            sar_vh_file = sar_vv_file.with_name(sar_vv_file.name.replace("_vv.tif", "_vh.tif"))
-            
-            # Validate that all required files exist
-            required_files = [
-                sar_vv_file,
-                sar_vh_file,
-                event / f'tci_{img_dt}_{eid}.tif',
-                event / f'dem_{eid}.tif',
-                event / f'waterbody_{eid}.tif',
-                event / f'roads_{eid}.tif',
-                event / f'flowlines_{eid}.tif',
-                event / f'clouds_{img_dt}_{eid}.tif',
-                event / f'nlcd_{eid}.tif'
-            ]
-            
-            # Check if manual label is available
-            final_label = label
-            if label_idx:
-                manual_label_path = get_manual_label_path(label_idx, img_dt, eid)
-                if manual_label_path:
-                    logger.debug(f'Found manual label for tile {sar_vv_file.name}: {manual_label_path.name} (label in folder {manual_label_path.parent})')
-                    final_label = manual_label_path
-                    required_files.append(manual_label_path)
-            else:
-                required_files.append(label)
-            
-            # Validate all files exist
-            missing_files = [f for f in required_files if not f.exists()]
-            if missing_files:
-                logger.warning(f'Missing files for tile {sar_vv_file.name} in {event.name}: {[f.name for f in missing_files]} (event in folder {event.parent})')
-                continue
-
-            # check if tile is under cloud threshold
-            cloud_file = event / f'clouds_{img_dt}_{eid}.tif'
-            if not cloud_file.exists():
-                logger.warning(f'Cloud file not found for tile {sar_vv_file.name} in {event.name}: {cloud_file.name} (event in folder {event.parent})')
-                continue
-            tile_cloud_percent = tile_cloud_percentage(cloud_file)
-            if tile_cloud_percent > tile_cloud_threshold:
-                logger.debug(f'Tile {sar_vv_file.name} in {event.name} is over cloud threshold: {tile_cloud_percent} > {tile_cloud_threshold} (event in folder {event.parent})')
-                continue
-            
-            tiles.append((event, sar_vv_file, final_label, eid, img_dt))
-    
-    logger.info(f'Discovered {len(tiles)} valid tiles across {len(events)} events')
-    return tiles
-
+SAR_CHANNELS_TO_NORMALIZE = 5
 
 def load_tile_for_stats(tile_info: Tuple[Path, Path, Path, str, str], filter_type: str) -> Tuple[np.ndarray, np.ndarray]:
     """Load the tile data and return the array and mask.
@@ -185,7 +87,7 @@ def process_tiles_batch_for_stats(tiles_batch: List[Tuple], filter_type: str) ->
     Returns:
         WelfordAccumulator with accumulated statistics from all tiles in batch
     """
-    accumulator = WelfordAccumulator(5)  # 5 non-binary channels for SAR
+    accumulator = WelfordAccumulator(SAR_CHANNELS_TO_NORMALIZE)  # 5 non-binary channels for SAR
     
     for tile_info in tiles_batch:
         try:
@@ -282,15 +184,13 @@ def compute_statistics_parallel(train_tiles: List[Tuple], filter_type: str, n_wo
     return mean, std
 
 
-def load_tile_for_sampling(tile_info: Tuple, filter_type: str):
+def load_tile_for_sampling(tile_info: Tuple):
     """Load a tile and return the stacked raster for patch sampling.
     
     Parameters
     ----------
     tile_info : Tuple
         Tuple of (event_path, sar_vv_file, label_file, eid, img_dt)
-    filter_type : str
-        'raw' or 'lee' for SAR filtering
         
     Returns
     -------
@@ -327,11 +227,6 @@ def load_tile_for_sampling(tile_info: Tuple, filter_type: str):
 
     with rasterio.open(sar_vh_file) as src:
         vh_raster = src.read()
-
-    # apply speckle filter to sar:
-    if filter_type == "lee":
-        vv_raster = np.expand_dims(enhanced_lee_filter(vv_raster[0], kernel_size=5).astype(np.float32), axis=0)
-        vh_raster = np.expand_dims(enhanced_lee_filter(vh_raster[0], kernel_size=5).astype(np.float32), axis=0)
 
     with rasterio.open(dem_file) as src:
         dem_raster = src.read()
@@ -400,7 +295,7 @@ def sample_patches_in_mem(tiles: List[Tuple], size: int, num_samples: int, cloud
     
     for i, tile in enumerate(tiles):
         try:
-            tile_data, tile_mask = load_tile_for_sampling(tile, filter_type)
+            tile_data, tile_mask = load_tile_for_sampling(tile)
         except Exception as e:
             event_path, _, _, eid, img_dt = tile
             raise RuntimeError(f"Worker failed to load tile {i} (event_path: {event_path}, eid: {eid}, dt: {img_dt}): {e}") from e
@@ -437,7 +332,7 @@ def sample_patches_in_mem(tiles: List[Tuple], size: int, num_samples: int, cloud
 
 
 def sample_patches_in_disk(tiles: List[Tuple], size: int, num_samples: int, cloud_threshold: float,
-                          filter_type: str, seed: int, scratch_dir: Path, worker_id: int, max_attempts: int = 20000) -> Path:
+                          seed: int, scratch_dir: Path, worker_id: int, max_attempts: int = 20000) -> Path:
     """Sample patches and stores them in memory mapped file on disk.
     
     Parameters
@@ -450,8 +345,6 @@ def sample_patches_in_disk(tiles: List[Tuple], size: int, num_samples: int, clou
         Number of patches to sample per tile
     cloud_threshold : float
         Maximum cloud fraction for patch acceptance
-    filter_type : str
-        'raw' or 'lee' for SAR filtering
     seed : int
         Random seed for reproducibility
     scratch_dir : Path
@@ -474,7 +367,7 @@ def sample_patches_in_disk(tiles: List[Tuple], size: int, num_samples: int, clou
     try:
         for i, tile in enumerate(tiles):
             try:
-                tile_data, tile_mask = load_tile_for_sampling(tile, filter_type)
+                tile_data, tile_mask = load_tile_for_sampling(tile)
             except Exception as e:
                 event_path, _, _, eid, img_dt = tile
                 raise RuntimeError(f"Worker {worker_id} failed to load tile {i} (event_path: {event_path}, eid: {eid}, dt: {img_dt}): {e}") from e
@@ -587,7 +480,7 @@ def sample_patches_parallel(tiles: List[Tuple], size: int, num_samples: int,
 
         try:
             with mp.Pool(n_workers) as pool:
-                results = pool.starmap(sample_patches_in_mem, [(tile, size, num_samples, cloud_threshold, filter_type, seed+i*10000) for i, tile in enumerate(worker_tiles)])
+                results = pool.starmap(sample_patches_in_mem, [(tile, size, num_samples, cloud_threshold, seed+i*10000) for i, tile in enumerate(worker_tiles)])
         except Exception as e:
             logger.error(f"Failed during parallel patch sampling (in-memory): {e}")
             logger.error("One or more worker processes failed during patch sampling")
@@ -611,7 +504,7 @@ def sample_patches_parallel(tiles: List[Tuple], size: int, num_samples: int,
         try:
             # each worker writes to their own file
             with mp.Pool(n_workers) as pool:
-                worker_files = pool.starmap(sample_patches_in_disk, [(tile, size, num_samples, cloud_threshold, filter_type, seed+i*10000, scratch_dir, i) for i, tile in enumerate(worker_tiles)])
+                worker_files = pool.starmap(sample_patches_in_disk, [(tile, size, num_samples, cloud_threshold, seed+i*10000, scratch_dir, i) for i, tile in enumerate(worker_tiles)])
         except Exception as e:
             logger.error(f"Failed during parallel patch sampling (memory-mapped): {e}")
             logger.error("One or more worker processes failed during patch sampling")
@@ -652,9 +545,141 @@ def sample_patches_parallel(tiles: List[Tuple], size: int, num_samples: int,
                 except Exception as cleanup_e:
                     logger.warning(f"Failed to clean up scratch directory: {cleanup_e}")
 
+def sample_patches_strided(tile_infos: List[Tuple], size: int, stride: int) -> np.ndarray:
+    """Sample patches using a sliding window with stride and complete edge coverage.
+    
+    This function uses a sliding window approach that moves by stride pixels
+    in both x and y directions. It ensures complete coverage by explicitly including
+    positions that cover the right and bottom edges of each tile.
+    
+    Parameters
+    ----------
+    tile_infos : List[Tuple]
+        List of tile info tuples to process
+    size : int
+        Patch size (e.g., 64)
+    stride : int
+        Stride for sliding window sampling (e.g., 5)
+    
+    Returns
+    -------
+    dataset : np.ndarray
+        Array of sampled patches (filtered for valid patches only)
+    """
+    all_patches = []
+    
+    for i, tile_info in enumerate(tile_infos):
+        try:
+            tile_data = load_tile_for_sampling(tile_info)
+        except Exception as e:
+            event_path, _, _, eid, img_dt = tile_info
+            raise RuntimeError(f"Worker failed to load tile {i} (event_path: {event_path}, eid: {eid}, dt: {img_dt}): {e}") from e
+        
+        _, HEIGHT, WIDTH = tile_data.shape
+        
+        # Check if tile is large enough for patch size
+        if HEIGHT < size or WIDTH < size:
+            event_path, _, _, eid, img_dt = tile_info
+            raise RuntimeError(f"Tile {i} (event_path: {event_path}, eid: {eid}, dt: {img_dt}) is too small ({HEIGHT}x{WIDTH}) for patch size {size}x{size}")
+        
+        # Generate all window positions with edge coverage
+        x_positions = list(range(0, HEIGHT - size + 1, stride))
+        # Ensure rightmost edge is included
+        if x_positions and x_positions[-1] != HEIGHT - size:
+            x_positions.append(HEIGHT - size)
+        
+        y_positions = list(range(0, WIDTH - size + 1, stride))
+        # Ensure bottom edge is included
+        if y_positions and y_positions[-1] != WIDTH - size:
+            y_positions.append(WIDTH - size)
+        
+        # Sample all patches at these positions
+        for x in x_positions:
+            for y in y_positions:
+                patch = tile_data[:, x:x+size, y:y+size]
+                
+                # Filter out missing or high cloud percentage patches
+                if patch_contains_missing_or_cloud(patch):
+                    continue
+                
+                all_patches.append(patch[:22])
+    
+    if len(all_patches) == 0:
+        raise RuntimeError("No valid patches found after filtering")
+    
+    return np.array(all_patches, dtype=np.float32)
+
+def sample_patches_parallel_strided(tile_infos: List[Tuple], size: int, stride: int, 
+                          output_file: Path, sample_dirs: List[str], cfg: DictConfig,
+                          n_workers: int = None) -> None:
+    """Sample patches in parallel with strided sliding window sampling. Each worker samples
+    patches strided, and results are concatenated.
+
+    NOTE: No memory mapping strategy for strided sampling.
+    
+    Parameters
+    ----------
+    tile_infos : List[Tuple]
+        List of tile info tuples to process
+    size : int
+        Patch size (e.g., 64)
+    stride : int
+        Stride for sliding window sampling (e.g., 5)
+    output_file : Path
+        Path to save the output .npy file
+    sample_dirs : List[str]
+        List of sample directories
+    cfg : DictConfig
+        Configuration object
+    n_workers : int, optional
+        Number of worker processes (defaults to 1)
+    """
+    logger = logging.getLogger('preprocessing')
+    
+    if n_workers is None:
+        n_workers = 1
+    
+    logger.info(f'Specified {n_workers} workers for patch sampling.')
+    n_workers = min(n_workers, len(tile_infos))
+    logger.info(f'Using {n_workers} workers for {len(tile_infos)} tiles...')
+    
+    # divide up the labels into n_workers chunks
+    worker_tile_infos = []
+    batch_sizes = []
+    start_idx = 0
+    tiles_per_worker = len(tile_infos) // n_workers
+    tiles_remainder = len(tile_infos) % n_workers
+    for worker_id in range(n_workers):
+        worker_tile_count = tiles_per_worker + (1 if worker_id < tiles_remainder else 0)
+        end_idx = start_idx + worker_tile_count
+        tiles_chunk = tile_infos[start_idx:end_idx]
+        worker_tile_infos.append(tiles_chunk)
+        batch_sizes.append(worker_tile_count)
+        start_idx += worker_tile_count
+        
+    # Log batch distribution
+    logger.info(f'Label distribution per worker: {batch_sizes}')
+    
+    logger.info('Strided sampling uses in-memory arrays and concatenation.')
+
+    try:
+        with mp.Pool(n_workers) as pool:
+            results = pool.starmap(sample_patches_strided, [(tile_infos, size, stride) for tile_infos in worker_tile_infos])
+    except Exception as e:
+        logger.error(f"Failed during parallel strided patch sampling: {e}")
+        logger.error("One or more worker processes failed during strided patch sampling")
+        raise RuntimeError(f"Strided patch sampling failed: {e}") from e
+
+    try:
+        final_arr = np.concatenate(results, axis=0)
+        np.save(output_file, final_arr)
+        logger.info('Sampling complete.')
+    except Exception as e:
+        logger.exception(f"Failed to concatenate results or save output.")
+        raise RuntimeError(f"Failed to save final array: {e}") from e
 
 def build_label_index(label_dirs: list[str], cfg: DictConfig) -> Dict[Tuple[str, str], Path]:
-    """Build a dictionary mapping (img_dt, eid) to the label file path."""
+    """Build a dictionary mapping (s2_img_dt, eid) to the label file path."""
     idx: Dict[Tuple[str, str], Path] = {}
     p = re.compile(r'label_(\d{8})_(\d{8}_\d+_\d+)\.tif$')
     for ld in label_dirs or []:
@@ -665,8 +690,8 @@ def build_label_index(label_dirs: list[str], cfg: DictConfig) -> Dict[Tuple[str,
             m = p.search(fp.name)
             if not m:
                 continue
-            img_dt, eid = m.group(1), m.group(2)
-            idx.setdefault((img_dt, eid), fp)  # keep first occurrence
+            s2_img_dt, eid = m.group(1), m.group(2)
+            idx.setdefault((s2_img_dt, eid), fp)  # keep first occurrence
     return idx
 
 
@@ -677,8 +702,7 @@ def get_manual_label_path(label_idx: Dict[Tuple[str, str], Path],
 
 
 def save_event_splits(train_events: List[Path], val_events: List[Path], test_events: List[Path],
-                      output_dir: Path, split_seed: int, val_ratio: float, test_ratio: float, 
-                      timestamp: str, data_type: str = "sar") -> None:
+                      cfg: DictConfig, output_dir: Path, timestamp: str, data_type: str = "sar") -> None:
     """Save event splits to a YAML file for reproducibility and reference.
     
     Parameters
@@ -689,14 +713,10 @@ def save_event_splits(train_events: List[Path], val_events: List[Path], test_eve
         List of validation event directory paths
     test_events : List[Path]
         List of test event directory paths
+    cfg : DictConfig
+        Config object
     output_dir : Path
         Directory to save the splits file
-    split_seed : int
-        Random seed used for splitting
-    val_ratio : float
-        Validation set ratio
-    test_ratio : float
-        Test set ratio
     timestamp : str
         Timestamp when preprocessing started
     data_type : str
@@ -705,7 +725,7 @@ def save_event_splits(train_events: List[Path], val_events: List[Path], test_eve
     logger = logging.getLogger('preprocessing')
     
     # Create splits file path
-    splits_file = output_dir / f'event_splits_{data_type}_{split_seed}.yaml'
+    splits_file = output_dir / f'metadata.yaml'
     
     # Prepare splits data structure
     event_splits = {
@@ -714,15 +734,20 @@ def save_event_splits(train_events: List[Path], val_events: List[Path], test_eve
         'test': sorted([event.name for event in test_events]),
         'metadata': {
             'data_type': data_type,
-            'split_seed': split_seed,
-            'val_ratio': val_ratio,
-            'test_ratio': test_ratio,
+            'method': cfg.preprocess.method,
+            'size': cfg.preprocess.size,
+            'samples': getattr(cfg.preprocess, 'samples', None),
+            'stride': getattr(cfg.preprocess, 'stride', None),
+            'seed': getattr(cfg.preprocess, 'seed', None),
             'total_events': len(train_events) + len(val_events) + len(test_events),
+            'split_json': getattr(cfg.preprocess, 'split_json', None),
+            'val_ratio': getattr(cfg.preprocess, 'val_ratio', None),
+            'test_ratio': getattr(cfg.preprocess, 'test_ratio', None),
             'train_count': len(train_events),
             'val_count': len(val_events),
             'test_count': len(test_events),
             'timestamp': timestamp
-        }
+        },
     }
     
     # Save to YAML file if yaml is available
@@ -737,58 +762,76 @@ def save_event_splits(train_events: List[Path], val_events: List[Path], test_eve
         logger.error(f'Failed to save event splits: {e}')
         raise
 
-
-def tile_cloud_percentage(scl_path):
-    """Calculates the percentage of pixels in SCL tile that is cloudy or null.
+def get_tile_infos_from_events(events: List[Path], label_idx: Dict[Tuple[str, str], Path] = {}) -> List[Tuple]:
+    """Get S1 SAR VV tile info from event directories. Tile info is grouped together as tuple
+    in the format (event_path: Path, sar_vv_file: Path, label_file: Path, eid: str, s2_img_dt: str, s1_img_dt: str).
     
     Parameters
     ----------
-    scl_path : Path
-        Path to the SCL tile
-
+    events: List[Path]
+        List of event directory paths
+    label_idx: Dict[Tuple[str, str], Path]
+        Dictionary mapping (s2_img_dt, eid) to manual label paths
+    
     Returns
     -------
-    cloud_percentage : float
-        Percentage of pixels in SCL tile that is cloudy or null
+    tile_infos: List[Tuple[Path, Path, Path, str, str, str]]
+        List of S1 SAR VV tile info in a tuple
+        (event_path: Path, sar_vv_file: Path, label_file: Path, eid: str, s2_img_dt: str, s1_img_dt: str)
     """
-    with rasterio.open(scl_path) as src:
-        cloud = src.read()
-    return cloud.sum() / cloud.size
+    logger = logging.getLogger('preprocessing')
+    tile_infos = []
+    sar_p = re.compile(r'sar_(\d{8})_(\d{8})_(\d{8}_\d+_\d+)_vv.tif')
+    for event in events:
+        # only add tiles with machine
+        for sar_vv_file in event.glob('sar_*_vv.tif'):
+            m = sar_p.match(sar_vv_file.name)
+            if not m:
+                logger.debug(f'Tile {sar_vv_file.name} in {event.name} does not match pattern, skipping...')
+                continue
+            s2_img_dt = m.group(1)
+            s1_img_dt = m.group(2)
+            eid = m.group(3)
+            # prioritize human labels over machine labels
+            label_file = label_idx.get((s2_img_dt, eid), None)
+            if label_file is None and (event / f'pred_{s2_img_dt}_{eid}.tif').exists():
+                label_file = event / f'pred_{s2_img_dt}_{eid}.tif'
 
-def has_tile_under_threshold(event: Path, tile_cloud_threshold: float):
-    for scl_file in event.glob('clouds_*[0-9].tif'):
-        if tile_cloud_percentage(scl_file) <= tile_cloud_threshold:
-            return True
-    return False
-
-def filter_cloud_tiles_parallel(events: List[Path], tile_cloud_threshold: float, n_workers: int = None):
-    """Filter out cloudy tiles in parallel.
-
-    Parameters
-    ----------
-    events : List[Path]
-        List of event paths
-    tile_cloud_threshold : float
-        Threshold for filtering out cloudy tiles
-    n_workers : int
-        Number of workers for parallel processing
-    """
-    if n_workers is None:
-        n_workers = 1
-    
-    with mp.Pool(n_workers) as pool:
-        mask = pool.starmap(has_tile_under_threshold, [(e, tile_cloud_threshold) for e in events])
-
-    return [s for s, m in zip(events, mask) if m]
+            if label_file is not None:
+                tile_info = (event, sar_vv_file, label_file, eid, s2_img_dt, s1_img_dt)
+                tile_infos.append(tile_info)
+            else:
+                logger.debug(f'Tile {sar_vv_file.name} in {event.name} missing machine prediction / human label, skipping...')
+                continue
+    return tile_infos
 
 @hydra.main(version_base=None, config_path='pkg://configs', config_name='config.yaml')
 def main(cfg: DictConfig) -> None:
-    """Preprocesses raw S1 tiles and corresponding labels into smaller patches.
+    """Preprocesses raw S1 tiles and coincident S2 label into smaller patches. The data will be stored
+    as separate npy files for train, val, and test sets, along with a mean_std.pkl file containing the
+    mean and std of the training tiles.
 
-    Parameters
-    ----------
-    cfg : DictConfig
-        Hydra configuration object containing all preprocessing parameters.
+    Sample directories are s2_s1 directories containing SAR imagery with coincident S2 labels.
+    Optional label directories can be also provided to use human labels in place of machine labels (pred_*.tif)
+    where possible. If event has associated human label, then the machine label will be replaced by
+    the human label.
+
+    cfg.preprocess.split_json storing a dictionary mapping (y, x) prism coordinates to split,
+    if provided, allows for pre determined split rather than random split.
+    
+    cfg.preprocess Parameters:
+    - size: int (pixel width of patch)
+    - method: str ['random', 'strided']
+    - samples: int (number of samples per image for random method)
+    - stride: int (for strided method)
+    - seed: int (random number generator seed for random method)
+    - n_workers: int (number of workers for parallel processing)
+    - sample_dirs: List[str] (list of sample directories under cfg.data.imagery_dir)
+    - label_dirs: List[str] (list of label directories under cfg.data.imagery_dir)
+    - suffix: str (optional suffix to append to preprocessed folder)
+    - split_json: str (path to json dictionary mapping (y, x) prism coordinates to train, val, test splits)
+    - val_ratio: used for random splitting if no split_json is provided
+    - test_ratio: used for random splitting if no split_json is provided
     """
     # Setup logging
     logger = logging.getLogger('preprocessing')
@@ -803,140 +846,186 @@ def main(cfg: DictConfig) -> None:
     # Set default number of workers
     n_workers = getattr(cfg.preprocess, 'n_workers', 1)
 
-    # Create timestamp for logging
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    logger.info(f'''Starting SAR weak labeling preprocessing:
+    logger.info(f'''Starting S1 manual labeling preprocessing:
         Date:            {timestamp}
         Patch size:      {cfg.preprocess.size}
-        Samples per tile: {cfg.preprocess.samples}
         Sampling method: {cfg.preprocess.method}
-        Filter:          {getattr(cfg.preprocess, 'filter', 'raw')}
-        Patch cloud threshold: {cfg.preprocess.cloud_threshold}
-        Tile cloud threshold: {getattr(cfg.preprocess, 'tile_cloud_threshold', 0.25)}
-        Random seed:     {cfg.preprocess.seed}
+        Samples per tile (Random method): {getattr(cfg.preprocess, 'samples', None)}
+        Stride (Strided method): {getattr(cfg.preprocess, 'stride', None)}
+        Random seed:     {getattr(cfg.preprocess, 'seed', None)}
         Workers:         {n_workers}
         Sample dir(s):   {cfg.preprocess.s1.sample_dirs}
         Label dir(s):    {cfg.preprocess.s1.label_dirs}
+        Suffix:          {getattr(cfg.preprocess, 'suffix', None)}
+        Split JSON:      {getattr(cfg.preprocess, 'split_json', None)}
+        Val ratio:       {getattr(cfg.preprocess, 'val_ratio', None)}
+        Test ratio:      {getattr(cfg.preprocess, 'test_ratio', None)}
     ''')
 
     # Create preprocessing directory
-    filter_str = getattr(cfg.preprocess, 'filter', 'raw')
+    sampling_param = cfg.preprocess.samples if cfg.preprocess.method == 'random' else cfg.preprocess.stride
     if getattr(cfg.preprocess, 'suffix', None):
-        pre_sample_dir = Path(cfg.paths.preprocess_dir) / 's1_weak' / f'samples_{cfg.preprocess.size}_{cfg.preprocess.samples}_{filter_str}_{cfg.preprocess.suffix}'
+        pre_sample_dir = Path(cfg.paths.preprocess_dir) / 's1_weak' / f'{cfg.preprocess.method}_{cfg.preprocess.size}_{sampling_param}_{cfg.preprocess.suffix}'
     else:
-        pre_sample_dir = Path(cfg.paths.preprocess_dir) / 's1_weak' / f'samples_{cfg.preprocess.size}_{cfg.preprocess.samples}_{filter_str}'
+        pre_sample_dir = Path(cfg.paths.preprocess_dir) / 's1_weak' / f'{cfg.preprocess.method}_{cfg.preprocess.size}_{sampling_param}'
     pre_sample_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f'Preprocess directory: {pre_sample_dir.name}')
 
     # Get directories and split ratios from config
     cfg_s1 = cfg.preprocess.get('s1', {})
     sample_dirs_list = cfg_s1.get('sample_dirs', [])
     label_dirs_list = cfg_s1.get('label_dirs', [])
-    split_cfg = cfg_s1.get('split', {})
-    val_ratio = split_cfg.get('val_ratio', 0.1)
-    test_ratio = split_cfg.get('test_ratio', 0.1)
 
-    if len(sample_dirs_list) == 0 or len(label_dirs_list) == 0:
-        raise ValueError('Sample directories and label directories must be non empty.')
+    if len(sample_dirs_list) == 0:
+        raise ValueError('No sample directories were provided.')
 
     # Build label index for manual labels
     label_idx = build_label_index(label_dirs_list, cfg)
 
     # Discover events with required SAR assets
-    selected_events: List[Path] = []
+    all_events: List[Path] = []
+    total_tiles = 0
     seen_eids = set()
-    
+    sar_p = re.compile(r'sar_(\d{8})_(\d{8})_\d{8}_\d+_\d+_vv.tif')
     for sd in sample_dirs_list:
         sample_path = Path(cfg.paths.imagery_dir) / sd
         if not sample_path.is_dir():
             logger.debug(f'Sample directory {sd} is invalid, skipping...')
             continue
         
-        for event_dir in sample_path.glob('[0-9]*'):
+        for event_dir in sample_path.glob('[0-9]*_*_*'):
             if not event_dir.is_dir():
                 continue
             eid = event_dir.name
             if eid in seen_eids:
+                logger.debug(f'Event ID {eid} contained in multiple sample dirs, skipping...')
                 continue
             
-            # Qualify: must have at least one prediction and at least one sar vv tile
-            has_pred = any(event_dir.glob('pred_*.tif'))
-            has_sar_vv = any(event_dir.glob('sar_*_vv.tif'))
+            # Require all S1 tiles have either a machine prediction / human label
+            if any(event_dir.glob('sar_*_vv.tif')):
+                tiles_labeled = 0
+                for sar_vv_file in event_dir.glob('sar_*_vv.tif'):
+                    m = sar_p.match(sar_vv_file.name)
+                    if not m:
+                        continue
+                    s2_img_dt = m.group(1)
+                    if (event_dir / f'pred_{s2_img_dt}_{eid}.tif').exists() or (s2_img_dt, eid) in label_idx:
+                        tiles_labeled += 1
 
-            if has_pred and has_sar_vv:
-                selected_events.append(event_dir)
-                seen_eids.add(eid)
+                if tiles_labeled > 0:
+                    all_events.append(event_dir)
+                    seen_eids.add(eid)
+                    total_tiles += tiles_labeled
+                else:
+                    logger.debug(f'Event {eid} in folder {event_dir.parent} missing labeled SAR tiles, skipping...')
             else:
-                logger.debug(f'Event {eid} in folder {event_dir.parent} did not meet reqs: pred={has_pred}, sar vv={has_sar_vv}')
+                logger.debug(f'Event {eid} in folder {event_dir.parent} missing SAR tile, skipping...')
 
-    # filter cloudy tiles in parallel:
-    tile_cloud_threshold = getattr(cfg.preprocess, 'tile_cloud_threshold', 0.25)
-    filtered_events = filter_cloud_tiles_parallel(selected_events, tile_cloud_threshold, n_workers)
-    logger.info(f'# passed tile cloud threshold (<={tile_cloud_threshold}): {len(filtered_events)}/{len(selected_events)}')
-
-    if len(filtered_events) == 0:
-        logger.error('No events found in provided sample directories. Exiting.')
-        return 1
-
-    logger.info(f'Found {len(filtered_events)} events for processing')
+    logger.info(f'Found {total_tiles} labeled SAR tiles (images) across {len(all_events)} events for preprocessing')
 
     # Split events into train/val/test
-    holdout_ratio = val_ratio + test_ratio
-    if holdout_ratio <= 0 or holdout_ratio >= 1:
-        raise ValueError('Sum of val_ratio and test_ratio must be in (0, 1).')
+    split_json = getattr(cfg.preprocess, 'split_json', None)
+    if split_json is not None:
+        logger.info(f'Split provided by json file: {split_json}')
+        train_events = []
+        val_events = []
+        test_events = []
+        p = re.compile(r'\d{8}_(\d+)_(\d+)')
+        coord_to_split = {}
+        for event in all_events:
+            m = p.match(event.name)
+            if m:
+                y = int(m.group(1))
+                x = int(m.group(2))
+                match coord_to_split.get((y, x), None):
+                    case 'train':
+                        train_events.append(event)
+                    case 'val':
+                        val_events.append(event)
+                    case 'test':
+                        test_events.append(event)
+                    case _:
+                        logger.debug(f'Event {event.name} not assigned to any split, skipping...')
+            else:
+                logger.debug(f'Event {event.name} does not match pattern, skipping...')
+            
+    else:
+        # random splitting of events
+        val_ratio = getattr(cfg.preprocess, 'val_ratio', 0.1)
+        test_ratio = getattr(cfg.preprocess, 'test_ratio', 0.1)
+        logger.info(f'No json file provided, performing random splitting with val_ratio={val_ratio} and test_ratio={test_ratio}...')
+        holdout_ratio = val_ratio + test_ratio
+        if holdout_ratio <= 0 or holdout_ratio >= 1:
+            raise ValueError('Sum of val_ratio and test_ratio must be in (0, 1).')
 
-    train_events, val_test_events = train_test_split(
-        filtered_events, test_size=holdout_ratio, random_state=cfg.preprocess.seed
-    )
-    test_prop_within_holdout = test_ratio / holdout_ratio
-    val_events, test_events = train_test_split(
-        val_test_events, test_size=test_prop_within_holdout, random_state=cfg.preprocess.seed + 1222
-    )
+        train_events, val_test_events = train_test_split(
+            all_events, test_size=holdout_ratio, random_state=cfg.preprocess.seed
+        )
+        test_prop_within_holdout = test_ratio / holdout_ratio
+        val_events, test_events = train_test_split(
+            val_test_events, test_size=test_prop_within_holdout, random_state=cfg.preprocess.seed + 1222
+        )
 
     logger.info(f'Split: {len(train_events)} train, {len(val_events)} val, {len(test_events)} test events')
     
     # Save the event splits for reproducibility and reference
-    save_event_splits(train_events, val_events, test_events, pre_sample_dir, 
-                      cfg.preprocess.seed, val_ratio, test_ratio, timestamp, "sar")
+    save_event_splits(train_events, val_events, test_events, cfg, pre_sample_dir, timestamp, "sar")
 
     # Get list of tiles for splits as events can have multiple valid tiles
-    logger.info('Discovering tiles...')
-    train_tiles = discover_all_tiles(train_events, label_idx, tile_cloud_threshold)
-    val_tiles = discover_all_tiles(val_events, label_idx, tile_cloud_threshold)
-    test_tiles = discover_all_tiles(test_events, label_idx, tile_cloud_threshold)
+    logger.info('Grabbing labeled SAR tiles for splits...')
+    train_tile_infos = get_tile_infos_from_events(train_events, label_idx=label_idx)
+    val_tile_infos = get_tile_infos_from_events(val_events, label_idx=label_idx)
+    test_tile_infos = get_tile_infos_from_events(test_events, label_idx=label_idx)
     
-    logger.info(f'Tiles: {len(train_tiles)} train, {len(val_tiles)} val, {len(test_tiles)} test')
+    logger.info(f'Tiles: {len(train_tile_infos)} train, {len(val_tile_infos)} val, {len(test_tile_infos)} test')
 
     # Compute statistics using parallel Welford's algorithm
-    logger.info('Computing training statistics...')
-    mean_cont, std_cont = compute_statistics_parallel(train_tiles, filter_str, n_workers)
+    logger.info('Computing training statistics for SAR VV, VH, DEM and slope channels...')
+    mean_cont, std_cont = compute_statistics_parallel(train_tile_infos, n_workers)
     
     # Add binary channel statistics (mean=0, std=1)
-    bchannels = 3  # waterbody, roads, flowlines
-    mean_bin = np.zeros(bchannels, dtype=np.float32)
-    std_bin = np.ones(bchannels, dtype=np.float32)
-    mean = np.concatenate([mean_cont, mean_bin])
-    std = np.concatenate([std_cont, std_bin])
+    mean_binary = np.zeros(3, dtype=np.float32)  # waterbody, roads, flowlines
+    std_binary = np.ones(3, dtype=np.float32)
+    mean = np.concatenate([mean_cont, mean_binary])
+    std = np.concatenate([std_cont, std_binary])
     
-    # Save statistics
-    stats_file = pre_sample_dir / f'mean_std_{cfg.preprocess.size}_{cfg.preprocess.samples}_{filter_str}.pkl'
+    # also store training mean std statistics in file
+    stats_file = pre_sample_dir / f'mean_std.pkl'
     with open(stats_file, 'wb') as f:
         pickle.dump((mean, std), f)
-    logger.info(f'Statistics saved to {stats_file}')
+    logger.info(f'Training mean std saved to {stats_file}')
 
     # Sample patches in parallel
     if cfg.preprocess.method == 'random':
-        # Process each split
-        for split_name, tiles in [('train', train_tiles), ('val', val_tiles), ('test', test_tiles)]:
-            if len(tiles) == 0:
-                logger.warning(f'No tiles for {split_name} split, skipping...')
+        # Process each split using parallel sampling
+        for split_name, tile_infos in [('train', train_tile_infos), ('val', val_tile_infos), ('test', test_tile_infos)]:
+            if len(tile_infos) == 0:
+                logger.warning(f'No labeled tiles for {split_name} split, skipping...')
                 continue
             
             output_file = pre_sample_dir / f'{split_name}_patches.npy'
-            logger.info(f'Processing {split_name} split with {len(tiles)} tiles...')
+            logger.info(f'Processing {split_name} split with {len(tile_infos)} tiles...')
             
             sample_patches_parallel(
-                tiles, cfg.preprocess.size, cfg.preprocess.samples, output_file, cfg.preprocess.cloud_threshold, 
-                filter_str, cfg.preprocess.seed, n_workers
+                tile_infos, cfg.preprocess.size, cfg.preprocess.samples, output_file,
+                sample_dirs_list, cfg, cfg.preprocess.seed, n_workers
+            )
+        
+        logger.info('Parallel patch sampling complete.')
+    elif cfg.preprocess.method == 'strided':
+        # Process each split using parallel sampling
+        for split_name, tile_infos in [('train', train_tile_infos), ('val', val_tile_infos), ('test', test_tile_infos)]:
+            if len(tile_infos) == 0:
+                logger.warning(f'No labeled tiles for {split_name} split, skipping...')
+                continue
+            
+            output_file = pre_sample_dir / f'{split_name}_patches.npy'
+            logger.info(f'Processing {split_name} split with {len(tile_infos)} tiles...')
+            
+            sample_patches_parallel_strided(
+                tile_infos, cfg.preprocess.size, cfg.preprocess.stride, output_file,
+                sample_dirs_list, cfg, n_workers
             )
         
         logger.info('Parallel patch sampling complete.')
@@ -944,8 +1033,6 @@ def main(cfg: DictConfig) -> None:
         raise ValueError(f"Unsupported sampling method: {cfg.preprocess.method}")
 
     logger.info('Preprocessing complete.')
-    return 0
-
 
 if __name__ == '__main__':
     main()

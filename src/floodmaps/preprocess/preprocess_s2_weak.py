@@ -26,84 +26,9 @@ from floodmaps.utils.preprocess_utils import (
     compute_awei_nsh,
     compute_ndwi,
     compute_mndwi
-    
 )
 
-def discover_all_tiles(events: List[Path], label_idx: Optional[Dict[Tuple[str, str], Path]] = None) -> List[Tuple]:
-    """Discover all individual tiles across a list of events.
-    
-    Args:
-        events: List of event directory paths
-        label_idx: Optional dictionary mapping (img_dt, eid) to manual label paths
-        
-    Returns:
-        List of tuples: (event_path, rgb_file, label_file, eid, img_dt)
-    """
-    logger = logging.getLogger('preprocessing')
-    tiles = []
-    
-    p1 = re.compile(r'\d{8}_\d+_\d+')
-    p2 = re.compile(r'pred_(\d{8})_.+\.tif')
-    
-    for event in events:
-        # Extract event ID
-        m = p1.search(event.name)
-        if not m:
-            logger.error(f'No matching eid in {event.name}. Skipping...')
-            continue
-        eid = m.group(0)
-        
-        # Find all prediction files and their corresponding S2 files
-        for label in event.glob('pred_*.tif'):
-            m = p2.search(label.name)
-            if not m:
-                continue
-            img_dt = m.group(1)
-            
-            # Find corresponding RGB file
-            rgb_file = event / f'rgb_{img_dt}_{eid}.tif'
-            if not rgb_file.exists():
-                logger.debug(f'RGB file not found for {label.name} in {event.name} (event in folder {event.parent})')
-                continue
-            
-            # Validate that all required files exist
-            required_files = [
-                rgb_file,
-                event / f'b08_{img_dt}_{eid}.tif',
-                event / f'b11_{img_dt}_{eid}.tif',
-                event / f'b12_{img_dt}_{eid}.tif',
-                event / f'ndwi_{img_dt}_{eid}.tif',
-                event / f'tci_{img_dt}_{eid}.tif',
-                event / f'scl_{img_dt}_{eid}.tif',
-                event / f'dem_{eid}.tif',
-                event / f'waterbody_{eid}.tif',
-                event / f'roads_{eid}.tif',
-                event / f'flowlines_{eid}.tif',
-                event / f'nlcd_{eid}.tif'
-            ]
-            
-            # Check if manual label is available
-            final_label = label
-            if label_idx:
-                manual_label_path = get_manual_label_path(label_idx, img_dt, eid)
-                if manual_label_path:
-                    logger.debug(f'Found manual label for tile {rgb_file.name}: {manual_label_path.name} (label in folder {manual_label_path.parent})')
-                    final_label = manual_label_path
-                    required_files.append(manual_label_path)
-            else:
-                required_files.append(label)
-            
-            # Validate all files exist
-            missing_files = [f for f in required_files if not f.exists()]
-            if missing_files:
-                logger.warning(f'Missing files for tile {rgb_file.name} in {event.name}: {[f.name for f in missing_files]} (event in folder {event.parent})')
-                continue
-            
-            tiles.append((event, rgb_file, final_label, eid, img_dt))
-    
-    logger.info(f'Discovered {len(tiles)} valid tiles across {len(events)} events')
-    return tiles
-
+S2_CHANNELS_TO_NORMALIZE = 3
 
 def load_tile_for_stats(tile_info: Tuple[Path, Path, Path, str, str]) -> Tuple[np.ndarray, np.ndarray]:
     """Load the tile data and return the array and mask for DEM and slopes only.
@@ -155,7 +80,7 @@ def process_tiles_batch_for_stats(tiles_batch: List[Tuple]) -> WelfordAccumulato
     Returns:
         WelfordAccumulator with accumulated statistics from all tiles in batch
     """
-    accumulator = WelfordAccumulator(3)  # 3 channels: DEM, slope_y, slope_x
+    accumulator = WelfordAccumulator(S2_CHANNELS_TO_NORMALIZE)  # 3 channels: DEM, slope_y, slope_x
     
     for tile_info in tiles_batch:
         try:
@@ -505,9 +430,8 @@ def sample_patches_in_disk(tiles: List[Tuple], size: int, num_samples: int,
     return tmp_file
 
 
-def sample_patches_parallel(tiles: List[Tuple], size: int, num_samples: int, 
-                          output_file: Path, 
-                          seed: int, n_workers: int = None) -> None:
+def sample_patches_parallel(tile_infos: List[Tuple], size: int, num_samples: int, 
+                          output_file: Path, seed: int, n_workers: int = None) -> None:
     """Sample patches in parallel. Strategy will depend on the memory available. If
     memory is comfortably below the total node memory (on improv you get ~230GB regardless
     of how many cpus requested), then we can just have each worker fill out their own
@@ -518,8 +442,8 @@ def sample_patches_parallel(tiles: List[Tuple], size: int, num_samples: int,
     
     Parameters
     ----------
-    tiles : List[Tuple]
-        List of tile tuples to process
+    tile_infos : List[Tuple]
+        List of tile info tuples to process
     size : int
         Patch size (e.g., 64)
     num_samples : int
@@ -537,10 +461,10 @@ def sample_patches_parallel(tiles: List[Tuple], size: int, num_samples: int,
         n_workers = 1
     
     logger.info(f'Specified {n_workers} workers for patch sampling.')
-    n_workers = min(n_workers, len(tiles))
-    logger.info(f'Using {n_workers} workers for {len(tiles)} tiles...')
+    n_workers = min(n_workers, len(tile_infos))
+    logger.info(f'Using {n_workers} workers for {len(tile_infos)} tiles...')
     
-    total_patches = len(tiles) * num_samples
+    total_patches = len(tile_infos) * num_samples
     array_shape = (total_patches, 22, size, size)
     array_dtype = np.float32
 
@@ -554,12 +478,12 @@ def sample_patches_parallel(tiles: List[Tuple], size: int, num_samples: int,
     worker_tiles = []
     batch_sizes = []
     start_idx = 0
-    tiles_per_worker = len(tiles) // n_workers
-    tiles_remainder = len(tiles) % n_workers
+    tiles_per_worker = len(tile_infos) // n_workers
+    tiles_remainder = len(tile_infos) % n_workers
     for worker_id in range(n_workers):
         worker_tile_count = tiles_per_worker + (1 if worker_id < tiles_remainder else 0)
         end_idx = start_idx + worker_tile_count
-        tiles_chunk = tiles[start_idx:end_idx]
+        tiles_chunk = tile_infos[start_idx:end_idx]
         worker_tiles.append(tiles_chunk)
         batch_sizes.append(worker_tile_count)
         start_idx += worker_tile_count
@@ -573,7 +497,7 @@ def sample_patches_parallel(tiles: List[Tuple], size: int, num_samples: int,
 
         try:
             with mp.Pool(n_workers) as pool:
-                results = pool.starmap(sample_patches_in_mem, [(tile, size, num_samples, seed+i*10000) for i, tile in enumerate(worker_tiles)])
+                results = pool.starmap(sample_patches_in_mem, [(tile_info, size, num_samples, seed+i*10000) for i, tile_info in enumerate(worker_tiles)])
         except Exception as e:
             logger.error(f"Failed during parallel patch sampling (in-memory): {e}")
             logger.error("One or more worker processes failed during patch sampling")
@@ -597,7 +521,7 @@ def sample_patches_parallel(tiles: List[Tuple], size: int, num_samples: int,
         try:
             # each worker writes to their own file
             with mp.Pool(n_workers) as pool:
-                worker_files = pool.starmap(sample_patches_in_disk, [(tile, size, num_samples, seed+i*10000, scratch_dir, i) for i, tile in enumerate(worker_tiles)])
+                worker_files = pool.starmap(sample_patches_in_disk, [(tile_infos, size, num_samples, seed+i*10000, scratch_dir, i) for i, tile_infos in enumerate(worker_tiles)])
         except Exception as e:
             logger.error(f"Failed during parallel patch sampling (memory-mapped): {e}")
             logger.error("One or more worker processes failed during patch sampling")
@@ -639,8 +563,142 @@ def sample_patches_parallel(tiles: List[Tuple], size: int, num_samples: int,
                     logger.warning(f"Failed to clean up scratch directory: {cleanup_e}")
 
 
+def sample_patches_strided(tile_infos: List[Tuple], size: int, stride: int) -> np.ndarray:
+    """Sample patches using a sliding window with stride and complete edge coverage.
+    
+    This function uses a sliding window approach that moves by stride pixels
+    in both x and y directions. It ensures complete coverage by explicitly including
+    positions that cover the right and bottom edges of each tile.
+    
+    Parameters
+    ----------
+    tile_infos : List[Tuple]
+        List of tile info tuples to process
+    size : int
+        Patch size (e.g., 64)
+    stride : int
+        Stride for sliding window sampling (e.g., 5)
+    
+    Returns
+    -------
+    dataset : np.ndarray
+        Array of sampled patches (filtered for valid patches only)
+    """
+    all_patches = []
+    
+    for i, tile_info in enumerate(tile_infos):
+        try:
+            tile_data = load_tile_for_sampling(tile_info)
+        except Exception as e:
+            event_path, _, _, eid, img_dt = tile_info
+            raise RuntimeError(f"Worker failed to load tile {i} (event_path: {event_path}, eid: {eid}, dt: {img_dt}): {e}") from e
+        
+        _, HEIGHT, WIDTH = tile_data.shape
+        
+        # Check if tile is large enough for patch size
+        if HEIGHT < size or WIDTH < size:
+            event_path, _, _, eid, img_dt = tile_info
+            raise RuntimeError(f"Tile {i} (event_path: {event_path}, eid: {eid}, dt: {img_dt}) is too small ({HEIGHT}x{WIDTH}) for patch size {size}x{size}")
+        
+        # Generate all window positions with edge coverage
+        x_positions = list(range(0, HEIGHT - size + 1, stride))
+        # Ensure rightmost edge is included
+        if x_positions and x_positions[-1] != HEIGHT - size:
+            x_positions.append(HEIGHT - size)
+        
+        y_positions = list(range(0, WIDTH - size + 1, stride))
+        # Ensure bottom edge is included
+        if y_positions and y_positions[-1] != WIDTH - size:
+            y_positions.append(WIDTH - size)
+        
+        # Sample all patches at these positions
+        for x in x_positions:
+            for y in y_positions:
+                patch = tile_data[:, x:x+size, y:y+size]
+                
+                # Filter using missing mask (channel 22) and NDWI/MNDWI (channels 6, 7)
+                if patch_contains_missing(patch):
+                    continue
+                
+                all_patches.append(patch[:22])
+    
+    if len(all_patches) == 0:
+        raise RuntimeError("No valid patches found after filtering")
+    
+    return np.array(all_patches, dtype=np.float32)
+
+def sample_patches_parallel_strided(tile_infos: List[Tuple], size: int, stride: int, 
+                          output_file: Path, sample_dirs: List[str], cfg: DictConfig,
+                          n_workers: int = None) -> None:
+    """Sample patches in parallel with strided sliding window sampling. Each worker samples
+    patches strided, and results are concatenated.
+
+    NOTE: No memory mapping strategy for strided sampling.
+    
+    Parameters
+    ----------
+    tile_infos : List[Tuple]
+        List of tile info tuples to process
+    size : int
+        Patch size (e.g., 64)
+    stride : int
+        Stride for sliding window sampling (e.g., 5)
+    output_file : Path
+        Path to save the output .npy file
+    sample_dirs : List[str]
+        List of sample directories
+    cfg : DictConfig
+        Configuration object
+    n_workers : int, optional
+        Number of worker processes (defaults to 1)
+    """
+    logger = logging.getLogger('preprocessing')
+    
+    if n_workers is None:
+        n_workers = 1
+    
+    logger.info(f'Specified {n_workers} workers for patch sampling.')
+    n_workers = min(n_workers, len(tile_infos))
+    logger.info(f'Using {n_workers} workers for {len(tile_infos)} tiles...')
+    
+    # divide up the labels into n_workers chunks
+    worker_tile_infos = []
+    batch_sizes = []
+    start_idx = 0
+    tiles_per_worker = len(tile_infos) // n_workers
+    tiles_remainder = len(tile_infos) % n_workers
+    for worker_id in range(n_workers):
+        worker_tile_count = tiles_per_worker + (1 if worker_id < tiles_remainder else 0)
+        end_idx = start_idx + worker_tile_count
+        tiles_chunk = tile_infos[start_idx:end_idx]
+        worker_tile_infos.append(tiles_chunk)
+        batch_sizes.append(worker_tile_count)
+        start_idx += worker_tile_count
+        
+    # Log batch distribution
+    logger.info(f'Label distribution per worker: {batch_sizes}')
+    
+    logger.info('Strided sampling uses in-memory arrays and concatenation.')
+
+    try:
+        with mp.Pool(n_workers) as pool:
+            results = pool.starmap(sample_patches_strided, [(tile_infos, size, stride) for tile_infos in worker_tile_infos])
+    except Exception as e:
+        logger.error(f"Failed during parallel strided patch sampling: {e}")
+        logger.error("One or more worker processes failed during strided patch sampling")
+        raise RuntimeError(f"Strided patch sampling failed: {e}") from e
+
+    try:
+        final_arr = np.concatenate(results, axis=0)
+        np.save(output_file, final_arr)
+        logger.info('Sampling complete.')
+    except Exception as e:
+        logger.exception(f"Failed to concatenate results or save output.")
+        raise RuntimeError(f"Failed to save final array: {e}") from e
+
+
 def build_label_index(label_dirs: list[str], cfg: DictConfig) -> Dict[Tuple[str, str], Path]:
-    """Build a dictionary mapping (img_dt, eid) to the label file path."""
+    """Build a dictionary mapping (s2_img_dt, eid) to the label file path."""
     idx: Dict[Tuple[str, str], Path] = {}
     p = re.compile(r'label_(\d{8})_(\d{8}_\d+_\d+)\.tif$')
     for ld in label_dirs or []:
@@ -651,8 +709,8 @@ def build_label_index(label_dirs: list[str], cfg: DictConfig) -> Dict[Tuple[str,
             m = p.search(fp.name)
             if not m:
                 continue
-            img_dt, eid = m.group(1), m.group(2)
-            idx.setdefault((img_dt, eid), fp)  # keep first occurrence
+            s2_img_dt, eid = m.group(1), m.group(2)
+            idx.setdefault((s2_img_dt, eid), fp)  # keep first occurrence
     return idx
 
 
@@ -662,9 +720,8 @@ def get_manual_label_path(label_idx: Dict[Tuple[str, str], Path],
     return label_idx.get((img_dt, eid))
 
 
-def save_event_splits(train_events: List[Path], val_events: List[Path], test_events: List[Path],
-                      output_dir: Path, split_seed: int, val_ratio: float, test_ratio: float, 
-                      timestamp: str, data_type: str = "s2") -> None:
+def save_event_splits(train_events: List[Path], val_events: List[Path], test_events: List[Path], cfg: DictConfig,
+                      output_dir: Path, timestamp: str, data_type: str = "s2") -> None:
     """Save event splits to a YAML file for reproducibility and reference.
     
     Parameters
@@ -675,14 +732,10 @@ def save_event_splits(train_events: List[Path], val_events: List[Path], test_eve
         List of validation event directory paths
     test_events : List[Path]
         List of test event directory paths
+    cfg : DictConfig
+        Config object
     output_dir : Path
         Directory to save the splits file
-    split_seed : int
-        Random seed used for splitting
-    val_ratio : float
-        Validation set ratio
-    test_ratio : float
-        Test set ratio
     timestamp : str
         Timestamp when preprocessing started
     data_type : str
@@ -691,7 +744,7 @@ def save_event_splits(train_events: List[Path], val_events: List[Path], test_eve
     logger = logging.getLogger('preprocessing')
     
     # Create splits file path
-    splits_file = output_dir / f'event_splits_{data_type}_{split_seed}.yaml'
+    splits_file = output_dir / f'metadata.yaml'
     
     # Prepare splits data structure
     event_splits = {
@@ -700,10 +753,15 @@ def save_event_splits(train_events: List[Path], val_events: List[Path], test_eve
         'test': sorted([event.name for event in test_events]),
         'metadata': {
             'data_type': data_type,
-            'split_seed': split_seed,
-            'val_ratio': val_ratio,
-            'test_ratio': test_ratio,
+            'method': cfg.preprocess.method,
+            'size': cfg.preprocess.size,
+            'samples': getattr(cfg.preprocess, 'samples', None),
+            'stride': getattr(cfg.preprocess, 'stride', None),
+            'seed': getattr(cfg.preprocess, 'seed', None),
             'total_events': len(train_events) + len(val_events) + len(test_events),
+            'split_json': getattr(cfg.preprocess, 'split_json', None),
+            'val_ratio': getattr(cfg.preprocess, 'val_ratio', None),
+            'test_ratio': getattr(cfg.preprocess, 'test_ratio', None),
             'train_count': len(train_events),
             'val_count': len(val_events),
             'test_count': len(test_events),
@@ -722,6 +780,48 @@ def save_event_splits(train_events: List[Path], val_events: List[Path], test_eve
     except Exception as e:
         logger.error(f'Failed to save event splits: {e}')
         raise
+
+def get_tile_infos_from_events(events: List[Path], label_idx: Dict[Tuple[str, str], Path] = {}) -> List[Tuple]:
+    """Get S2 rgb tile info from event directories. Tile info is grouped together as tuple
+    in the format (event_path: Path, rgb_file: Path, label_file: Path, eid: str, s2_img_dt: str).
+    
+    Parameters
+    ----------
+    events: List[Path]
+        List of event directory paths
+    label_idx: Dict[Tuple[str, str], Path]
+        Dictionary mapping (s2_img_dt, eid) to manual label paths
+    
+    Returns
+    -------
+    tile_infos: List[Tuple[Path, Path, Path, str, str]]
+        List of S2 rgb tile info in a tuple
+        (event_path: Path, rgb_file: Path, label_file: Path, eid: str, s2_img_dt: str)
+    """
+    logger = logging.getLogger('preprocessing')
+    tile_infos = []
+    s2_p = re.compile(r'rgb_(\d{8})_(\d{8}_\d+_\d+).tif')
+    for event in events:
+        # only add tiles with machine prediction / human label
+        for rgb_file in event.glob('rgb_*.tif'):
+            m = s2_p.match(rgb_file.name)
+            if not m:
+                logger.debug(f'Tile {rgb_file.name} in {event.name} does not match pattern, skipping...')
+                continue
+            s2_img_dt = m.group(1)
+            eid = m.group(2)
+            # prioritize human labels over machine labels
+            label_file = label_idx.get((s2_img_dt, eid), None)
+            if label_file is None and (event / f'pred_{s2_img_dt}_{eid}.tif').exists():
+                label_file = event / f'pred_{s2_img_dt}_{eid}.tif'
+
+            if label_file is not None:
+                tile_info = (event, rgb_file, label_file, eid, s2_img_dt)
+                tile_infos.append(tile_info)
+            else:
+                logger.debug(f'Tile {rgb_file.name} in {event.name} missing machine prediction / human label, skipping...')
+                continue
+    return tile_infos
 
 
 @hydra.main(version_base=None, config_path='pkg://configs', config_name='config.yaml')
@@ -750,39 +850,44 @@ def main(cfg: DictConfig) -> None:
     logger.info(f'''Starting S2 weak labeling preprocessing:
         Date:            {timestamp}
         Patch size:      {cfg.preprocess.size}
-        Samples per tile: {cfg.preprocess.samples}
         Sampling method: {cfg.preprocess.method}
+        Samples per tile (Random method): {getattr(cfg.preprocess, 'samples', None)}
+        Stride (Strided method): {getattr(cfg.preprocess, 'stride', None)}
         Random seed:     {cfg.preprocess.seed}
         Workers:         {n_workers}
         Sample dir(s):   {cfg.preprocess.s2.sample_dirs}
         Label dir(s):    {cfg.preprocess.s2.label_dirs}
         Suffix:          {getattr(cfg.preprocess, 'suffix', None)}
+        Split JSON:      {getattr(cfg.preprocess, 'split_json', None)}
+        Val ratio:       {getattr(cfg.preprocess, 'val_ratio', None)}
+        Test ratio:      {getattr(cfg.preprocess, 'test_ratio', None)}
     ''')
 
     # Create preprocessing directory
+    sampling_param = cfg.preprocess.samples if cfg.preprocess.method == 'random' else cfg.preprocess.stride
     if getattr(cfg.preprocess, 'suffix', None):
-        pre_sample_dir = Path(cfg.paths.preprocess_dir) / 's2_weak' / f'samples_{cfg.preprocess.size}_{cfg.preprocess.samples}_{cfg.preprocess.suffix}'
+        pre_sample_dir = Path(cfg.paths.preprocess_dir) / 's2_weak' / f'{cfg.preprocess.method}_{cfg.preprocess.size}_{sampling_param}_{cfg.preprocess.suffix}'
     else:
-        pre_sample_dir = Path(cfg.paths.preprocess_dir) / 's2_weak' / f'samples_{cfg.preprocess.size}_{cfg.preprocess.samples}'
+        pre_sample_dir = Path(cfg.paths.preprocess_dir) / 's2_weak' / f'{cfg.preprocess.method}_{cfg.preprocess.size}_{sampling_param}'
     pre_sample_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f'Preprocess directory: {pre_sample_dir.name}')
 
     # Get directories and split ratios from config
     cfg_s2 = cfg.preprocess.get('s2', {})
     sample_dirs_list = cfg_s2.get('sample_dirs', [])
     label_dirs_list = cfg_s2.get('label_dirs', [])
-    split_cfg = cfg_s2.get('split', {})
-    val_ratio = split_cfg.get('val_ratio', 0.1)
-    test_ratio = split_cfg.get('test_ratio', 0.1)
 
-    if len(sample_dirs_list) == 0 or len(label_dirs_list) == 0:
-        raise ValueError('Sample directories and label directories must be non empty.')
+    if len(sample_dirs_list) == 0:
+        raise ValueError('No sample directories were provided.')
 
     # Build label index for manual labels
     label_idx = build_label_index(label_dirs_list, cfg)
 
     # Discover events with required S2 assets
-    selected_events: List[Path] = []
+    all_events: List[Path] = []
+    total_tiles = 0
     seen_eids = set()
+    s2_p = re.compile(r'rgb_(\d{8})_(\d{8}_\d+_\d+).tif')
     
     for sd in sample_dirs_list:
         sample_path = Path(cfg.paths.imagery_dir) / sd
@@ -790,56 +895,96 @@ def main(cfg: DictConfig) -> None:
             logger.debug(f'Sample directory {sd} is invalid, skipping...')
             continue
         
-        for event_dir in sample_path.glob('[0-9]*'):
+        for event_dir in sample_path.glob('[0-9]*_*_*'):
             if not event_dir.is_dir():
                 continue
             eid = event_dir.name
             if eid in seen_eids:
+                logger.debug(f'Event ID {eid} contained in multiple sample dirs, skipping...')
                 continue
             
-            # Qualify: must have at least one prediction and at least one rgb tile
-            has_pred = any(event_dir.glob('pred_*.tif'))
-            has_rgb = any(event_dir.glob('rgb_*.tif'))
-            if has_pred and has_rgb:
-                selected_events.append(event_dir)
-                seen_eids.add(eid)
+            # Require all S2 tiles have either a machine prediction / human label
+            if any(event_dir.glob('rgb_*.tif')):
+                tiles_labeled = 0
+                for s2_file in event_dir.glob('rgb_*.tif'):
+                    m = s2_p.search(s2_file.name)
+                    if not m:
+                        continue
+                    s2_img_dt = m.group(1)
+                    # Check if prediction exists or manual label exists
+                    if (event_dir / f'pred_{s2_img_dt}_{eid}.tif').exists() or (s2_img_dt, eid) in label_idx:
+                        tiles_labeled += 1
 
-    if len(selected_events) == 0:
-        logger.error('No events found in provided sample directories. Exiting.')
-        return 1
+                if tiles_labeled > 0:
+                    all_events.append(event_dir)
+                    seen_eids.add(eid)
+                    total_tiles += tiles_labeled
+                else:
+                    logger.debug(f'Event {eid} in folder {event_dir.parent} missing labeled S2 tiles, skipping...')
+            else:
+                logger.debug(f'Event {eid} in folder {event_dir.parent} missing S2 tile, skipping...')
 
-    logger.info(f'Found {len(selected_events)} events for processing')
+    logger.info(f'Found {total_tiles} labeled S2 tiles (images) across {len(all_events)} events for preprocessing')
 
     # Split events into train/val/test
-    holdout_ratio = val_ratio + test_ratio
-    if holdout_ratio <= 0 or holdout_ratio >= 1:
-        raise ValueError('Sum of val_ratio and test_ratio must be in (0, 1).')
+    split_json = getattr(cfg.preprocess, 'split_json', None)
+    if split_json is not None:
+        logger.info(f'Split provided by json file: {split_json}')
+        train_events = []
+        val_events = []
+        test_events = []
+        p = re.compile(r'\d{8}_(\d+)_(\d+)')
+        coord_to_split = {}
+        for event in all_events:
+            m = p.match(event.name)
+            if m:
+                y = int(m.group(1))
+                x = int(m.group(2))
+                match coord_to_split.get((y, x), None):
+                    case 'train':
+                        train_events.append(event)
+                    case 'val':
+                        val_events.append(event)
+                    case 'test':
+                        test_events.append(event)
+                    case _:
+                        logger.debug(f'Event {event.name} not assigned to any split, skipping...')
+            else:
+                logger.debug(f'Event {event.name} does not match pattern, skipping...')
+            
+    else:
+        # random splitting of events
+        val_ratio = getattr(cfg.preprocess, 'val_ratio', 0.1)
+        test_ratio = getattr(cfg.preprocess, 'test_ratio', 0.1)
+        logger.info(f'No json file provided, performing random splitting with val_ratio={val_ratio} and test_ratio={test_ratio}...')
+        holdout_ratio = val_ratio + test_ratio
+        if holdout_ratio <= 0 or holdout_ratio >= 1:
+            raise ValueError('Sum of val_ratio and test_ratio must be in (0, 1).')
 
-    train_events, val_test_events = train_test_split(
-        selected_events, test_size=holdout_ratio, random_state=cfg.preprocess.seed
-    )
-    test_prop_within_holdout = test_ratio / holdout_ratio
-    val_events, test_events = train_test_split(
-        val_test_events, test_size=test_prop_within_holdout, random_state=cfg.preprocess.seed + 1222
-    )
+        train_events, val_test_events = train_test_split(
+            all_events, test_size=holdout_ratio, random_state=cfg.preprocess.seed
+        )
+        test_prop_within_holdout = test_ratio / holdout_ratio
+        val_events, test_events = train_test_split(
+            val_test_events, test_size=test_prop_within_holdout, random_state=cfg.preprocess.seed + 1222
+        )
 
     logger.info(f'Split: {len(train_events)} train, {len(val_events)} val, {len(test_events)} test events')
-
-    # Save the event splits for reproducibility and reference
-    save_event_splits(train_events, val_events, test_events, pre_sample_dir, 
-                      cfg.preprocess.seed, val_ratio, test_ratio, timestamp, "s2")
-
-    # Get list of tiles for splits as events can have multiple valid tiles
-    logger.info('Discovering tiles...')
-    train_tiles = discover_all_tiles(train_events, label_idx)
-    val_tiles = discover_all_tiles(val_events, label_idx)
-    test_tiles = discover_all_tiles(test_events, label_idx)
     
-    logger.info(f'Tiles: {len(train_tiles)} train, {len(val_tiles)} val, {len(test_tiles)} test')
+    # Save the event splits for reproducibility and reference
+    save_event_splits(train_events, val_events, test_events, cfg, pre_sample_dir, timestamp, "s2")
+
+    # Get list of tiles and their info for splits as events can have multiple valid tiles
+    logger.info('Grabbing labeled S2 tile info for splits...')
+    train_tile_infos = get_tile_infos_from_events(train_events, label_idx=label_idx)
+    val_tile_infos = get_tile_infos_from_events(val_events, label_idx=label_idx)
+    test_tile_infos = get_tile_infos_from_events(test_events, label_idx=label_idx)
+    
+    logger.info(f'Tiles: {len(train_tile_infos)} train, {len(val_tile_infos)} val, {len(test_tile_infos)} test')
 
     # Compute statistics using parallel Welford's algorithm (only for DEM and slopes)
     logger.info('Computing training statistics for DEM and slope channels...')
-    mean_dem_slopes, std_dem_slopes = compute_statistics_parallel(train_tiles, n_workers)
+    mean_dem_slopes, std_dem_slopes = compute_statistics_parallel(train_tile_infos, n_workers)
     
     # Construct final mean and std arrays for 16 input channels:
     # Channels 0-9: RGB(3), B08(1), SWIR1(1), SWIR2(1), NDWI(1), MNDWI(1), AWEI_sh(1), AWEI_nsh(1)
@@ -855,30 +1000,44 @@ def main(cfg: DictConfig) -> None:
     std = np.concatenate([std_spectral, std_dem_slopes, std_binary])
     
     # Save statistics
-    stats_file = pre_sample_dir / f'mean_std_{cfg.preprocess.size}_{cfg.preprocess.samples}.pkl'
+    stats_file = pre_sample_dir / f'mean_std.pkl'
     with open(stats_file, 'wb') as f:
         pickle.dump((mean, std), f)
-    logger.info(f'Statistics saved to {stats_file}')
+    logger.info(f'Training mean std saved to {stats_file}')
 
     # Sample patches in parallel
     if cfg.preprocess.method == 'random':
         # Process each split
-        for split_name, tiles in [('train', train_tiles), ('val', val_tiles), ('test', test_tiles)]:
-            if len(tiles) == 0:
-                logger.warning(f'No tiles for {split_name} split, skipping...')
+        for split_name, tile_infos in [('train', train_tile_infos), ('val', val_tile_infos), ('test', test_tile_infos)]:
+            if len(tile_infos) == 0:
+                logger.warning(f'No labeled tiles for {split_name} split, skipping...')
                 continue
             
             output_file = pre_sample_dir / f'{split_name}_patches.npy'
-            logger.info(f'Processing {split_name} split with {len(tiles)} tiles...')
+            logger.info(f'Processing {split_name} split with {len(tile_infos)} tiles...')
             
             sample_patches_parallel(
-                tiles, cfg.preprocess.size, cfg.preprocess.samples, output_file, 
+                tile_infos, cfg.preprocess.size, cfg.preprocess.samples, output_file, 
                 cfg.preprocess.seed, n_workers
             )
         
         logger.info('Parallel patch sampling complete.')
     else:
-        raise ValueError(f"Unsupported sampling method: {cfg.preprocess.method}")
+        # Process each split using parallel sampling
+        for split_name, tile_infos in [('train', train_tile_infos), ('val', val_tile_infos), ('test', test_tile_infos)]:
+            if len(tile_infos) == 0:
+                logger.warning(f'No labeled tiles for {split_name} split, skipping...')
+                continue
+            
+            output_file = pre_sample_dir / f'{split_name}_patches.npy'
+            logger.info(f'Processing {split_name} split with {len(tile_infos)} tiles...')
+            
+            sample_patches_parallel_strided(
+                tile_infos, cfg.preprocess.size, cfg.preprocess.stride, output_file,
+                sample_dirs_list, cfg, n_workers
+            )
+        
+        logger.info('Parallel patch sampling complete.')
 
     logger.info('Preprocessing complete.')
     return 0

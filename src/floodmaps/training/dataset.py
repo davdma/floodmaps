@@ -204,7 +204,7 @@ class FloodSampleSARDataset(Dataset):
     8. Flowlines
 
     The last N+1 channel is the label, N+2 - N+4 channel is the TCI
-    and the N+5 channel is the NLCD land cover classes.
+    and the N+5 channel is the NLCD land cover classes, N+6 is the SCL.
 
     Parameters
     ----------

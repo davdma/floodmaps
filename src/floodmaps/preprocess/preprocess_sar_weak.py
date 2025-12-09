@@ -459,8 +459,6 @@ def sample_patches_strided(chunk_tile_infos: List[Tuple], size: int, stride: int
     
     for i, tile_info in enumerate(chunk_tile_infos):
         event_path, _, _, eid, s2_img_dt, s1_img_dt = tile_info
-        # DEBUG
-        print(f'Processing tile {i} (event_path: {event_path}, eid: {eid}, s2_img_dt: {s2_img_dt}, s1_img_dt: {s1_img_dt})')
         try:
             tile_data = load_tile_for_sampling(tile_info)
         except Exception as e:
@@ -490,13 +488,9 @@ def sample_patches_strided(chunk_tile_infos: List[Tuple], size: int, stride: int
                 
                 # Filter out missing or high cloud percentage patches
                 if calculate_missing_percent(patch[14]) > missing_percent:
-                    # DEBUG
-                    print(f'Skipping patch {x},{y} because missing percent is {calculate_missing_percent(patch[14])}')
                     continue
             
                 if calculate_cloud_percent(patch[13], classes=SCL_CLOUD_CLASSES) > cloud_percent:
-                    # DEBUG
-                    print(f'Skipping patch {x},{y} because cloud percent is {calculate_cloud_percent(patch[13], classes=SCL_CLOUD_CLASSES)}')
                     continue
                 
                 all_patches.append(patch[:SAR_DATASET_CHANNELS])
@@ -580,8 +574,6 @@ def sample_patches_parallel_strided(preprocess_dir: Path, tile_infos: List[Tuple
         total_patches = 0
         for tmp_file in chunk_files:
             arr = np.load(tmp_file, mmap_mode='r') # this does not actually read data into memory, just header info
-            # FOR DEBUG PURPOSES
-            logger.info(f'Chunk {tmp_file.name} has {arr.shape} shape')
             total_patches += arr.shape[0]
         logger.info(f'Total patches read from {len(chunk_files)} chunks: {total_patches}')
 

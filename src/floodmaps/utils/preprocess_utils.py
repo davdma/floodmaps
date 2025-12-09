@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Tuple
+from typing import Tuple, List
 from datetime import datetime
 
 # S2 processing baseline offset correction
@@ -148,3 +148,11 @@ def impute_missing_values(arr, missing_mask):
         return new_arr
     else:
         raise ValueError(f"Array must be either H, W or C, H, W")
+
+def calculate_missing_percent(missing_mask: np.ndarray) -> float:
+    """Calculate the percentage of missing values in the missing mask."""
+    return (missing_mask.sum() / missing_mask.size)
+
+def calculate_cloud_percent(scl: np.ndarray, classes: List[int]) -> float:
+    """Calculate the percentage of cloud classes in the SCL array."""
+    return (np.isin(scl, classes).sum() / scl.size)

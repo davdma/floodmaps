@@ -1,4 +1,3 @@
-from glob import glob
 import rasterio
 import numpy as np
 from pathlib import Path
@@ -9,29 +8,34 @@ import logging
 import pickle
 from sklearn.model_selection import train_test_split
 from typing import List, Optional, Tuple, Dict
-import multiprocessing as mp
-import psutil
-import shutil
-from numpy.lib.format import open_memmap
 from datetime import datetime
 import hydra
 from omegaconf import DictConfig
 import yaml
-from floodmaps.utils.preprocess_utils import WelfordAccumulator
+from floodmaps.utils.preprocess_utils import WelfordAccumulator, calculate_missing_percent, calculate_cloud_percent
+import json
+import concurrent.futures
 
+# 5 channels to normalize: VV, VH, DEM, slope_y, slope_x
+SAR_DATASET_CHANNELS = 14
 SAR_CHANNELS_TO_NORMALIZE = 5
+SAR_MISSING_VALUE = -9999
+S2_RGB_MISSING_VALUE = 0
+SCL_CLOUD_CLASSES = [8, 9]
 
-def load_tile_for_stats(tile_info: Tuple[Path, Path, Path, str, str], filter_type: str) -> Tuple[np.ndarray, np.ndarray]:
+def load_tile_for_stats(tile_info: Tuple[Path, Path, Path, str, str]) -> Tuple[np.ndarray, np.ndarray]:
     """Load the tile data and return the array and mask.
     
-    Args:
-        tile_info: Tuple of (event_path, sar_vv_file, label_file, eid, img_dt)
-        filter_type: 'raw' or 'lee' for SAR filtering
+    Parameters
+    ----------
+    tile_info : Tuple[Path, Path, Path, str, str, str]
+        Tuple of (event_path, sar_vv_file, label_file, eid, s2_img_dt, s1_img_dt)
         
-    Returns:
+    Returns
+    -------
         Tuple of (arr, mask) for the 5 non-binary channels
     """
-    event, sar_vv_file, label_file, eid, img_dt = tile_info
+    event, sar_vv_file, label_file, eid, s2_img_dt, s1_img_dt = tile_info
     
     # Load SAR data
     sar_vh_file = sar_vv_file.with_name(sar_vv_file.name.replace("_vv.tif", "_vh.tif"))
@@ -41,23 +45,11 @@ def load_tile_for_stats(tile_info: Tuple[Path, Path, Path, str, str], filter_typ
     with rasterio.open(sar_vh_file) as src:
         vh_raster = src.read()
     
-    # Apply speckle filter if requested
-    if filter_type == "lee":
-        vv_raster = np.expand_dims(
-            enhanced_lee_filter(vv_raster[0], kernel_size=5).astype(np.float32), axis=0
-        )
-        vh_raster = np.expand_dims(
-            enhanced_lee_filter(vh_raster[0], kernel_size=5).astype(np.float32), axis=0
-        )
-    
     # Load ancillary data
     dem_file = event / f'dem_{eid}.tif'
-    cloud_file = event / f'clouds_{img_dt}_{eid}.tif'
     
     with rasterio.open(dem_file) as src:
         dem_raster = src.read()
-    with rasterio.open(cloud_file) as src:
-        cloud_raster = src.read()
     
     # Calculate slopes
     slope = np.gradient(dem_raster, axis=(1, 2))
@@ -70,38 +62,40 @@ def load_tile_for_stats(tile_info: Tuple[Path, Path, Path, str, str], filter_typ
     )).astype(np.float32)
     
     # Create mask for valid pixels
-    mask = ((vv_raster[0] != -9999) & 
-            (vh_raster[0] != -9999) & 
-            (cloud_raster[0] != 1))
+    mask = ((vv_raster[0] != SAR_MISSING_VALUE) & (vh_raster[0] != SAR_MISSING_VALUE))
     
     return stack, mask
 
 
-def process_tiles_batch_for_stats(tiles_batch: List[Tuple], filter_type: str) -> WelfordAccumulator:
+def process_tiles_batch_for_stats(tiles_batch: List[Tuple]) -> WelfordAccumulator:
     """Process a batch of tiles assigned to one worker using NumPy + Welford merging.
     
-    Args:
-        tiles_batch: List of tile tuples assigned to this worker
-        filter_type: 'raw' or 'lee' for SAR filtering
-        
-    Returns:
+    Parameters
+    ----------
+    tiles_batch : List[Tuple]
+        List of tile tuples assigned to this worker
+
+    Returns
+    -------
         WelfordAccumulator with accumulated statistics from all tiles in batch
     """
     accumulator = WelfordAccumulator(SAR_CHANNELS_TO_NORMALIZE)  # 5 non-binary channels for SAR
     
     for tile_info in tiles_batch:
         try:
-            arr, mask = load_tile_for_stats(tile_info, filter_type)
+            arr, mask = load_tile_for_stats(tile_info)
             accumulator.update(arr, mask)
+            arr = None
+            mask = None
         except Exception as e:
             # Add context about which tile failed
-            _, _, _, eid, img_dt = tile_info
-            raise RuntimeError(f"Worker failed processing tile (eid: {eid}, dt: {img_dt}): {e}") from e
+            _, _, _, eid, s2_img_dt, s1_img_dt = tile_info
+            raise RuntimeError(f"Worker failed processing tile (eid: {eid}, s2_img_dt: {s2_img_dt}, s1_img_dt: {s1_img_dt}): {e}") from e
     
     return accumulator
 
 
-def compute_statistics_parallel(train_tiles: List[Tuple], filter_type: str, n_workers: int = None) -> Tuple[np.ndarray, np.ndarray]:
+def compute_statistics_parallel(train_tiles: List[Tuple], n_workers: int = None) -> Tuple[np.ndarray, np.ndarray]:
     """Compute mean and std using optimized parallel Welford's algorithm.
     
     This implementation:
@@ -114,8 +108,6 @@ def compute_statistics_parallel(train_tiles: List[Tuple], filter_type: str, n_wo
     ----------
     train_tiles : List[Tuple]
         List of tile tuples for training set
-    filter_type : str
-        'raw' or 'lee' for SAR filtering
     n_workers : int, optional
         Number of worker processes (defaults to CPU count)
         
@@ -130,6 +122,10 @@ def compute_statistics_parallel(train_tiles: List[Tuple], filter_type: str, n_wo
     
     if n_workers is None:
         n_workers = 1
+    
+    # Handle empty tiles case
+    if len(train_tiles) == 0:
+        raise ValueError('No training tiles provided for statistics computation')
     
     # Ensure we don't have more workers than tiles
     logger.info(f'Specified {n_workers} workers for statistics computation.')
@@ -159,18 +155,16 @@ def compute_statistics_parallel(train_tiles: List[Tuple], filter_type: str, n_wo
     
     # Process tile batches in parallel
     try:
-        with mp.Pool(n_workers) as pool:
-            worker_accumulators = pool.starmap(
-                process_tiles_batch_for_stats,
-                [(batch, filter_type) for batch in tile_batches]
-            )
+        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = [executor.submit(process_tiles_batch_for_stats, batch) for batch in tile_batches]
+            worker_accumulators = [future.result() for future in futures]
     except Exception as e:
         logger.error(f"Failed during parallel statistics computation: {e}")
         logger.error("One or more worker processes failed during statistics calculation")
         raise RuntimeError(f"Statistics computation failed: {e}") from e
     
     # Merge worker accumulators (much fewer merge operations)
-    final_accumulator = WelfordAccumulator(5)
+    final_accumulator = WelfordAccumulator(SAR_CHANNELS_TO_NORMALIZE)
     total_pixels = 0
     
     for worker_acc in worker_accumulators:
@@ -186,11 +180,13 @@ def compute_statistics_parallel(train_tiles: List[Tuple], filter_type: str, n_wo
 
 def load_tile_for_sampling(tile_info: Tuple):
     """Load a tile and return the stacked raster for patch sampling.
+
+    Result is 15 channel stack with 15th channel being the missing mask.
     
     Parameters
     ----------
     tile_info : Tuple
-        Tuple of (event_path, sar_vv_file, label_file, eid, img_dt)
+        Tuple of (event_path, sar_vv_file, label_file, eid, s2_img_dt, s1_img_dt)
         
     Returns
     -------
@@ -199,14 +195,15 @@ def load_tile_for_sampling(tile_info: Tuple):
     missing_clouds_raster : np.ndarray
         Missing mask and cloud mask of the tile
     """
-    event_path, sar_vv_file, label_file, eid, img_dt = tile_info
+    event_path, sar_vv_file, label_file, eid, s2_img_dt, s1_img_dt = tile_info
     sar_vh_file = sar_vv_file.with_name(sar_vv_file.name.replace("_vv.tif", "_vh.tif"))
-    tci_file = event_path / f'tci_{img_dt}_{eid}.tif'
+    tci_file = event_path / f'tci_{s2_img_dt}_{eid}.tif'
+    rgb_file = event_path / f'rgb_{s2_img_dt}_{eid}.tif'
     dem_file = event_path / f'dem_{eid}.tif'
     waterbody_file = event_path / f'waterbody_{eid}.tif'
     roads_file = event_path / f'roads_{eid}.tif'
     flowlines_file = event_path / f'flowlines_{eid}.tif'
-    cloud_file = event_path / f'clouds_{img_dt}_{eid}.tif'
+    scl_file = event_path / f'scl_{s2_img_dt}_{eid}.tif'
     nlcd_file = event_path / f'nlcd_{eid}.tif'
 
     with rasterio.open(label_file) as src: 
@@ -221,6 +218,9 @@ def load_tile_for_sampling(tile_info: Tuple):
 
     # tci floats
     tci_floats = (tci_raster / 255).astype(np.float32)
+
+    with rasterio.open(rgb_file) as src:
+        rgb_raster = src.read()
 
     with rasterio.open(sar_vv_file) as src:
         vv_raster = src.read()
@@ -246,307 +246,195 @@ def load_tile_for_sampling(tile_info: Tuple):
     with rasterio.open(nlcd_file) as src:
         nlcd_raster = src.read()
 
-    with rasterio.open(cloud_file) as src:
-        cloud_raster = src.read()
+    with rasterio.open(scl_file) as src:
+        scl_raster = src.read()
+    
+    # missing mask
+    missing_mask = ((vv_raster[0] == SAR_MISSING_VALUE) | (vh_raster[0] == SAR_MISSING_VALUE) | (rgb_raster[0] == S2_RGB_MISSING_VALUE))
+    missing_mask = np.expand_dims(missing_mask, axis = 0).astype(np.float32)
 
-    stacked_raster = np.vstack((vv_raster, vh_raster, dem_raster,
+    stacked_tile = np.vstack((vv_raster, vh_raster, dem_raster,
                                 slope_y_raster, slope_x_raster,
                                 waterbody_raster, roads_raster, flowlines_raster, 
-                                label_binary, tci_floats, nlcd_raster), dtype=np.float32)
+                                label_binary, tci_floats, nlcd_raster, scl_raster,
+                                missing_mask), dtype=np.float32)
     
-    # missing mask and cloud mask
-    missing_raster = np.any(tci_raster == 0, axis = 0).astype(np.uint8)
-    missing_raster = np.expand_dims(missing_raster, axis = 0)
-    cloud_raster = cloud_raster.astype(np.uint8)
-    missing_clouds_raster = np.vstack((missing_raster, cloud_raster), dtype=np.uint8)
-    
-    return stacked_raster, missing_clouds_raster
+    return stacked_tile
 
 
-def sample_patches_in_mem(tiles: List[Tuple], size: int, num_samples: int, cloud_threshold: float,
-                          filter_type: str, seed: int, max_attempts: int = 20000) -> np.ndarray:
-    """Sample patches and stores them in memory.
+def sample_patches_random(chunk_tile_infos: List[Tuple], size: int, num_samples: int,
+        missing_percent: float, cloud_percent: float, seed: int, save_file: Path, max_attempts: int = 20000) -> None:
+    """Sample patches using random uniform sampling. Stops sampling once
+    the max number of attempts is reached or the number of patches sampled is reached.
+    If the number of patches is less than the requested num_samples, it is still kept
+    as a partial array of patches. Output is saved to temporary file specified by save_file.
     
     Parameters
     ----------
-    tiles : List[Tuple]
-        List of tile tuples to process
+    chunk_tile_infos : List[Tuple]
+        List of tile info tuples in the chunk to process
     size : int
         Patch size (e.g., 64)
     num_samples : int
         Number of patches to sample per tile
-    cloud_threshold : float
-        Maximum cloud fraction for patch acceptance
-    filter_type : str
-        'raw' or 'lee' for SAR filtering
+    missing_percent: float
+        Maximum missing percentage for patch acceptance
+    cloud_percent: float
+        Maximum cloud percentage for patch acceptance
     seed : int
         Random seed for reproducibility
+    save_file: Path
+        Path to save the output .npy file
     max_attempts : int
         Maximum number of attempts to sample a patch before raising error
-
-    Returns
-    -------
-    dataset : np.ndarray
-        Array of sampled patches
     """
     rng = Random(seed)
-    total_patches = num_samples * len(tiles)
-    dataset = np.empty((total_patches, 13, size, size), dtype=np.float32)
+    all_patches = []
     
-    for i, tile in enumerate(tiles):
+    for i, tile_info in enumerate(chunk_tile_infos):
+        event_path, _, _, eid, s2_img_dt, s1_img_dt = tile_info
         try:
-            tile_data, tile_mask = load_tile_for_sampling(tile)
+            tile_data = load_tile_for_sampling(tile_info)
         except Exception as e:
-            event_path, _, _, eid, img_dt = tile
-            raise RuntimeError(f"Worker failed to load tile {i} (event_path: {event_path}, eid: {eid}, dt: {img_dt}): {e}") from e
+            raise RuntimeError(f"Worker failed to load tile {i} (event_path: {event_path}, eid: {eid}, s2_img_dt: {s2_img_dt}, s1_img_dt: {s1_img_dt}): {e}") from e
         
         patches_sampled = 0
         _, HEIGHT, WIDTH = tile_data.shape
+        
+        # Check if tile is large enough for patch size
+        if HEIGHT < size or WIDTH < size:
+            raise RuntimeError(f"Tile {i} (event_path: {event_path}, eid: {eid}, s2_img_dt: {s2_img_dt}, s1_img_dt: {s1_img_dt}) is too small ({HEIGHT}x{WIDTH}) for patch size {size}x{size}")
+        
         attempts = 0
         while patches_sampled < num_samples and attempts < max_attempts:
             attempts += 1
             x = int(rng.uniform(0, HEIGHT - size))
             y = int(rng.uniform(0, WIDTH - size))
-            patch = tile_data[:, x : x + size, y : y + size]
-            missing_patch = tile_mask[0, x : x + size, y : y + size]
-            if np.any(missing_patch == 1):
+            patch = tile_data[:, x:x+size, y:y+size]
+
+            # Filter out missing or high cloud percentage patches
+            if calculate_missing_percent(patch[14]) >= missing_percent:
                 continue
             
-            # filter out high cloud percentage patches
-            cloud_patch = tile_mask[1, x : x + size, y : y + size]
-            if (cloud_patch.sum() / cloud_patch.size) >= cloud_threshold:
+            if calculate_cloud_percent(patch[13], classes=SCL_CLOUD_CLASSES) >= cloud_percent:
                 continue
 
-            # filter out missing vv or vh tiles
-            if np.any(patch[0] == -9999) or np.any(patch[1] == -9999):
-                continue
-
-            dataset[i * num_samples + patches_sampled] = patch
+            all_patches.append(patch[:SAR_DATASET_CHANNELS])
             patches_sampled += 1
         
-        if patches_sampled < num_samples:
-            event_path, _, _, eid, img_dt = tile
-            raise RuntimeError(f"Worker exceeded max sampling attempts {max_attempts}, only sampled {patches_sampled}/{num_samples} patches for tile {i} (event_path: {event_path}, eid: {eid}, dt: {img_dt})")
+    # Always save file, even if empty, to make debugging easier and prevent confusion
+    if len(all_patches) > 0:
+        patches_array = np.array(all_patches, dtype=np.float32)
+    else:
+        patches_array = np.empty((0, SAR_DATASET_CHANNELS, size, size), dtype=np.float32)
+    np.save(save_file, patches_array)
 
-    return dataset
 
+def sample_patches_parallel_random(preprocess_dir: Path, tile_infos: List[Tuple], size: int, num_samples: int, 
+                            missing_percent: float, cloud_percent: float, output_file: Path, 
+                            seed: int, n_workers: int = None, chunk_size: int = 100) -> None:
+    """Sample patches in parallel using the random method. Each chunk is a number of tiles processed by a worker
+    to be saved as a temporary npy file. Once each chunk is complete, all of the files
+    are combined by streaming them into a single large memory mapped array.
 
-def sample_patches_in_disk(tiles: List[Tuple], size: int, num_samples: int, cloud_threshold: float,
-                          seed: int, scratch_dir: Path, worker_id: int, max_attempts: int = 20000) -> Path:
-    """Sample patches and stores them in memory mapped file on disk.
+    Ensure that the chunk size is large enough for speed and also small enough to not
+    exceed memory limits.
     
     Parameters
     ----------
-    tiles : List[Tuple]
-        List of tile tuples to process
+    preprocess_dir: Path
+        Path to the preprocess directory
+    tile_infos : List[Tuple]
+        List of tile info tuples to process
     size : int
         Patch size (e.g., 64)
     num_samples : int
         Number of patches to sample per tile
-    cloud_threshold : float
-        Maximum cloud fraction for patch acceptance
-    seed : int
-        Random seed for reproducibility
-    scratch_dir : Path
-        Path to scratch directory
-    worker_id : int
-        Worker ID
-    max_attempts : int
-        Maximum number of attempts to fail to sample a patch before giving up
-
-    Returns
-    -------
-    dataset_path : Path
-        Path to the memory mapped file of sampled patches
-    """
-    rng = Random(seed)
-    total_patches = num_samples * len(tiles)
-    tmp_file = scratch_dir / f"tmp_{worker_id}.dat"
-    dataset = np.memmap(tmp_file, dtype=np.float32, shape=(total_patches, 13, size, size), mode="w+")
-    
-    try:
-        for i, tile in enumerate(tiles):
-            try:
-                tile_data, tile_mask = load_tile_for_sampling(tile)
-            except Exception as e:
-                event_path, _, _, eid, img_dt = tile
-                raise RuntimeError(f"Worker {worker_id} failed to load tile {i} (event_path: {event_path}, eid: {eid}, dt: {img_dt}): {e}") from e
-            
-            patches_sampled = 0
-            _, HEIGHT, WIDTH = tile_data.shape
-            attempts = 0
-            while patches_sampled < num_samples and attempts < max_attempts:
-                attempts += 1
-                x = int(rng.uniform(0, HEIGHT - size))
-                y = int(rng.uniform(0, WIDTH - size))
-                patch = tile_data[:, x : x + size, y : y + size]
-                missing_patch = tile_mask[0, x : x + size, y : y + size]
-                if np.any(missing_patch == 1):
-                    continue
-                
-                # filter out high cloud percentage patches
-                cloud_patch = tile_mask[1, x : x + size, y : y + size]
-                if (cloud_patch.sum() / cloud_patch.size) >= cloud_threshold:
-                    continue
-
-                # filter out missing vv or vh tiles
-                if np.any(patch[0] == -9999) or np.any(patch[1] == -9999):
-                    continue
-
-                dataset[i * num_samples + patches_sampled] = patch
-                patches_sampled += 1
-
-            if patches_sampled < num_samples:
-                event_path, _, _, eid, img_dt = tile
-                raise RuntimeError(f"Worker {worker_id} exceeded max sampling attempts {max_attempts}, only sampled {patches_sampled}/{num_samples} patches for tile {i} (event_path: {event_path}, eid: {eid}, dt: {img_dt})")
-    finally:
-        # Ensure cleanup even if an error occurs
-        dataset.flush()
-        del dataset
-
-    return tmp_file
-
-
-def sample_patches_parallel(tiles: List[Tuple], size: int, num_samples: int, 
-                          output_file: Path, cloud_threshold: float, 
-                          filter_type: str, seed: int, n_workers: int = None) -> None:
-    """Sample patches in parallel. Strategy will depend on the memory available. If
-    memory is comfortably below the total node memory (on improv you get ~230GB regardless
-    of how many cpus requested), then we can just have each worker fill out their own
-    array and then concatenate them in the parent.
-
-    If memory required for entire array is too close or exceeds total node memory,
-    then each worker will write to a memory mapped array and then combine them at the end.
-    
-    Parameters
-    ----------
-    tiles : List[Tuple]
-        List of tile tuples to process
-    size : int
-        Patch size (e.g., 64)
-    num_samples : int
-        Number of patches to sample per tile
+    missing_percent: float
+        Maximum missing percentage for patch acceptance
+    cloud_percent: float
+        Maximum cloud percentage for patch acceptance
     output_file : Path
         Path to save the output .npy file
-    cloud_threshold : float
-        Maximum cloud fraction for patch acceptance
-    filter_type : str
-        'raw' or 'lee' for SAR filtering
     seed : int
         Random seed for reproducibility
     n_workers : int, optional
         Number of worker processes (defaults to 1)
+    chunk_size : int, optional
+        Number of tiles to process per worker before saving as temp file (defaults to 100)
     """
     logger = logging.getLogger('preprocessing')
     
     if n_workers is None:
         n_workers = 1
     
-    # Ensure we don't have more workers than tiles
     logger.info(f'Specified {n_workers} workers for patch sampling.')
-    n_workers = min(n_workers, len(tiles))
-    logger.info(f'Using {n_workers} workers for {len(tiles)} tiles...')
+    chunks = (len(tile_infos) + chunk_size - 1) // chunk_size
+    n_workers = min(n_workers, chunks)
+    logger.info(f'Using {n_workers} workers for {len(tile_infos)} tiles in {chunks} chunks of size {chunk_size}...')
 
-    total_patches = len(tiles) * num_samples
-    array_shape = (total_patches, 13, size, size)
-    array_dtype = np.float32
-
-    # calculate how much memory required for the entire array (factor of 2 for concatenation operation)
-    total_mem_required = array_shape[0] * array_shape[1] * array_shape[2] * array_shape[3] * np.dtype(array_dtype).itemsize * 2
-    total_mem_available = psutil.virtual_memory().available
-    logger.info(f'Total memory required for the entire array x2: {total_mem_required / 1024**3:.2f} GB')
-    logger.info(f'Total memory available: {total_mem_available / 1024**3:.2f} GB')
+    # first clean up any previous temp files if failed to delete
+    for tmp_file in preprocess_dir.glob("chunk_*.npy"):
+        try:
+            tmp_file.unlink()
+        except Exception as e:
+            logger.warning(f"Failed to delete previous temp file {tmp_file}: {e}")
     
-    # divide up the tiles into n_workers chunks
-    worker_tiles = []
-    batch_sizes = []
-    start_idx = 0
-    tiles_per_worker = len(tiles) // n_workers
-    tiles_remainder = len(tiles) % n_workers
-    for worker_id in range(n_workers):
-        worker_tile_count = tiles_per_worker + (1 if worker_id < tiles_remainder else 0)
-        end_idx = start_idx + worker_tile_count
-        tiles_chunk = tiles[start_idx:end_idx]
-        worker_tiles.append(tiles_chunk)
-        batch_sizes.append(worker_tile_count)
-        start_idx += worker_tile_count
+    # divide up the tiles into chunks
+    chunked_tile_infos = []
+    for start_idx in range(0, len(tile_infos), chunk_size):
+        tiles_chunk = tile_infos[start_idx:start_idx+chunk_size]
+        chunked_tile_infos.append(tiles_chunk)
 
-    # Log batch distribution
-    logger.info(f'Tile distribution per worker: {batch_sizes}')
-        
-    if total_mem_required < total_mem_available * 0.9:
-        # use simple concatenation strategy
-        logger.info('Total memory required is below available memory, using in-memory arrays and concatenation.')
+    try:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = [executor.submit(sample_patches_random, tiles_chunk, size, num_samples, missing_percent, cloud_percent, seed+i*10000, preprocess_dir / f'chunk_{i}.npy') for i, tiles_chunk in enumerate(chunked_tile_infos)]
+            for future in futures:
+                future.result()
+    except Exception as e:
+        logger.error(f"Failed during parallel random patch sampling: {e}")
+        logger.error("One or more worker processes failed during random patch sampling")
+        raise RuntimeError(f"Random patch sampling failed: {e}") from e
 
-        try:
-            with mp.Pool(n_workers) as pool:
-                results = pool.starmap(sample_patches_in_mem, [(tile, size, num_samples, cloud_threshold, seed+i*10000) for i, tile in enumerate(worker_tiles)])
-        except Exception as e:
-            logger.error(f"Failed during parallel patch sampling (in-memory): {e}")
-            logger.error("One or more worker processes failed during patch sampling")
-            raise RuntimeError(f"Patch sampling failed: {e}") from e
+    # for each chunk file, read in and stream into the final memory mapped array
+    # one pass to get the size, another to stream into the final array
+    try:
+        # Prepare and get the shape of the first chunk to allocate array of correct shape
+        chunk_files = sorted(preprocess_dir.glob("chunk_*.npy"), key=lambda x: int(x.stem.split("_")[1]))
+        if not chunk_files:
+            raise RuntimeError("No temporary chunk files found for patch sampling output.")
 
-        try:
-            final_arr = np.concatenate(results, axis=0)
-            np.save(output_file, final_arr)
-            logger.info('Sampling complete.')
-        except Exception as e:
-            logger.exception(f"Failed to concatenate results or save output.")
-            raise RuntimeError(f"Failed to save final array: {e}") from e
-    else:
-        logger.info('Total memory required exceeds available memory, using memory mapping strategy.')
+        # Find output array shape from first file and pre-calculate total_patches
+        total_patches = 0
+        for tmp_file in chunk_files:
+            arr = np.load(tmp_file, mmap_mode='r') # this does not actually read data into memory, just header info
+            total_patches += arr.shape[0]
+        logger.info(f'Total patches read from {len(chunk_files)} chunks: {total_patches}')
 
-        # Use scratch directory for temp files
-        scratch_dir = Path(f"/scratch/floodmapspre")
-        scratch_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Using scratch directory: {scratch_dir}")
-        
-        try:
-            # each worker writes to their own file
-            with mp.Pool(n_workers) as pool:
-                worker_files = pool.starmap(sample_patches_in_disk, [(tile, size, num_samples, cloud_threshold, seed+i*10000, scratch_dir, i) for i, tile in enumerate(worker_tiles)])
-        except Exception as e:
-            logger.error(f"Failed during parallel patch sampling (memory-mapped): {e}")
-            logger.error("One or more worker processes failed during patch sampling")
-            # Clean up any partial files before re-raising
-            if scratch_dir.exists():
-                try:
-                    shutil.rmtree(scratch_dir)
-                    logger.info("Cleaned up scratch directory after worker failure")
-                except Exception as cleanup_e:
-                    logger.warning(f"Failed to clean up scratch directory: {cleanup_e}")
-            raise RuntimeError(f"Patch sampling failed: {e}") from e
-        
-        try:
-            # combine files into one memory mapped array
-            final_npy = open_memmap(output_file, mode='w+', dtype='float32', shape=array_shape)
-            start_idx = 0
-            for i, f in enumerate(worker_files):
-                tiles_in_worker = len(worker_tiles[i])
-                chunk_shape = (num_samples * tiles_in_worker, 13, size, size)
-                worker_data = np.memmap(f, dtype=np.float32, shape=chunk_shape, mode="r")  # load worker memmap
-                end_idx = start_idx + worker_data.shape[0]
-                final_npy[start_idx:end_idx] = worker_data  # copy into final memmap
-                start_idx = end_idx
+        # Preallocate memmapped output
+        final_arr = np.lib.format.open_memmap(output_file, mode="w+", dtype=np.float32, shape=(total_patches, SAR_DATASET_CHANNELS, size, size))
+        patch_offset = 0
+        for tmp_file in chunk_files:
+            arr = np.load(tmp_file)
+            n_patches = arr.shape[0]
+            final_arr[patch_offset:patch_offset + n_patches, ...] = arr
+            patch_offset += n_patches
+            arr = None
+            # Optionally clean up chunk file after streaming
+            try:
+                tmp_file.unlink()
+            except Exception as e:
+                logger.warning(f"Failed to delete chunk file {tmp_file}: {e}")
 
-            # Finalize and clean up
-            final_npy.flush()
-            del final_npy
-            logger.info('Memory-mapped sampling complete.')
-        except Exception as e:
-            logger.exception(f"Failed to combine worker files or save final output.")
-            raise RuntimeError(f"Failed to create final memory-mapped array: {e}") from e
-        finally:
-            # Always clean up scratch directory
-            if scratch_dir.exists():
-                try:
-                    shutil.rmtree(scratch_dir)
-                    logger.info("Cleaned up scratch directory")
-                except Exception as cleanup_e:
-                    logger.warning(f"Failed to clean up scratch directory: {cleanup_e}")
+        logger.info('Sampling complete.')
+    except Exception as e:
+        logger.exception(f"Failed to stream chunk files or save output.")
+        raise RuntimeError(f"Failed to save final array: {e}") from e
 
-def sample_patches_strided(tile_infos: List[Tuple], size: int, stride: int) -> np.ndarray:
+def sample_patches_strided(chunk_tile_infos: List[Tuple], size: int, stride: int,
+        missing_percent: float, cloud_percent: float, save_file: Path) -> None:
     """Sample patches using a sliding window with stride and complete edge coverage.
+    Output is saved to temporary file specified by save_file.
     
     This function uses a sliding window approach that moves by stride pixels
     in both x and y directions. It ensures complete coverage by explicitly including
@@ -554,33 +442,35 @@ def sample_patches_strided(tile_infos: List[Tuple], size: int, stride: int) -> n
     
     Parameters
     ----------
-    tile_infos : List[Tuple]
-        List of tile info tuples to process
+    chunk_tile_infos : List[Tuple]
+        List of tile info tuples in the chunk to process
     size : int
         Patch size (e.g., 64)
     stride : int
         Stride for sliding window sampling (e.g., 5)
-    
-    Returns
-    -------
-    dataset : np.ndarray
-        Array of sampled patches (filtered for valid patches only)
+    missing_percent: float
+        Maximum missing percentage for patch acceptance
+    cloud_percent: float
+        Maximum cloud percentage for patch acceptance
+    save_file: Path
+        Path to save the output .npy file
     """
     all_patches = []
     
-    for i, tile_info in enumerate(tile_infos):
+    for i, tile_info in enumerate(chunk_tile_infos):
+        event_path, _, _, eid, s2_img_dt, s1_img_dt = tile_info
+        # DEBUG
+        print(f'Processing tile {i} (event_path: {event_path}, eid: {eid}, s2_img_dt: {s2_img_dt}, s1_img_dt: {s1_img_dt})')
         try:
             tile_data = load_tile_for_sampling(tile_info)
         except Exception as e:
-            event_path, _, _, eid, img_dt = tile_info
-            raise RuntimeError(f"Worker failed to load tile {i} (event_path: {event_path}, eid: {eid}, dt: {img_dt}): {e}") from e
+            raise RuntimeError(f"Worker failed to load tile {i} (event_path: {event_path}, eid: {eid}, s2_img_dt: {s2_img_dt}, s1_img_dt: {s1_img_dt}): {e}") from e
         
         _, HEIGHT, WIDTH = tile_data.shape
         
         # Check if tile is large enough for patch size
         if HEIGHT < size or WIDTH < size:
-            event_path, _, _, eid, img_dt = tile_info
-            raise RuntimeError(f"Tile {i} (event_path: {event_path}, eid: {eid}, dt: {img_dt}) is too small ({HEIGHT}x{WIDTH}) for patch size {size}x{size}")
+            raise RuntimeError(f"Tile {i} (event_path: {event_path}, eid: {eid}, s2_img_dt: {s2_img_dt}, s1_img_dt: {s1_img_dt}) is too small ({HEIGHT}x{WIDTH}) for patch size {size}x{size}")
         
         # Generate all window positions with edge coverage
         x_positions = list(range(0, HEIGHT - size + 1, stride))
@@ -599,26 +489,39 @@ def sample_patches_strided(tile_infos: List[Tuple], size: int, stride: int) -> n
                 patch = tile_data[:, x:x+size, y:y+size]
                 
                 # Filter out missing or high cloud percentage patches
-                if patch_contains_missing_or_cloud(patch):
+                if calculate_missing_percent(patch[14]) > missing_percent:
+                    # DEBUG
+                    print(f'Skipping patch {x},{y} because missing percent is {calculate_missing_percent(patch[14])}')
+                    continue
+            
+                if calculate_cloud_percent(patch[13], classes=SCL_CLOUD_CLASSES) > cloud_percent:
+                    # DEBUG
+                    print(f'Skipping patch {x},{y} because cloud percent is {calculate_cloud_percent(patch[13], classes=SCL_CLOUD_CLASSES)}')
                     continue
                 
-                all_patches.append(patch[:22])
+                all_patches.append(patch[:SAR_DATASET_CHANNELS])
     
-    if len(all_patches) == 0:
-        raise RuntimeError("No valid patches found after filtering")
-    
-    return np.array(all_patches, dtype=np.float32)
+    # Always save file, even if empty, to make debugging easier and prevent confusion
+    if len(all_patches) > 0:
+        patches_array = np.array(all_patches, dtype=np.float32)
+    else:
+        patches_array = np.empty((0, SAR_DATASET_CHANNELS, size, size), dtype=np.float32)
+    np.save(save_file, patches_array)
 
-def sample_patches_parallel_strided(tile_infos: List[Tuple], size: int, stride: int, 
-                          output_file: Path, sample_dirs: List[str], cfg: DictConfig,
-                          n_workers: int = None) -> None:
-    """Sample patches in parallel with strided sliding window sampling. Each worker samples
-    patches strided, and results are concatenated.
+def sample_patches_parallel_strided(preprocess_dir: Path, tile_infos: List[Tuple], size: int, stride: int, 
+                            missing_percent: float, cloud_percent: float, output_file: Path, 
+                            n_workers: int = None, chunk_size: int = 100) -> None:
+    """Sample patches in parallel using the strided method. Each chunk is a number of tiles processed by a worker
+    to be saved as a temporary npy file. Once each chunk is complete, all of the files
+    are combined by streaming them into a single large memory mapped array.
 
-    NOTE: No memory mapping strategy for strided sampling.
+    Ensure that the chunk size is large enough for speed and also small enough to not
+    exceed memory limits.
     
     Parameters
     ----------
+    preprocess_dir: Path
+        Path to the preprocess directory
     tile_infos : List[Tuple]
         List of tile info tuples to process
     size : int
@@ -627,12 +530,10 @@ def sample_patches_parallel_strided(tile_infos: List[Tuple], size: int, stride: 
         Stride for sliding window sampling (e.g., 5)
     output_file : Path
         Path to save the output .npy file
-    sample_dirs : List[str]
-        List of sample directories
-    cfg : DictConfig
-        Configuration object
     n_workers : int, optional
         Number of worker processes (defaults to 1)
+    chunk_size : int, optional
+        Number of tiles to process per worker before saving as temp file (defaults to 100)
     """
     logger = logging.getLogger('preprocessing')
     
@@ -640,42 +541,68 @@ def sample_patches_parallel_strided(tile_infos: List[Tuple], size: int, stride: 
         n_workers = 1
     
     logger.info(f'Specified {n_workers} workers for patch sampling.')
-    n_workers = min(n_workers, len(tile_infos))
-    logger.info(f'Using {n_workers} workers for {len(tile_infos)} tiles...')
+    chunks = (len(tile_infos) + chunk_size - 1) // chunk_size
+    n_workers = min(n_workers, chunks)
+    logger.info(f'Using {n_workers} workers for {len(tile_infos)} tiles in {chunks} chunks of size {chunk_size}...')
+
+    # first clean up any previous temp files if failed to delete
+    for tmp_file in preprocess_dir.glob("chunk_*.npy"):
+        try:
+            tmp_file.unlink()
+        except Exception as e:
+            logger.warning(f"Failed to delete previous temp file {tmp_file}: {e}")
     
-    # divide up the labels into n_workers chunks
-    worker_tile_infos = []
-    batch_sizes = []
-    start_idx = 0
-    tiles_per_worker = len(tile_infos) // n_workers
-    tiles_remainder = len(tile_infos) % n_workers
-    for worker_id in range(n_workers):
-        worker_tile_count = tiles_per_worker + (1 if worker_id < tiles_remainder else 0)
-        end_idx = start_idx + worker_tile_count
-        tiles_chunk = tile_infos[start_idx:end_idx]
-        worker_tile_infos.append(tiles_chunk)
-        batch_sizes.append(worker_tile_count)
-        start_idx += worker_tile_count
-        
-    # Log batch distribution
-    logger.info(f'Label distribution per worker: {batch_sizes}')
-    
-    logger.info('Strided sampling uses in-memory arrays and concatenation.')
+    # divide up the tiles into chunks
+    chunked_tile_infos = []
+    for start_idx in range(0, len(tile_infos), chunk_size):
+        tiles_chunk = tile_infos[start_idx:start_idx+chunk_size]
+        chunked_tile_infos.append(tiles_chunk)
 
     try:
-        with mp.Pool(n_workers) as pool:
-            results = pool.starmap(sample_patches_strided, [(tile_infos, size, stride) for tile_infos in worker_tile_infos])
+        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = [executor.submit(sample_patches_strided, tiles_chunk, size, stride, missing_percent, cloud_percent, preprocess_dir / f'chunk_{i}.npy') for i, tiles_chunk in enumerate(chunked_tile_infos)]
+            for future in futures:
+                future.result()
     except Exception as e:
         logger.error(f"Failed during parallel strided patch sampling: {e}")
         logger.error("One or more worker processes failed during strided patch sampling")
         raise RuntimeError(f"Strided patch sampling failed: {e}") from e
 
+    # for each chunk file, read in and stream into the final memory mapped array
+    # one pass to get the size, another to stream into the final array
     try:
-        final_arr = np.concatenate(results, axis=0)
-        np.save(output_file, final_arr)
+        # Prepare and get the shape of the first chunk to allocate array of correct shape
+        chunk_files = sorted(preprocess_dir.glob("chunk_*.npy"), key=lambda x: int(x.stem.split("_")[1]))
+        if not chunk_files:
+            raise RuntimeError("No temporary chunk files found for patch sampling output.")
+
+        # Find output array shape from first file and pre-calculate total_patches
+        total_patches = 0
+        for tmp_file in chunk_files:
+            arr = np.load(tmp_file, mmap_mode='r') # this does not actually read data into memory, just header info
+            # FOR DEBUG PURPOSES
+            logger.info(f'Chunk {tmp_file.name} has {arr.shape} shape')
+            total_patches += arr.shape[0]
+        logger.info(f'Total patches read from {len(chunk_files)} chunks: {total_patches}')
+
+        # Preallocate memmapped output
+        final_arr = np.lib.format.open_memmap(output_file, mode="w+", dtype=np.float32, shape=(total_patches, SAR_DATASET_CHANNELS, size, size))
+        patch_offset = 0
+        for tmp_file in chunk_files:
+            arr = np.load(tmp_file)
+            n_patches = arr.shape[0]
+            final_arr[patch_offset:patch_offset + n_patches, ...] = arr
+            patch_offset += n_patches
+            arr = None
+            # Optionally clean up chunk file after streaming
+            try:
+                tmp_file.unlink()
+            except Exception as e:
+                logger.warning(f"Failed to delete chunk file {tmp_file}: {e}")
+
         logger.info('Sampling complete.')
     except Exception as e:
-        logger.exception(f"Failed to concatenate results or save output.")
+        logger.exception(f"Failed to stream chunk files or save output.")
         raise RuntimeError(f"Failed to save final array: {e}") from e
 
 def build_label_index(label_dirs: list[str], cfg: DictConfig) -> Dict[Tuple[str, str], Path]:
@@ -824,10 +751,13 @@ def main(cfg: DictConfig) -> None:
     - method: str ['random', 'strided']
     - samples: int (number of samples per image for random method)
     - stride: int (for strided method)
+    - missing_percent: float (maximum missing percentage for patch acceptance) (default: 0.0)
+    - cloud_percent: float (maximum cloud percentage for patch acceptance) (default: 0.1)
     - seed: int (random number generator seed for random method)
     - n_workers: int (number of workers for parallel processing)
-    - sample_dirs: List[str] (list of sample directories under cfg.data.imagery_dir)
-    - label_dirs: List[str] (list of label directories under cfg.data.imagery_dir)
+    - chunk_size: int (number of tiles to process per worker before saving as temp file) (default: 100)
+    - s1.sample_dirs: List[str] (list of sample directories under cfg.data.imagery_dir)
+    - s1.label_dirs: List[str] (list of label directories under cfg.data.imagery_dir)
     - suffix: str (optional suffix to append to preprocessed folder)
     - split_json: str (path to json dictionary mapping (y, x) prism coordinates to train, val, test splits)
     - val_ratio: used for random splitting if no split_json is provided
@@ -853,8 +783,11 @@ def main(cfg: DictConfig) -> None:
         Sampling method: {cfg.preprocess.method}
         Samples per tile (Random method): {getattr(cfg.preprocess, 'samples', None)}
         Stride (Strided method): {getattr(cfg.preprocess, 'stride', None)}
+        Missing percent: {getattr(cfg.preprocess, 'missing_percent', 0.0)} (default: 0.0)
+        Cloud percent: {getattr(cfg.preprocess, 'cloud_percent', 0.1)} (default: 0.1)
         Random seed:     {getattr(cfg.preprocess, 'seed', None)}
         Workers:         {n_workers}
+        Chunk size:      {getattr(cfg.preprocess, 'chunk_size', 100)} (default: 100)
         Sample dir(s):   {cfg.preprocess.s1.sample_dirs}
         Label dir(s):    {cfg.preprocess.s1.label_dirs}
         Suffix:          {getattr(cfg.preprocess, 'suffix', None)}
@@ -932,7 +865,11 @@ def main(cfg: DictConfig) -> None:
         val_events = []
         test_events = []
         p = re.compile(r'\d{8}_(\d+)_(\d+)')
-        coord_to_split = {}
+        with open(split_json, 'r') as f:
+            # expects json dictionary mapping string "y,x" coordinates to split "train", "val", "test"
+            split_json_dict = json.load(f)
+            coord_to_split = {tuple(map(int, key.split(','))): value for key, value in split_json_dict.items()}
+
         for event in all_events:
             m = p.match(event.name)
             if m:
@@ -997,6 +934,8 @@ def main(cfg: DictConfig) -> None:
     logger.info(f'Training mean std saved to {stats_file}')
 
     # Sample patches in parallel
+    missing_percent = getattr(cfg.preprocess, 'missing_percent', 0.0)
+    cloud_percent = getattr(cfg.preprocess, 'cloud_percent', 0.1)
     if cfg.preprocess.method == 'random':
         # Process each split using parallel sampling
         for split_name, tile_infos in [('train', train_tile_infos), ('val', val_tile_infos), ('test', test_tile_infos)]:
@@ -1007,12 +946,12 @@ def main(cfg: DictConfig) -> None:
             output_file = pre_sample_dir / f'{split_name}_patches.npy'
             logger.info(f'Processing {split_name} split with {len(tile_infos)} tiles...')
             
-            sample_patches_parallel(
-                tile_infos, cfg.preprocess.size, cfg.preprocess.samples, output_file,
-                sample_dirs_list, cfg, cfg.preprocess.seed, n_workers
+            sample_patches_parallel_random(
+                pre_sample_dir, tile_infos, cfg.preprocess.size, cfg.preprocess.samples, 
+                missing_percent, cloud_percent, output_file, cfg.preprocess.seed, n_workers, chunk_size=100
             )
         
-        logger.info('Parallel patch sampling complete.')
+        logger.info('Parallel random patch sampling complete.')
     elif cfg.preprocess.method == 'strided':
         # Process each split using parallel sampling
         for split_name, tile_infos in [('train', train_tile_infos), ('val', val_tile_infos), ('test', test_tile_infos)]:
@@ -1024,11 +963,11 @@ def main(cfg: DictConfig) -> None:
             logger.info(f'Processing {split_name} split with {len(tile_infos)} tiles...')
             
             sample_patches_parallel_strided(
-                tile_infos, cfg.preprocess.size, cfg.preprocess.stride, output_file,
-                sample_dirs_list, cfg, n_workers
+                pre_sample_dir, tile_infos, cfg.preprocess.size, cfg.preprocess.stride, missing_percent,
+                cloud_percent, output_file, n_workers, chunk_size=100
             )
         
-        logger.info('Parallel patch sampling complete.')
+        logger.info('Parallel strided patch sampling complete.')
     else:
         raise ValueError(f"Unsupported sampling method: {cfg.preprocess.method}")
 

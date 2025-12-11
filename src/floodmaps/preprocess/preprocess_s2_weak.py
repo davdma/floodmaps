@@ -12,7 +12,7 @@ from datetime import datetime
 import hydra
 from omegaconf import DictConfig
 import yaml
-import json
+import csv
 import concurrent.futures
 import shutil
 
@@ -728,7 +728,7 @@ def save_event_splits(train_events: List[Path], val_events: List[Path], test_eve
             'stride': getattr(cfg.preprocess, 'stride', None),
             'seed': getattr(cfg.preprocess, 'seed', None),
             'total_events': len(train_events) + len(val_events) + len(test_events),
-            'split_json': getattr(cfg.preprocess, 'split_json', None),
+            'split_csv': getattr(cfg.preprocess, 'split_csv', None),
             'val_ratio': getattr(cfg.preprocess, 'val_ratio', None),
             'test_ratio': getattr(cfg.preprocess, 'test_ratio', None),
             'train_count': len(train_events),
@@ -806,8 +806,9 @@ def main(cfg: DictConfig) -> None:
     where possible. If event has associated human label, then the machine label will be replaced by
     the human label.
 
-    cfg.preprocess.split_json storing a dictionary mapping (y, x) prism coordinates to split,
-    if provided, allows for pre determined split rather than random split. This is preferred
+    cfg.preprocess.split_csv should be the path to a CSV file with columns "y", "x", "split"
+    where each PRISM cell coordinate (y, x) is associated with a split "train", "val", "test".
+    If provided, allows for pre determined split rather than random split. This is preferred
     over the random splitting to avoid data leakage from similar dates / regions.
 
     NOTE: For large datasets on HPC, use the scratch directory for speed.
@@ -823,7 +824,7 @@ def main(cfg: DictConfig) -> None:
     - s2.sample_dirs: List[str] (list of sample directories under cfg.data.imagery_dir)
     - s2.label_dirs: List[str] (list of label directories under cfg.data.imagery_dir)
     - suffix: str (optional suffix to append to preprocessed folder)
-    - split_json: str (path to json dictionary mapping (y, x) prism coordinates to train, val, test splits)
+    - split_csv: str (path to CSV file with columns "y", "x", "split" for PRISM cell coordinates)
     - val_ratio: used for random splitting if no split_json is provided
     - test_ratio: used for random splitting if no split_json is provided
     - scratch_dir: str (optional path to the scratch directory for intermediate files and faster streaming)
@@ -854,7 +855,7 @@ def main(cfg: DictConfig) -> None:
         Sample dir(s):   {cfg.preprocess.s2.sample_dirs}
         Label dir(s):    {cfg.preprocess.s2.label_dirs}
         Suffix:          {getattr(cfg.preprocess, 'suffix', None)}
-        Split JSON:      {getattr(cfg.preprocess, 'split_json', None)}
+        Split CSV:       {getattr(cfg.preprocess, 'split_csv', None)}
         Val ratio:       {getattr(cfg.preprocess, 'val_ratio', None)}
         Test ratio:      {getattr(cfg.preprocess, 'test_ratio', None)}
         Scratch dir:     {getattr(cfg.preprocess, 'scratch_dir', None)}
@@ -924,17 +925,21 @@ def main(cfg: DictConfig) -> None:
     logger.info(f'Found {total_tiles} labeled S2 tiles (images) across {len(all_events)} events for preprocessing')
 
     # Split events into train/val/test
-    split_json = getattr(cfg.preprocess, 'split_json', None)
-    if split_json is not None:
-        logger.info(f'Split provided by json file: {split_json}')
+    split_csv = getattr(cfg.preprocess, 'split_csv', None)
+    if split_csv is not None:
+        logger.info(f'Split provided by CSV file: {split_csv}')
         train_events = []
         val_events = []
         test_events = []
         p = re.compile(r'\d{8}_(\d+)_(\d+)')
-        with open(split_json, 'r') as f:
-            # expects json dictionary mapping string "y,x" coordinates to split "train", "val", "test"
-            split_json_dict = json.load(f)
-            coord_to_split = {tuple(map(int, key.split(','))): value for key, value in split_json_dict.items()}
+        
+        # Read CSV with columns: y, x, split
+        coord_to_split = {}
+        with open(split_csv, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                coord = (int(row['y']), int(row['x']))
+                coord_to_split[coord] = row['split']
 
         for event in all_events:
             m = p.match(event.name)
@@ -957,7 +962,7 @@ def main(cfg: DictConfig) -> None:
         # random splitting of events
         val_ratio = getattr(cfg.preprocess, 'val_ratio', 0.1)
         test_ratio = getattr(cfg.preprocess, 'test_ratio', 0.1)
-        logger.info(f'No json file provided, performing random splitting with val_ratio={val_ratio} and test_ratio={test_ratio}...')
+        logger.info(f'No split CSV provided, performing random splitting with val_ratio={val_ratio} and test_ratio={test_ratio}...')
         holdout_ratio = val_ratio + test_ratio
         if holdout_ratio <= 0 or holdout_ratio >= 1:
             raise ValueError('Sum of val_ratio and test_ratio must be in (0, 1).')

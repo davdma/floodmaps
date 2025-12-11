@@ -15,6 +15,7 @@ import yaml
 from floodmaps.utils.preprocess_utils import WelfordAccumulator, calculate_missing_percent, calculate_cloud_percent
 import json
 import concurrent.futures
+import shutil
 
 # 5 channels to normalize: VV, VH, DEM, slope_y, slope_x
 SAR_DATASET_CHANNELS = 14
@@ -23,7 +24,7 @@ SAR_MISSING_VALUE = -9999
 S2_RGB_MISSING_VALUE = 0
 SCL_CLOUD_CLASSES = [8, 9]
 
-def load_tile_for_stats(tile_info: Tuple[Path, Path, Path, str, str]) -> Tuple[np.ndarray, np.ndarray]:
+def load_tile_for_stats(tile_info: Tuple[Path, Path, Path, str, str, str]) -> Tuple[np.ndarray, np.ndarray]:
     """Load the tile data and return the array and mask.
     
     Parameters
@@ -313,10 +314,10 @@ def sample_patches_random(chunk_tile_infos: List[Tuple], size: int, num_samples:
             patch = tile_data[:, x:x+size, y:y+size]
 
             # Filter out missing or high cloud percentage patches
-            if calculate_missing_percent(patch[14]) >= missing_percent:
+            if calculate_missing_percent(patch[14]) > missing_percent:
                 continue
             
-            if calculate_cloud_percent(patch[13], classes=SCL_CLOUD_CLASSES) >= cloud_percent:
+            if calculate_cloud_percent(patch[13], classes=SCL_CLOUD_CLASSES) > cloud_percent:
                 continue
 
             all_patches.append(patch[:SAR_DATASET_CHANNELS])
@@ -332,7 +333,7 @@ def sample_patches_random(chunk_tile_infos: List[Tuple], size: int, num_samples:
 
 def sample_patches_parallel_random(preprocess_dir: Path, tile_infos: List[Tuple], size: int, num_samples: int, 
                             missing_percent: float, cloud_percent: float, output_file: Path, 
-                            seed: int, n_workers: int = None, chunk_size: int = 100) -> None:
+                            seed: int, n_workers: int = None, chunk_size: int = 100, scratch_dir: Path = None) -> None:
     """Sample patches in parallel using the random method. Each chunk is a number of tiles processed by a worker
     to be saved as a temporary npy file. Once each chunk is complete, all of the files
     are combined by streaming them into a single large memory mapped array.
@@ -362,6 +363,8 @@ def sample_patches_parallel_random(preprocess_dir: Path, tile_infos: List[Tuple]
         Number of worker processes (defaults to 1)
     chunk_size : int, optional
         Number of tiles to process per worker before saving as temp file (defaults to 100)
+    scratch_dir : Path, optional
+        Path to the scratch directory for intermediate files and faster streaming (defaults to None)
     """
     logger = logging.getLogger('preprocessing')
     
@@ -374,7 +377,8 @@ def sample_patches_parallel_random(preprocess_dir: Path, tile_infos: List[Tuple]
     logger.info(f'Using {n_workers} workers for {len(tile_infos)} tiles in {chunks} chunks of size {chunk_size}...')
 
     # first clean up any previous temp files if failed to delete
-    for tmp_file in preprocess_dir.glob("chunk_*.npy"):
+    chunk_dir = preprocess_dir if scratch_dir is None else scratch_dir
+    for tmp_file in chunk_dir.glob("chunk_*.npy"):
         try:
             tmp_file.unlink()
         except Exception as e:
@@ -388,7 +392,7 @@ def sample_patches_parallel_random(preprocess_dir: Path, tile_infos: List[Tuple]
 
     try:
         with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
-            futures = [executor.submit(sample_patches_random, tiles_chunk, size, num_samples, missing_percent, cloud_percent, seed+i*10000, preprocess_dir / f'chunk_{i}.npy') for i, tiles_chunk in enumerate(chunked_tile_infos)]
+            futures = [executor.submit(sample_patches_random, tiles_chunk, size, num_samples, missing_percent, cloud_percent, seed+i*10000, chunk_dir / f'chunk_{i}.npy') for i, tiles_chunk in enumerate(chunked_tile_infos)]
             for future in futures:
                 future.result()
     except Exception as e:
@@ -400,7 +404,7 @@ def sample_patches_parallel_random(preprocess_dir: Path, tile_infos: List[Tuple]
     # one pass to get the size, another to stream into the final array
     try:
         # Prepare and get the shape of the first chunk to allocate array of correct shape
-        chunk_files = sorted(preprocess_dir.glob("chunk_*.npy"), key=lambda x: int(x.stem.split("_")[1]))
+        chunk_files = sorted(chunk_dir.glob("chunk_*.npy"), key=lambda x: int(x.stem.split("_")[1]))
         if not chunk_files:
             raise RuntimeError("No temporary chunk files found for patch sampling output.")
 
@@ -412,19 +416,26 @@ def sample_patches_parallel_random(preprocess_dir: Path, tile_infos: List[Tuple]
         logger.info(f'Total patches read from {len(chunk_files)} chunks: {total_patches}')
 
         # Preallocate memmapped output
-        final_arr = np.lib.format.open_memmap(output_file, mode="w+", dtype=np.float32, shape=(total_patches, SAR_DATASET_CHANNELS, size, size))
+        memmap_file = scratch_dir / output_file.name if scratch_dir is not None else output_file
+        final_arr = np.lib.format.open_memmap(memmap_file, mode="w+", dtype=np.float32, shape=(total_patches, SAR_DATASET_CHANNELS, size, size))
         patch_offset = 0
         for tmp_file in chunk_files:
             arr = np.load(tmp_file)
+            chunk_shape = arr.shape
+            logger.info(f'Streaming chunk {tmp_file.name} of shape {chunk_shape} into final array...')
             n_patches = arr.shape[0]
             final_arr[patch_offset:patch_offset + n_patches, ...] = arr
             patch_offset += n_patches
             arr = None
-            # Optionally clean up chunk file after streaming
+
             try:
                 tmp_file.unlink()
             except Exception as e:
-                logger.warning(f"Failed to delete chunk file {tmp_file}: {e}")
+                raise RuntimeError(f"Failed to delete chunk file {tmp_file}: {e}") from e
+        
+        # Now we move the final array from scratch to the final destination
+        if scratch_dir is not None:
+            shutil.move(memmap_file, output_file)
 
         logger.info('Sampling complete.')
     except Exception as e:
@@ -504,7 +515,7 @@ def sample_patches_strided(chunk_tile_infos: List[Tuple], size: int, stride: int
 
 def sample_patches_parallel_strided(preprocess_dir: Path, tile_infos: List[Tuple], size: int, stride: int, 
                             missing_percent: float, cloud_percent: float, output_file: Path, 
-                            n_workers: int = None, chunk_size: int = 100) -> None:
+                            n_workers: int = None, chunk_size: int = 100, scratch_dir: Path = None) -> None:
     """Sample patches in parallel using the strided method. Each chunk is a number of tiles processed by a worker
     to be saved as a temporary npy file. Once each chunk is complete, all of the files
     are combined by streaming them into a single large memory mapped array.
@@ -528,6 +539,8 @@ def sample_patches_parallel_strided(preprocess_dir: Path, tile_infos: List[Tuple
         Number of worker processes (defaults to 1)
     chunk_size : int, optional
         Number of tiles to process per worker before saving as temp file (defaults to 100)
+    scratch_dir : Path, optional
+        Path to the scratch directory for intermediate files and faster streaming (defaults to None)
     """
     logger = logging.getLogger('preprocessing')
     
@@ -540,7 +553,8 @@ def sample_patches_parallel_strided(preprocess_dir: Path, tile_infos: List[Tuple
     logger.info(f'Using {n_workers} workers for {len(tile_infos)} tiles in {chunks} chunks of size {chunk_size}...')
 
     # first clean up any previous temp files if failed to delete
-    for tmp_file in preprocess_dir.glob("chunk_*.npy"):
+    chunk_dir = preprocess_dir if scratch_dir is None else scratch_dir
+    for tmp_file in chunk_dir.glob("chunk_*.npy"):
         try:
             tmp_file.unlink()
         except Exception as e:
@@ -554,7 +568,7 @@ def sample_patches_parallel_strided(preprocess_dir: Path, tile_infos: List[Tuple
 
     try:
         with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
-            futures = [executor.submit(sample_patches_strided, tiles_chunk, size, stride, missing_percent, cloud_percent, preprocess_dir / f'chunk_{i}.npy') for i, tiles_chunk in enumerate(chunked_tile_infos)]
+            futures = [executor.submit(sample_patches_strided, tiles_chunk, size, stride, missing_percent, cloud_percent, chunk_dir / f'chunk_{i}.npy') for i, tiles_chunk in enumerate(chunked_tile_infos)]
             for future in futures:
                 future.result()
     except Exception as e:
@@ -566,7 +580,7 @@ def sample_patches_parallel_strided(preprocess_dir: Path, tile_infos: List[Tuple
     # one pass to get the size, another to stream into the final array
     try:
         # Prepare and get the shape of the first chunk to allocate array of correct shape
-        chunk_files = sorted(preprocess_dir.glob("chunk_*.npy"), key=lambda x: int(x.stem.split("_")[1]))
+        chunk_files = sorted(chunk_dir.glob("chunk_*.npy"), key=lambda x: int(x.stem.split("_")[1]))
         if not chunk_files:
             raise RuntimeError("No temporary chunk files found for patch sampling output.")
 
@@ -578,19 +592,26 @@ def sample_patches_parallel_strided(preprocess_dir: Path, tile_infos: List[Tuple
         logger.info(f'Total patches read from {len(chunk_files)} chunks: {total_patches}')
 
         # Preallocate memmapped output
-        final_arr = np.lib.format.open_memmap(output_file, mode="w+", dtype=np.float32, shape=(total_patches, SAR_DATASET_CHANNELS, size, size))
+        memmap_file = scratch_dir / output_file.name if scratch_dir is not None else output_file
+        final_arr = np.lib.format.open_memmap(memmap_file, mode="w+", dtype=np.float32, shape=(total_patches, SAR_DATASET_CHANNELS, size, size))
         patch_offset = 0
         for tmp_file in chunk_files:
             arr = np.load(tmp_file)
+            chunk_shape = arr.shape
+            logger.info(f'Streaming chunk {tmp_file.name} of shape {chunk_shape} into final array...')
             n_patches = arr.shape[0]
             final_arr[patch_offset:patch_offset + n_patches, ...] = arr
             patch_offset += n_patches
             arr = None
-            # Optionally clean up chunk file after streaming
+
             try:
                 tmp_file.unlink()
             except Exception as e:
-                logger.warning(f"Failed to delete chunk file {tmp_file}: {e}")
+                raise RuntimeError(f"Failed to delete chunk file {tmp_file}: {e}") from e
+        
+        # Now we move the final array from scratch to the final destination
+        if scratch_dir is not None:
+            shutil.move(memmap_file, output_file)
 
         logger.info('Sampling complete.')
     except Exception as e:
@@ -726,9 +747,10 @@ def get_tile_infos_from_events(events: List[Path], label_idx: Dict[Tuple[str, st
 
 @hydra.main(version_base=None, config_path='pkg://configs', config_name='config.yaml')
 def main(cfg: DictConfig) -> None:
-    """Preprocesses raw S1 tiles and coincident S2 label into smaller patches. The data will be stored
-    as separate npy files for train, val, and test sets, along with a mean_std.pkl file containing the
-    mean and std of the training tiles.
+    """Preprocesses raw S1 tiles and coincident S2 label (machine & human) into smaller patches.
+    
+    The data will be stored as separate npy files for train, val, and test sets,
+    along with a mean_std.pkl file containing the mean and std of the training tiles.
 
     Sample directories are s2_s1 directories containing SAR imagery with coincident S2 labels.
     Optional label directories can be also provided to use human labels in place of machine labels (pred_*.tif)
@@ -736,7 +758,10 @@ def main(cfg: DictConfig) -> None:
     the human label.
 
     cfg.preprocess.split_json storing a dictionary mapping (y, x) prism coordinates to split,
-    if provided, allows for pre determined split rather than random split.
+    if provided, allows for pre determined split rather than random split. This is preferred
+    over the random splitting to avoid data leakage from similar dates / regions.
+
+    NOTE: For large datasets on HPC, use the scratch directory for speed.
     
     cfg.preprocess Parameters:
     - size: int (pixel width of patch)
@@ -754,6 +779,7 @@ def main(cfg: DictConfig) -> None:
     - split_json: str (path to json dictionary mapping (y, x) prism coordinates to train, val, test splits)
     - val_ratio: used for random splitting if no split_json is provided
     - test_ratio: used for random splitting if no split_json is provided
+    - scratch_dir: str (optional path to the scratch directory for intermediate files and faster streaming)
     """
     # Setup logging
     logger = logging.getLogger('preprocessing')
@@ -786,6 +812,7 @@ def main(cfg: DictConfig) -> None:
         Split JSON:      {getattr(cfg.preprocess, 'split_json', None)}
         Val ratio:       {getattr(cfg.preprocess, 'val_ratio', None)}
         Test ratio:      {getattr(cfg.preprocess, 'test_ratio', None)}
+        Scratch dir:     {getattr(cfg.preprocess, 'scratch_dir', None)}
     ''')
 
     # Create preprocessing directory
@@ -888,6 +915,8 @@ def main(cfg: DictConfig) -> None:
         if holdout_ratio <= 0 or holdout_ratio >= 1:
             raise ValueError('Sum of val_ratio and test_ratio must be in (0, 1).')
 
+        assert getattr(cfg.preprocess, 'seed', None) is not None, 'cfg.preprocess.seed is required for random splitting.'
+
         train_events, val_test_events = train_test_split(
             all_events, test_size=holdout_ratio, random_state=cfg.preprocess.seed
         )
@@ -928,6 +957,12 @@ def main(cfg: DictConfig) -> None:
     # Sample patches in parallel
     missing_percent = getattr(cfg.preprocess, 'missing_percent', 0.0)
     cloud_percent = getattr(cfg.preprocess, 'cloud_percent', 0.1)
+    chunk_size = getattr(cfg.preprocess, 'chunk_size', 100)
+    scratch_dir = Path(cfg.preprocess.scratch_dir) if getattr(cfg.preprocess, 'scratch_dir', None) is not None else None
+    if scratch_dir is not None:
+        scratch_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f'Using scratch directory for intermediate files: {scratch_dir}')
+
     if cfg.preprocess.method == 'random':
         # Process each split using parallel sampling
         for split_name, tile_infos in [('train', train_tile_infos), ('val', val_tile_infos), ('test', test_tile_infos)]:
@@ -940,7 +975,7 @@ def main(cfg: DictConfig) -> None:
             
             sample_patches_parallel_random(
                 pre_sample_dir, tile_infos, cfg.preprocess.size, cfg.preprocess.samples, 
-                missing_percent, cloud_percent, output_file, cfg.preprocess.seed, n_workers, chunk_size=100
+                missing_percent, cloud_percent, output_file, cfg.preprocess.seed, n_workers, chunk_size=chunk_size, scratch_dir=scratch_dir
             )
         
         logger.info('Parallel random patch sampling complete.')
@@ -956,7 +991,7 @@ def main(cfg: DictConfig) -> None:
             
             sample_patches_parallel_strided(
                 pre_sample_dir, tile_infos, cfg.preprocess.size, cfg.preprocess.stride, missing_percent,
-                cloud_percent, output_file, n_workers, chunk_size=100
+                cloud_percent, output_file, n_workers, chunk_size=chunk_size, scratch_dir=scratch_dir
             )
         
         logger.info('Parallel strided patch sampling complete.')

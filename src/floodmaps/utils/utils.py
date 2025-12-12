@@ -8,6 +8,8 @@ import json
 import copy
 import random
 import math
+import pickle
+import logging
 import torch.nn.functional as F
 from pathlib import Path
 from matplotlib.colors import to_rgb
@@ -996,10 +998,14 @@ def scl_to_rgb(scl_array):
     
     return rgb_img
 
-def get_samples_with_wet_percentage(sample_set, num_samples, batch_size, num_workers, percent_wet_patches, rng):
+def get_samples_with_wet_percentage(sample_set, num_samples, batch_size, num_workers, percent_wet_patches, rng, cache_dir=None, dataset_name=None):
     """
     Get a list of sample indices where a specified percentage has wet patches (y.sum() > 0).
     Uses vectorized operations for much faster performance than Python loops.
+    
+    If cache_dir and dataset_name are provided, wet/dry indices will be cached to disk
+    for faster subsequent runs. The cache file is stored at:
+    {cache_dir}/{dataset_name}_wet_dry_indices.pkl
     
     Parameters
     ----------
@@ -1015,37 +1021,80 @@ def get_samples_with_wet_percentage(sample_set, num_samples, batch_size, num_wor
         Percentage of samples that should have wet patches (0.0 to 1.0)
     rng : Random
         Random number generator instance
+    cache_dir : Path or str, optional
+        Directory to cache wet/dry indices. If None, no caching is performed.
+    dataset_name : str, optional
+        Name of the dataset (e.g., 'val', 'test') for cache file naming.
+        Required if cache_dir is provided.
         
     Returns
     -------
     list
         List of sample indices
     """
-    # Use DataLoader with batch processing for vectorized operations
-    batch_size = min(batch_size, len(sample_set))  # Process in batches to avoid memory issues
-    dataloader = DataLoader(sample_set, batch_size=batch_size, num_workers=num_workers, shuffle=False)
-    wet_indices = []
-    dry_indices = []
+    # Handle caching
+    wet_indices = None
+    dry_indices = None
+    cache_path = None
     
-    current_idx = 0
-    for batch_x, batch_y, batch_supp in dataloader:
-        # Vectorized operation: check which samples have any positive pixels
-        # batch_y shape: (batch_size, channels, height, width)
-        # Sum over spatial dimensions (last 2 dims) and channels to get total water pixels per sample
-        water_pixels_per_sample = batch_y.sum(dim=(1, 2, 3))  # Shape: (batch_size,)
+    if cache_dir is not None and dataset_name is not None:
+        cache_path = Path(cache_dir) / f'{dataset_name}_wet_dry_indices.pkl'
+        if cache_path.exists():
+            try:
+                with open(cache_path, 'rb') as f:
+                    cached = pickle.load(f)
+                    cached_wet = cached['wet_indices']
+                    cached_dry = cached['dry_indices']
+                    # Validate cache matches dataset size
+                    if len(cached_wet) + len(cached_dry) == len(sample_set):
+                        wet_indices = cached_wet
+                        dry_indices = cached_dry
+                        logging.info(f"Loaded wet/dry indices from cache: {cache_path}")
+                        logging.info(f"  Wet: {len(wet_indices)}, Dry: {len(dry_indices)}")
+                    else:
+                        logging.warning(f"Cache size mismatch (cached: {len(cached_wet) + len(cached_dry)}, "
+                                      f"dataset: {len(sample_set)}). Recomputing indices.")
+            except Exception as e:
+                logging.warning(f"Failed to load cache from {cache_path}: {e}. Recomputing indices.")
+    
+    # Compute wet/dry indices if not cached
+    if wet_indices is None or dry_indices is None:
+        logging.info(f"Computing wet/dry indices for {len(sample_set)} samples...")
+        batch_size = min(batch_size, len(sample_set))  # Process in batches to avoid memory issues
+        dataloader = DataLoader(sample_set, batch_size=batch_size, num_workers=num_workers, shuffle=False)
+        wet_indices = []
+        dry_indices = []
         
-        # Get boolean mask for wet patches (samples with water_pixels > 0)
-        is_wet = water_pixels_per_sample > 0  # Shape: (batch_size,)
+        current_idx = 0
+        for batch_x, batch_y, batch_supp in dataloader:
+            # Vectorized operation: check which samples have any positive pixels
+            # batch_y shape: (batch_size, channels, height, width)
+            # Sum over spatial dimensions (last 2 dims) and channels to get total water pixels per sample
+            water_pixels_per_sample = batch_y.sum(dim=(1, 2, 3))  # Shape: (batch_size,)
+            
+            # Get boolean mask for wet patches (samples with water_pixels > 0)
+            is_wet = water_pixels_per_sample > 0  # Shape: (batch_size,)
+            
+            # Convert to indices in the original dataset
+            batch_indices = torch.arange(current_idx, current_idx + batch_y.size(0))
+            wet_batch_indices = batch_indices[is_wet].tolist()
+            dry_batch_indices = batch_indices[~is_wet].tolist()
+            
+            wet_indices.extend(wet_batch_indices)
+            dry_indices.extend(dry_batch_indices)
+            
+            current_idx += batch_y.size(0)
         
-        # Convert to indices in the original dataset
-        batch_indices = torch.arange(current_idx, current_idx + batch_y.size(0))
-        wet_batch_indices = batch_indices[is_wet].tolist()
-        dry_batch_indices = batch_indices[~is_wet].tolist()
+        logging.info(f"Computed wet/dry indices: Wet: {len(wet_indices)}, Dry: {len(dry_indices)}")
         
-        wet_indices.extend(wet_batch_indices)
-        dry_indices.extend(dry_batch_indices)
-        
-        current_idx += batch_y.size(0)
+        # Cache the indices if cache_dir is provided
+        if cache_path is not None:
+            try:
+                with open(cache_path, 'wb') as f:
+                    pickle.dump({'wet_indices': wet_indices, 'dry_indices': dry_indices}, f)
+                logging.info(f"Saved wet/dry indices to cache: {cache_path}")
+            except Exception as e:
+                logging.warning(f"Failed to save cache to {cache_path}: {e}")
     
     # Calculate number of wet and dry samples needed
     num_wet_needed = int(num_samples * percent_wet_patches)

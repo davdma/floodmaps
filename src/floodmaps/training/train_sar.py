@@ -21,7 +21,8 @@ from omegaconf import DictConfig, OmegaConf
 
 from floodmaps.models.model import SARWaterDetector
 from floodmaps.utils.utils import (flatten_dict, Metrics, EarlyStopper,
-                         SARChannelIndexer, get_model_params, nlcd_to_rgb, get_samples_with_wet_percentage)
+                         SARChannelIndexer, get_model_params, nlcd_to_rgb,
+                         get_samples_with_wet_percentage, scl_to_rgb)
 from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
 from floodmaps.utils.metrics import compute_nlcd_metrics
 
@@ -504,13 +505,37 @@ def save_experiment(cls_weights, ad_weights, metrics, cfg, ad_cfg, run):
     with open(path / f"wandb_info.json", "w") as f:
         json.dump(wandb_info, f, indent=4)
 
-def sample_predictions(model, sample_set, mean, std, loss_config, cfg, seed=24330):
-    """Generate predictions on a subset of images in the dataset for wandb logging."""
+def sample_predictions(model, sample_set, mean, std, loss_config, cfg, sample_dir, dataset_name, percent_wet_patches=0.5, seed=24330):
+    """Generate predictions on a subset of images in the dataset for wandb logging.
+    
+    Parameters
+    ----------
+    model : torch.nn.Module
+        The model to evaluate
+    sample_set : torch.utils.data.Dataset
+        The dataset to sample predictions from
+    mean : torch.Tensor
+        The mean of the dataset
+    std : torch.Tensor
+        The standard deviation of the dataset
+    loss_config : LossConfig
+        The loss configuration object
+    cfg : DictConfig
+        The configuration dictionary
+    sample_dir : Path or str
+        Directory where samples are stored (used for caching wet/dry indices)
+    dataset_name : str
+        Name of the dataset ('val' or 'test') for cache file naming
+    percent_wet_patches : float, optional
+        The percentage of wet patches to visualize
+    seed : int, optional
+        The seed for the random number generator
+    """
     if cfg.wandb.num_sample_predictions <= 0:
         return None
 
     loss_config.val_loss_fn.change_device('cpu')
-    columns = ["id", "tci", "nlcd"] # TCI, NLCD always included
+    columns = ["id", "tci", "nlcd", "scl"] # TCI, NLCD, SCL always included
     channels = [bool(int(x)) for x in cfg.data.channels]
     my_channels = SARChannelIndexer(channels)
     # initialize wandb table given the channel settings
@@ -544,14 +569,15 @@ def sample_predictions(model, sample_set, mean, std, loss_config, cfg, seed=2433
     model.eval()
     rng = Random(seed)
     
-    # Get samples with specified percentage of wet patches
-    percent_wet = cfg.wandb.get('percent_wet_patches', 0.5)  # Default to 0.5 if not specified
+    # Get samples with specified percentage of wet patches (with caching)
     samples = get_samples_with_wet_percentage(sample_set,
         cfg.wandb.num_sample_predictions,
         cfg.train.batch_size,
         cfg.train.num_workers,
-        percent_wet,
-        rng
+        percent_wet_patches,
+        rng,
+        cache_dir=sample_dir,
+        dataset_name=dataset_name
     )
 
     center_1 = (cfg.data.size - cfg.data.window) // 2
@@ -592,6 +618,12 @@ def sample_predictions(model, sample_set, mean, std, loss_config, cfg, seed=2433
         nlcd_rgb = nlcd_to_rgb(nlcd)
         nlcd_img = Image.fromarray(nlcd_rgb, mode="RGB")
         row.append(wandb.Image(nlcd_img))
+
+        # SCL (Scene Classification Layer) visualization
+        scl = supplementary[4, :, :].byte().numpy()
+        scl_rgb = scl_to_rgb(scl)
+        scl_img = Image.fromarray(scl_rgb, mode="RGB")
+        row.append(wandb.Image(scl_img))
 
         if my_channels.has_vv():
             vv = X_c[:, :, channel_indices[0]].numpy()
@@ -711,18 +743,18 @@ def run_experiment_s1(cfg, ad_cfg=None):
     # dataset and transforms
     print(f"Using {device} device")
     model_name = cfg.model.classifier
-    filter = 'lee' if cfg.data.use_lee else 'raw'
+    method = cfg.data.method
     size = cfg.data.size
-    samples = cfg.data.samples
+    sample_param = cfg.data.samples if cfg.data.method == 'random' else cfg.data.stride
     suffix = getattr(cfg.data, 'suffix', '')
     if suffix:
-        sample_dir = Path(cfg.paths.preprocess_dir) / 's1_weak' / f'samples_{size}_{samples}_{filter}_{suffix}/'
+        sample_dir = Path(cfg.paths.preprocess_dir) / 's1_weak' / f'{method}_{size}_{sample_param}_{suffix}/'
     else:
-        sample_dir = Path(cfg.paths.preprocess_dir) / 's1_weak' / f'samples_{size}_{samples}_{filter}/'
+        sample_dir = Path(cfg.paths.preprocess_dir) / 's1_weak' / f'{method}_{size}_{sample_param}/'
 
     # load in mean and std
     channels = [bool(int(x)) for x in cfg.data.channels]
-    with open(sample_dir / f'mean_std_{size}_{samples}_{filter}.pkl', 'rb') as f:
+    with open(sample_dir / f'mean_std.pkl', 'rb') as f:
         train_mean, train_std = pickle.load(f)
 
         train_mean = torch.from_numpy(train_mean[channels])
@@ -730,7 +762,7 @@ def run_experiment_s1(cfg, ad_cfg=None):
 
     standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
 
-    # datasets
+    # datasets (all can be memory mapped if desired)
     train_set = FloodSampleSARDataset(sample_dir, channels=channels,
                                         typ="train", transform=standardize, random_flip=cfg.data.random_flip,
                                         seed=cfg.seed+1, mmap_mode='r' if cfg.data.mmap else None)
@@ -803,8 +835,10 @@ def run_experiment_s1(cfg, ad_cfg=None):
             save_experiment(cls_weights, ad_weights, fmetrics, cfg, ad_cfg, run)
 
         # log predictions on validation set using wandb
+        percent_wet = cfg.wandb.get('percent_wet_patches', 0.5)  # Default to 0.5 if not specified
         pred_table = sample_predictions(model, test_set if cfg.eval.mode == 'test' else val_set,
-                                        train_mean, train_std, loss_cfg, cfg)
+                                        train_mean, train_std, loss_cfg, cfg, sample_dir, cfg.eval.mode,
+                                        percent_wet_patches=percent_wet)
         run.log({f"model_{cfg.eval.mode}_predictions": pred_table})
     except Exception as e:
         print("An exception occurred during training!")
@@ -830,12 +864,13 @@ def validate_config(cfg):
         return type(s) == str and len(s) == 8 and all(c in '01' for c in s)
 
     # Add checks
+    assert cfg.data.method in ['random', 'strided'], "Sampling method must be one of ['random', 'strided']"
+    assert cfg.save in [True, False], "Save must be a boolean"
     if cfg.train.loss == 'TverskyLoss':
         assert 0.0 <= cfg.train.tversky.alpha <= 1.0, "Tversky alpha must be in [0, 1]"
-    assert cfg.save in [True, False], "Save must be a boolean"
     assert cfg.train.lr > 0, "Learning rate must be positive"
     assert cfg.train.loss in LOSS_NAMES, f"Loss must be one of {LOSS_NAMES}"
-    assert cfg.train.optimizer in ['Adam', 'SGD'], f"Optimizer must be one of {['Adam', 'SGD']}"
+    assert cfg.train.optimizer in ['Adam', 'SGD', 'AdamW'], f"Optimizer must be one of {['Adam', 'SGD', 'AdamW']}"
     assert cfg.train.LR_scheduler in ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR'], f"LR scheduler must be one of {['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR']}"
     assert cfg.train.early_stopping in [True, False], "Early stopping must be a boolean"
     assert not cfg.train.early_stopping or cfg.train.patience is not None, "Patience must be set if early stopping is enabled"

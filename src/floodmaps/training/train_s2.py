@@ -351,7 +351,7 @@ def save_experiment(cls_weights, disc_weights, metrics, cfg, run):
     with open(path / f"wandb_info.json", "w") as f:
         json.dump(wandb_info, f, indent=4)
 
-def sample_predictions(model, sample_set, mean, std, cfg, percent_wet_patches=0.5, seed=24330):
+def sample_predictions(model, sample_set, mean, std, cfg, sample_dir, dataset_name, percent_wet_patches=0.5, seed=24330):
     """Generate predictions on a subset of images in the validation set for wandb logging.
     
     TODO: FIX CHANNEL INDEXING HARDCODING. Need more flexible way to handle channels.
@@ -368,6 +368,10 @@ def sample_predictions(model, sample_set, mean, std, cfg, percent_wet_patches=0.
         The standard deviation of the dataset
     cfg : DictConfig
         The configuration dictionary
+    sample_dir : Path or str
+        Directory where samples are stored (used for caching wet/dry indices)
+    dataset_name : str
+        Name of the dataset ('val' or 'test') for cache file naming
     percent_wet_patches : float, optional
         The percentage of wet patches to visualize
     seed : int, optional
@@ -410,13 +414,15 @@ def sample_predictions(model, sample_set, mean, std, cfg, percent_wet_patches=0.
     model.eval()
     rng = Random(seed)
     
-    # Get samples with specified percentage of wet patches
+    # Get samples with specified percentage of wet patches (with caching)
     samples = get_samples_with_wet_percentage(sample_set,
         cfg.wandb.num_sample_predictions,
         cfg.train.batch_size,
         cfg.train.num_workers,
         percent_wet_patches,
-        rng
+        rng,
+        cache_dir=sample_dir,
+        dataset_name=dataset_name
     )
 
     for id, k in enumerate(samples):
@@ -644,7 +650,8 @@ def run_experiment_s2(cfg):
         # log predictions on validation set using wandb
         percent_wet = cfg.wandb.get('percent_wet_patches', 0.5)  # Default to 0.5 if not specified
         pred_table = sample_predictions(model, test_set if cfg.eval.mode == 'test' else val_set,
-                                        train_mean, train_std, cfg, percent_wet_patches=percent_wet)
+                                        train_mean, train_std, cfg, sample_dir, cfg.eval.mode,
+                                        percent_wet_patches=percent_wet)
         run.log({f"model_{cfg.eval.mode}_predictions": pred_table})
     except Exception as e:
         print("An exception occurred during training!")
@@ -677,7 +684,7 @@ def validate_config(cfg):
     assert cfg.train.batch_size is not None and cfg.train.batch_size > 0, "Batch size must be defined and positive"
     assert cfg.train.lr > 0, "Learning rate must be positive"
     assert cfg.train.loss in LOSS_NAMES, f"Loss must be one of {LOSS_NAMES}"
-    assert cfg.train.optimizer in ['Adam', 'SGD'], f"Optimizer must be one of {['Adam', 'SGD', 'AdamW']}"
+    assert cfg.train.optimizer in ['Adam', 'SGD', 'AdamW'], f"Optimizer must be one of {['Adam', 'SGD', 'AdamW']}"
     assert cfg.train.LR_scheduler in ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR'], f"LR scheduler must be one of {['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR']}"
     assert cfg.train.early_stopping in [True, False], "Early stopping must be a boolean"
     assert not cfg.train.early_stopping or cfg.train.patience is not None, "Patience must be set if early stopping is enabled"

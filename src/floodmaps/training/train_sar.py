@@ -22,9 +22,9 @@ from omegaconf import DictConfig, OmegaConf
 from floodmaps.models.model import SARWaterDetector
 from floodmaps.utils.utils import (flatten_dict, Metrics, EarlyStopper,
                          SARChannelIndexer, get_model_params, nlcd_to_rgb,
-                         get_samples_with_wet_percentage, scl_to_rgb)
+                         get_samples_with_wet_percentage, scl_to_rgb, compute_pos_weight)
 from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
-from floodmaps.utils.metrics import compute_nlcd_metrics
+from floodmaps.utils.metrics import compute_nlcd_metrics, compute_scl_metrics
 
 from floodmaps.training.loss import LossConfig
 from floodmaps.training.dataset import FloodSampleSARDataset
@@ -178,14 +178,16 @@ def test_loop(model, dataloader, device, loss_config, ad_cfg, c, run, epoch):
     all_preds = []
     all_targets = []
     all_nlcd_classes = []
+    all_scl_classes = []
 
     model.eval()
     with torch.no_grad():
         for X, y, supplementary in dataloader:
             X = X.to(device)
             y = y.to(device)
-            # for nlcd data we can safely assume it is properly aligned to the SAR image
+            # for nlcd/scl data we can safely assume it is properly aligned to the SAR image
             nlcd_classes = supplementary[:, 3, c[0]:c[1], c[0]:c[1]].to(device)
+            scl_classes = supplementary[:, 4, c[0]:c[1], c[0]:c[1]].to(device)
 
             X_c = X[:, :, c[0]:c[1], c[0]:c[1]]
 
@@ -201,6 +203,7 @@ def test_loop(model, dataloader, device, loss_config, ad_cfg, c, run, epoch):
             all_preds.append(y_pred)
             all_targets.append(target)
             all_nlcd_classes.append(nlcd_classes.flatten())
+            all_scl_classes.append(scl_classes.flatten())
             running_tot_vloss += loss.detach()
             running_cls_vloss += loss_dict['classifier_loss'].detach()
 
@@ -218,6 +221,7 @@ def test_loop(model, dataloader, device, loss_config, ad_cfg, c, run, epoch):
     all_preds = torch.cat(all_preds)
     all_targets = torch.cat(all_targets)
     all_nlcd_classes = torch.cat(all_nlcd_classes)
+    all_scl_classes = torch.cat(all_scl_classes)
 
     metric_collection.update(all_preds, all_targets)
     metric_results = metric_collection.compute()
@@ -280,12 +284,14 @@ def test_loop(model, dataloader, device, loss_config, ad_cfg, c, run, epoch):
         "tp": confusion_matrix[1][1]
     }
     nlcd_metrics_dict = compute_nlcd_metrics(all_preds, all_targets, all_nlcd_classes)
+    scl_metrics_dict = compute_scl_metrics(all_preds, all_targets, all_scl_classes)
     metric_collection.reset()
 
     metrics_dict = {
         'core_metrics': core_metrics_dict,
         'confusion_matrix': confusion_matrix_dict,
-        'nlcd_metrics': nlcd_metrics_dict
+        'nlcd_metrics': nlcd_metrics_dict,
+        'scl_metrics': scl_metrics_dict
     }
 
     return epoch_vloss, epoch_cls_vloss, metrics_dict
@@ -306,6 +312,7 @@ def evaluate(model, dataloader, device, loss_config, ad_cfg, c):
     all_preds = []
     all_targets = []
     all_nlcd_classes = []
+    all_scl_classes = []
 
     model.eval()
     with torch.no_grad():
@@ -313,6 +320,7 @@ def evaluate(model, dataloader, device, loss_config, ad_cfg, c):
             X = X.to(device)
             y = y.to(device)
             nlcd_classes = supplementary[:, 3, c[0]:c[1], c[0]:c[1]].to(device)
+            scl_classes = supplementary[:, 4, c[0]:c[1], c[0]:c[1]].to(device)
 
             X_c = X[:, :, c[0]:c[1], c[0]:c[1]]
 
@@ -328,12 +336,14 @@ def evaluate(model, dataloader, device, loss_config, ad_cfg, c):
             all_preds.append(y_pred)
             all_targets.append(target)
             all_nlcd_classes.append(nlcd_classes.flatten())
+            all_scl_classes.append(scl_classes.flatten())
             running_tot_vloss += loss.detach()
 
     # calculate metrics
     all_preds = torch.cat(all_preds)
     all_targets = torch.cat(all_targets)
     all_nlcd_classes = torch.cat(all_nlcd_classes)
+    all_scl_classes = torch.cat(all_scl_classes)
 
     metric_collection.update(all_preds, all_targets)
     metric_results = metric_collection.compute()
@@ -355,17 +365,19 @@ def evaluate(model, dataloader, device, loss_config, ad_cfg, c):
         "tp": confusion_matrix[1][1]
     }
     nlcd_metrics_dict = compute_nlcd_metrics(all_preds, all_targets, all_nlcd_classes)
+    scl_metrics_dict = compute_scl_metrics(all_preds, all_targets, all_scl_classes)
     metric_collection.reset()
 
     metrics_dict = {
         'core_metrics': core_metrics_dict,
         'confusion_matrix': confusion_matrix_dict,
-        'nlcd_metrics': nlcd_metrics_dict
+        'nlcd_metrics': nlcd_metrics_dict,
+        'scl_metrics': scl_metrics_dict
     }
 
     return epoch_vloss, metrics_dict
 
-def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, ad_cfg, run):
+def train(model, train_loader, val_loader, test_loader, device, cfg, ad_cfg, run, cache_dir=None):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     logging.info(f'''Starting training:
         Date:            {timestamp}
@@ -379,6 +391,23 @@ def train(model, train_loader, val_loader, test_loader, device, loss_cfg, cfg, a
     ''')
     # log weights and gradients each epoch
     run.watch(model, log="all", log_freq=10)
+
+    # compute pos_weight if enabled for rebalancing
+    pos_weight_val = None
+    if getattr(cfg.train, 'use_pos_weight', False):
+        if getattr(cfg.train, 'pos_weight', None) is not None:
+            pos_weight_val = float(cfg.train.pos_weight)
+        else:
+            # Efficient vectorized computation over loaded training labels
+            # label plane is last 6th channel in dataset
+            label_np = train_loader.dataset.dataset[:, -6, :, :]
+            clip_max = float(getattr(cfg.train, 'pos_weight_clip', 10.0))
+            pos_weight_val = compute_pos_weight(label_np, pos_weight_clip=clip_max,
+                                                cache_dir=cache_dir, dataset_name='train')
+    cfg.train.pos_weight = pos_weight_val
+    
+    # initialize loss functions - train loss function is optimized for gradient calculations
+    loss_cfg = LossConfig(cfg, ad_cfg=ad_cfg, device=device)
 
     # optimizer and scheduler for reducing learning rate
     optimizer = get_optimizer(model, cfg)
@@ -505,7 +534,7 @@ def save_experiment(cls_weights, ad_weights, metrics, cfg, ad_cfg, run):
     with open(path / f"wandb_info.json", "w") as f:
         json.dump(wandb_info, f, indent=4)
 
-def sample_predictions(model, sample_set, mean, std, loss_config, cfg, sample_dir, dataset_name, percent_wet_patches=0.5, seed=24330):
+def sample_predictions(model, sample_set, mean, std, cfg, ad_cfg, sample_dir, dataset_name, percent_wet_patches=0.5, seed=24330):
     """Generate predictions on a subset of images in the dataset for wandb logging.
     
     Parameters
@@ -518,10 +547,10 @@ def sample_predictions(model, sample_set, mean, std, loss_config, cfg, sample_di
         The mean of the dataset
     std : torch.Tensor
         The standard deviation of the dataset
-    loss_config : LossConfig
-        The loss configuration object
     cfg : DictConfig
         The configuration dictionary
+    ad_cfg : DictConfig
+        The configuration dictionary for the autodespeckler
     sample_dir : Path or str
         Directory where samples are stored (used for caching wet/dry indices)
     dataset_name : str
@@ -534,7 +563,7 @@ def sample_predictions(model, sample_set, mean, std, loss_config, cfg, sample_di
     if cfg.wandb.num_sample_predictions <= 0:
         return None
 
-    loss_config.val_loss_fn.change_device('cpu')
+    loss_config = LossConfig(cfg, ad_cfg=ad_cfg)
     columns = ["id", "tci", "nlcd", "scl"] # TCI, NLCD, SCL always included
     channels = [bool(int(x)) for x in cfg.data.channels]
     my_channels = SARChannelIndexer(channels)
@@ -824,20 +853,17 @@ def run_experiment_s1(cfg, ad_cfg=None):
                 run.config.update({"save_path": cfg.save_path}, allow_val_change=True)
             print(f'Save path set to: {cfg.save_path}')
 
-        # initialize loss functions - train loss function is optimized for gradient calculations
-        loss_cfg = LossConfig(cfg, ad_cfg=ad_cfg, device=device)
-
         # train and save results metrics
         cls_weights, ad_weights, fmetrics = train(model, train_loader, val_loader,
-                                              test_loader, device, loss_cfg,
-                                              cfg, ad_cfg, run)
+                                              test_loader, device, cfg, ad_cfg, run, cache_dir=sample_dir)
+
         if cfg.save:
             save_experiment(cls_weights, ad_weights, fmetrics, cfg, ad_cfg, run)
 
         # log predictions on validation set using wandb
         percent_wet = cfg.wandb.get('percent_wet_patches', 0.5)  # Default to 0.5 if not specified
         pred_table = sample_predictions(model, test_set if cfg.eval.mode == 'test' else val_set,
-                                        train_mean, train_std, loss_cfg, cfg, sample_dir, cfg.eval.mode,
+                                        train_mean, train_std, cfg, ad_cfg, sample_dir, cfg.eval.mode,
                                         percent_wet_patches=percent_wet)
         run.log({f"model_{cfg.eval.mode}_predictions": pred_table})
     except Exception as e:

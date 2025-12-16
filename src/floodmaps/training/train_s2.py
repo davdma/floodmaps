@@ -21,7 +21,7 @@ from omegaconf import DictConfig, OmegaConf
 import hydra
 
 from floodmaps.models.model import S2WaterDetector
-from floodmaps.utils.utils import flatten_dict, get_model_params, Metrics, EarlyStopper, ChannelIndexer, nlcd_to_rgb, scl_to_rgb, get_samples_with_wet_percentage
+from floodmaps.utils.utils import flatten_dict, get_model_params, Metrics, EarlyStopper, ChannelIndexer, nlcd_to_rgb, scl_to_rgb, get_samples_with_wet_percentage, compute_pos_weight
 from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
 from floodmaps.utils.metrics import compute_nlcd_metrics, compute_scl_metrics
 
@@ -213,7 +213,7 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
 
     return epoch_vloss, metrics_dict
 
-def train(model, train_loader, val_loader, test_loader, device, cfg, run):
+def train(model, train_loader, val_loader, test_loader, device, cfg, run, cache_dir=None):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     logging.info(f'''Starting training:
         Date:            {timestamp}
@@ -235,19 +235,11 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
             pos_weight_val = float(cfg.train.pos_weight)
         else:
             # Efficient vectorized computation over loaded training labels
-            # label plane is last 6th channel in dataset (kept in-memory by dataset class)
-            logging.info("Computing pos_weight from training labels")
+            # label plane is last 6th channel in dataset
             label_np = train_loader.dataset.dataset[:, -6, :, :]
-            pos = float(label_np.sum())
-            total = float(label_np.size)
-            neg = max(total - pos, 1.0)
-            # raw pos_weight = neg/pos; clip to [1, clip]
-            raw_pw = neg / max(pos, 1.0)
             clip_max = float(getattr(cfg.train, 'pos_weight_clip', 10.0))
-            pos_weight_val = max(1.0, min(raw_pw, clip_max))
-            logging.info(f"Computed pos_weight: {pos_weight_val}")
-            logging.info(f"Neg: {neg}, Pos: {pos}, Total: {total}")
-            logging.info(f"Percentage of positive pixels: {pos / total:.2%}")
+            pos_weight_val = compute_pos_weight(label_np, pos_weight_clip=clip_max,
+                                                cache_dir=cache_dir, dataset_name='train')
 
     # loss function
     loss_fn = get_loss_fn(cfg, device=device, pos_weight=pos_weight_val)
@@ -643,7 +635,7 @@ def run_experiment_s2(cfg):
         
         # train and save results metrics
         cls_weights, disc_weights, fmetrics = train(model, train_loader, val_loader,
-                                              test_loader, device, cfg, run)
+                                              test_loader, device, cfg, run, cache_dir=sample_dir)
         if cfg.save:
             save_experiment(cls_weights, disc_weights, fmetrics, cfg, run)
 

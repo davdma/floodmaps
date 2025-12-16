@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 ALPHA = 0.3
 BETA = 0.7
+AD_LOSS_NAMES = ['MSELoss', 'L1Loss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss', 'JSDLoss']
 
 class LossConfig():
     """Special loss handling object for training SAR flood mapping models. Includes
@@ -77,12 +78,12 @@ class LossConfig():
         best for memory performance."""
         if cfg.train.loss == 'BCELoss':
             if cfg.train.shift_invariant:
-                train_loss_fn = TrainShiftInvariantLoss(InvariantBCELoss(), device=device)
-                val_loss_fn = ShiftInvariantLoss(InvariantBCELoss(), device=device)
+                train_loss_fn = TrainShiftInvariantLoss(InvariantBCELoss(pos_weight=cfg.train.pos_weight), device=device)
+                val_loss_fn = ShiftInvariantLoss(InvariantBCELoss(pos_weight=cfg.train.pos_weight), device=device)
                 test_loss_fn = val_loss_fn
             else:
                 # non shift wrapper
-                train_loss_fn = NonShiftInvariantLoss(nn.BCEWithLogitsLoss(),
+                train_loss_fn = NonShiftInvariantLoss(nn.BCEWithLogitsLoss(pos_weight=cfg.train.pos_weight),
                                                     size=cfg.data.size,
                                                     window=cfg.data.window,
                                                     device=device)
@@ -90,11 +91,11 @@ class LossConfig():
                 test_loss_fn = train_loss_fn
         elif cfg.train.loss == 'BCEDiceLoss':
             if cfg.train.shift_invariant:
-                train_loss_fn = TrainShiftInvariantLoss(InvariantBCEDiceLoss(), device=device)
-                val_loss_fn = ShiftInvariantLoss(InvariantBCEDiceLoss(), device=device)
+                train_loss_fn = TrainShiftInvariantLoss(InvariantBCEDiceLoss(pos_weight=cfg.train.pos_weight), device=device)
+                val_loss_fn = ShiftInvariantLoss(InvariantBCEDiceLoss(pos_weight=cfg.train.pos_weight), device=device)
                 test_loss_fn = val_loss_fn
             else:
-                train_loss_fn = NonShiftInvariantLoss(BCEDiceLoss(),
+                train_loss_fn = NonShiftInvariantLoss(BCEDiceLoss(pos_weight=cfg.train.pos_weight),
                                                     size=cfg.data.size,
                                                     window=cfg.data.window,
                                                     device=device)
@@ -148,7 +149,7 @@ def get_ad_loss(cfg):
     elif cfg.train.loss == 'JSDLoss':
         return JSD()
     else:
-        raise Exception(f"Loss must be one of: {', '.join(LOSS_NAMES)}")
+        raise Exception(f"Loss must be one of: {', '.join(AD_LOSS_NAMES)}")
 
 class PatchMSELoss(nn.Module):
     def __init__(self):
@@ -296,13 +297,34 @@ class TverskyLoss(nn.Module):
         return 1 - Tversky
 
 class InvariantBCELoss(nn.Module):
-    """Passed into ShiftInvariantLoss at initialization for optimized shift-invariant BCE loss calculations.
-    Will calculate and return a torch tensor of BCE losses of each patch in the batch.
+    """BCE loss with per-sample (patch) reduction for use with ShiftInvariantLoss.
+    
+    Unlike standard BCEWithLogitsLoss which reduces across the entire batch (returning a scalar),
+    this loss reduces across pixels *within each sample*, returning a tensor of shape (batch_size,)
+    with one loss value per sample. This per-sample output is required by ShiftInvariantLoss to
+    find the optimal alignment shift independently for each sample in the batch.
+
+    Parameters
+    ----------
+    weight : float, optional
+        Manual rescaling weight for the loss.
+    reduction : str, optional
+        Reduction mode: 'mean' averages pixel losses per sample, 'sum' sums them,
+        'none' returns unreduced per-pixel losses. Default is 'mean'.
+    pos_weight : float, optional
+        Weight for positive class to handle class imbalance.
+
+    Returns
+    -------
+    torch.Tensor
+        Loss tensor of shape (batch_size,) when reduction is 'mean' or 'sum',
+        or (batch_size, num_pixels) when reduction is 'none'.
     """
-    def __init__(self, weight=None, reduction='mean'):
+    def __init__(self, weight=None, reduction='mean', pos_weight=None):
         super().__init__()
         self.weight = weight
         self.reduction = reduction
+        self.pos_weight = pos_weight
 
     def forward(self, inputs, targets):
         # remove if your model contains a sigmoid or equivalent activation layer
@@ -313,10 +335,16 @@ class InvariantBCELoss(nn.Module):
         log_inputs = F.logsigmoid(inputs)
         log_minus_one_inputs = F.logsigmoid(-inputs)
 
+        pos_term = targets * log_inputs
+        neg_term = (1 - targets) * log_minus_one_inputs
+
+        if self.pos_weight is not None:
+            pos_term = self.pos_weight * pos_term
+
+        loss = -(pos_term + neg_term)
+
         if self.weight is not None:
-            loss = -self.weight * (targets * log_inputs + (1 - targets) * log_minus_one_inputs)
-        else:
-            loss = -(targets * log_inputs + (1 - targets) * log_minus_one_inputs)
+            loss = self.weight * loss
 
         # Apply the specified reduction method
         if self.reduction == 'mean':
@@ -327,12 +355,30 @@ class InvariantBCELoss(nn.Module):
             return loss
 
 class InvariantBCEDiceLoss(nn.Module):
-    """Passed into ShiftInvariantLoss at initialization for optimized shift-invariant BCE Dice loss calculations.
-    Will calculate and return a torch tensor of BCE Dice losses of each patch in the batch.
+    """Combined BCE + Dice loss with per-sample (patch) reduction for use with ShiftInvariantLoss.
+    
+    Unlike standard loss functions which reduce across the entire batch (returning a scalar),
+    this loss reduces across pixels *within each sample*, returning a tensor of shape (batch_size,)
+    with one loss value per sample. This per-sample output is required by ShiftInvariantLoss to
+    find the optimal alignment shift independently for each sample in the batch.
+
+    The loss combines BCE loss (via InvariantBCELoss) with Dice loss, both computed per-sample.
+
+    Parameters
+    ----------
+    weight : float, optional
+        Manual rescaling weight for the BCE component.
+    pos_weight : float, optional
+        Weight for positive class in BCE component to handle class imbalance.
+
+    Returns
+    -------
+    torch.Tensor
+        Loss tensor of shape (batch_size,) containing BCE + Dice loss for each sample.
     """
-    def __init__(self, weight=None):
+    def __init__(self, weight=None, pos_weight=None):
         super().__init__()
-        self.BCE = InvariantBCELoss(weight=weight, reduction='mean')
+        self.BCE = InvariantBCELoss(weight=weight, reduction='mean', pos_weight=pos_weight)
 
     def forward(self, inputs, targets, smooth=1):
         # model should not contain a sigmoid or equivalent activation layer
@@ -350,8 +396,27 @@ class InvariantBCEDiceLoss(nn.Module):
         return BCEDice
 
 class InvariantTverskyLoss(nn.Module):
-    """Passed into ShiftInvariantLoss at initialization for optimized shift-invariant Tversky loss calculations.
-    Will calculate and return a torch tensor of Tversky losses of each patch in the batch.
+    """Tversky loss with per-sample (patch) reduction for use with ShiftInvariantLoss.
+    
+    Unlike standard loss functions which reduce across the entire batch (returning a scalar),
+    this loss reduces across pixels *within each sample*, returning a tensor of shape (batch_size,)
+    with one loss value per sample. This per-sample output is required by ShiftInvariantLoss to
+    find the optimal alignment shift independently for each sample in the batch.
+
+    Tversky loss generalizes Dice loss by allowing asymmetric weighting of false positives
+    and false negatives via alpha and beta parameters.
+
+    Parameters
+    ----------
+    alpha : float, optional
+        Weight for false positives. Default is ALPHA constant.
+    beta : float, optional
+        Weight for false negatives. Default is BETA constant.
+
+    Returns
+    -------
+    torch.Tensor
+        Loss tensor of shape (batch_size,) containing Tversky loss for each sample.
     """
     def __init__(self, alpha=ALPHA, beta=BETA):
         super().__init__()

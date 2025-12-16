@@ -1131,3 +1131,114 @@ def get_samples_with_wet_percentage(sample_set, num_samples, batch_size, num_wor
     rng.shuffle(all_samples)
     
     return all_samples
+
+
+def compute_label_pixel_stats(labels, cache_dir=None, dataset_name=None):
+    """
+    Compute positive and negative pixel statistics from labels.
+    
+    If cache_dir and dataset_name are provided, statistics will be cached to disk
+    for faster subsequent runs. The cache file is stored at:
+    {cache_dir}/{dataset_name}_pixel_stats.pkl
+    
+    Parameters
+    ----------
+    labels : np.ndarray
+        The label array to compute statistics from. Should be binary (0/1) values.
+    cache_dir : Path or str, optional
+        Directory to cache pixel statistics. If None, no caching is performed.
+    dataset_name : str, optional
+        Name of the dataset (e.g., 'train', 'val', 'test') for cache file naming.
+        Required if cache_dir is provided.
+        
+    Returns
+    -------
+    dict
+        Dictionary containing:
+        - 'pos': Number of positive pixels (float)
+        - 'neg': Number of negative pixels (float)
+        - 'total': Total number of pixels (float)
+    """
+    stats = None
+    cache_path = None
+    
+    if cache_dir is not None and dataset_name is not None:
+        cache_path = Path(cache_dir) / f'{dataset_name}_pixel_stats.pkl'
+        if cache_path.exists():
+            try:
+                with open(cache_path, 'rb') as f:
+                    cached = pickle.load(f)
+                    # Validate cache matches dataset size
+                    if cached.get('total') == float(labels.size):
+                        stats = cached
+                        logging.info(f"Loaded pixel stats from cache: {cache_path}")
+                        logging.info(f"  Pos: {stats['pos']}, Neg: {stats['neg']}, Total: {stats['total']}")
+                    else:
+                        logging.warning(f"Cache size mismatch (cached: {cached.get('total')}, "
+                                      f"dataset: {labels.size}). Recomputing stats.")
+            except Exception as e:
+                logging.warning(f"Failed to load cache from {cache_path}: {e}. Recomputing stats.")
+    
+    # Compute stats if not cached
+    if stats is None:
+        logging.info(f"Computing pixel statistics for {labels.size} pixels...")
+        pos = float(labels.sum())
+        total = float(labels.size)
+        neg = max(total - pos, 1.0)
+        
+        stats = {'pos': pos, 'neg': neg, 'total': total}
+        logging.info(f"Computed pixel stats: Pos: {pos}, Neg: {neg}, Total: {total}")
+        
+        # Cache the stats if cache_dir is provided
+        if cache_path is not None:
+            try:
+                with open(cache_path, 'wb') as f:
+                    pickle.dump(stats, f)
+                logging.info(f"Saved pixel stats to cache: {cache_path}")
+            except Exception as e:
+                logging.warning(f"Failed to save cache to {cache_path}: {e}")
+    
+    return stats
+
+
+def compute_pos_weight(labels, pos_weight_clip=10.0, cache_dir=None, dataset_name=None):
+    """
+    Compute pos_weight for imbalanced binary classification from labels.
+    
+    pos_weight = neg / pos, clipped to [1, pos_weight_clip].
+    
+    If cache_dir and dataset_name are provided, pixel statistics will be cached to disk
+    for faster subsequent runs.
+    
+    Parameters
+    ----------
+    labels : np.ndarray
+        The label array to compute pos_weight from. Should be binary (0/1) values.
+    pos_weight_clip : float, optional
+        Maximum value to clip pos_weight to. Default is 10.0.
+    cache_dir : Path or str, optional
+        Directory to cache pixel statistics. If None, no caching is performed.
+    dataset_name : str, optional
+        Name of the dataset (e.g., 'train') for cache file naming.
+        Required if cache_dir is provided.
+        
+    Returns
+    -------
+    float
+        The computed pos_weight value, clipped to [1, pos_weight_clip].
+    """
+    stats = compute_label_pixel_stats(labels, cache_dir=cache_dir, dataset_name=dataset_name)
+    
+    pos = stats['pos']
+    neg = stats['neg']
+    total = stats['total']
+    
+    # raw pos_weight = neg/pos; clip to [1, clip]
+    raw_pw = neg / max(pos, 1.0)
+    pos_weight_val = max(1.0, min(raw_pw, float(pos_weight_clip)))
+    
+    logging.info(f"Computed pos_weight: {pos_weight_val}")
+    logging.info(f"Neg: {neg}, Pos: {pos}, Total: {total}")
+    logging.info(f"Percentage of positive pixels: {pos / total:.2%}")
+    
+    return pos_weight_val

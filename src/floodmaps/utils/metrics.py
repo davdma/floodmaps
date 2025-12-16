@@ -5,6 +5,8 @@ import random
 from torch.utils.data import DataLoader, Subset
 import torch.nn.functional as F
 from skimage.metrics import structural_similarity as ssim
+from torchmetrics.metric import Metric
+from torch import Tensor
 
 # Define standard NLCD groups for flood mapping
 NLCD_GROUPS = {
@@ -30,11 +32,208 @@ SCL_GROUPS = {
 }
 SCL_CLASSES = list(range(12))
 
+class PerClassConfusionMatrix(Metric):
+    """Compute the binary confusion matrix for each predefined class."""
+    full_state_update = False
+
+    def __init__(self, threshold: float = 0.5, classes: list[int] = None, **kwargs):
+        super().__init__(**kwargs)
+        if classes is None or not isinstance(classes, list) or len(classes) == 0:
+            raise ValueError("Classes must be provided as a non-empty list of integers")
+        if not all(isinstance(c, int) for c in classes):
+            raise ValueError("Class values must be integers")
+        if len(set(classes)) != len(classes):
+            raise ValueError("Class values must be unique")
+
+        C = len(classes)
+        self.threshold = threshold
+        self.classes = classes
+        self.class_to_idx = {c: i for i, c in enumerate(classes)}
+        self.add_state(f"confmat", torch.zeros(C, 2, 2, dtype=torch.long), dist_reduce_fx="sum")
+    
+    def update(self, preds: Tensor, targets: Tensor, classes: Tensor):
+        preds = preds > self.threshold
+        preds = preds.long()
+        targets = targets.long()
+        classes = classes.long()
+        for i, c in enumerate(self.classes):
+            mask = classes == c
+            preds_by_class = preds[mask]
+            targets_by_class = targets[mask]
+
+            # compute confusion matrix
+            confmat = fast_binary_confusion_matrix(preds_by_class, targets_by_class)
+            self.confmat[i] += confmat
+    
+    def compute(self):
+        return self.confmat
+    
+    def get_class_to_idx(self):
+        return self.class_to_idx
+
+class RunningMeanVar(Metric):
+    """Computes the running mean and variance of a tensor using Welford's algorithm."""
+    full_state_update = False
+
+    def __init__(self, unbiased: bool = False, **kwargs):
+        super().__init__(**kwargs)
+        self.unbiased = unbiased
+
+        # IMPORTANT: dist_reduce_fx=None so we can merge correctly ourselves in compute()
+        self.add_state("count", default=torch.tensor(0.0), dist_reduce_fx=None)
+        self.add_state("mean",  default=torch.tensor(0.0), dist_reduce_fx=None)
+        self.add_state("M2",    default=torch.tensor(0.0), dist_reduce_fx=None)
+
+    @torch.no_grad()
+    def update(self, x: torch.Tensor):
+        x = x.detach().float().reshape(-1)
+        if x.numel() == 0:
+            return
+
+        b_count = torch.tensor(float(x.numel()), device=x.device)
+        b_mean  = x.mean()
+        b_M2    = ((x - b_mean) ** 2).sum()
+
+        if self.count == 0:
+            self.count, self.mean, self.M2 = b_count, b_mean, b_M2
+            return
+
+        delta = b_mean - self.mean
+        new_count = self.count + b_count
+        self.mean = self.mean + delta * (b_count / new_count)
+        self.M2   = self.M2 + b_M2 + delta**2 * (self.count * b_count / new_count)
+        self.count = new_count
+
+    def compute(self):
+        # After TorchMetrics sync, with dist_reduce_fx=None, each state may become a vector
+        # over ranks (or remain scalar in non-DDP). We fold-merge if needed.
+        count = self.count
+        mean  = self.mean
+        M2    = self.M2
+
+        if count.ndim == 0:
+            total_count, total_mean, total_M2 = count, mean, M2
+        else:
+            total_count = torch.tensor(0.0, device=count.device)
+            total_mean  = torch.tensor(0.0, device=count.device)
+            total_M2    = torch.tensor(0.0, device=count.device)
+
+            for c, m, s in zip(count, mean, M2):
+                if c == 0:
+                    continue
+                if total_count == 0:
+                    total_count, total_mean, total_M2 = c, m, s
+                    continue
+                delta = m - total_mean
+                new_count = total_count + c
+                total_mean = total_mean + delta * (c / new_count)
+                total_M2   = total_M2 + s + delta**2 * (total_count * c / new_count)
+                total_count = new_count
+
+        if total_count <= 0:
+            return {"mean": torch.tensor(float("nan")), "var": torch.tensor(float("nan"))}
+
+        if self.unbiased:
+            denom = total_count - 1.0
+            var = total_M2 / denom if denom > 0 else torch.tensor(float("nan"), device=total_M2.device)
+        else:
+            var = total_M2 / total_count
+
+        return {"mean": total_mean, "var": var.clamp_min(0.0)}
+
 def fast_binary_confusion_matrix(preds, targets):
     """Simplifies the implementation of pytorch lightning binary confusion matrix logic."""
     unique_mapping = (targets * 2 + preds).to(torch.long)
     bins = torch.bincount(unique_mapping, minlength=4)
     return bins.reshape(2, 2)
+
+def _compute_group_metrics(TN, FP, FN, TP):
+    """Compute accuracy, precision, recall, F1, and IoU from confusion matrix values.
+    
+    Parameters
+    ----------
+    TN, FP, FN, TP : int
+        Confusion matrix values.
+    
+    Returns
+    -------
+    dict
+        Dictionary with 'acc', 'prec', 'rec', 'f1', 'iou' keys.
+    """
+    total = TP + TN + FP + FN
+    return {
+        'acc': (TP + TN) / total if total > 0 else None,
+        'prec': TP / (TP + FP) if (TP + FP) > 0 else None,
+        'rec': TP / (TP + FN) if (TP + FN) > 0 else None,
+        'f1': (2 * TP) / (2 * TP + FP + FN) if (2 * TP + FP + FN) > 0 else None,
+        'iou': TP / (TP + FP + FN) if (TP + FP + FN) > 0 else None
+    }
+
+def compute_confmat_dict(confmat, class_to_idx, classes, groups=None):
+    """Convert PerClassConfusionMatrix output to dictionary format.
+    
+    Parameters
+    ----------
+    confmat : Tensor
+        Confusion matrix tensor of shape (C, 2, 2) from PerClassConfusionMatrix.compute().
+    class_to_idx : dict
+        Mapping from class value to index in confmat.
+    classes : list[int]
+        List of all class values to include in output.
+    groups : dict, optional
+        Dictionary mapping group names to lists of class values. Defaults to None.
+    
+    Returns
+    -------
+    output : dict
+        Dictionary with 'confusion_matrix', 'group_confusion_matrix', and 'group_metrics'.
+        
+        The dictionary has the following structure:
+        {
+            'confusion_matrix': {
+                '21': {'tn': 0, 'fp': 0, 'fn': 0, 'tp': 0},
+                ...
+            },
+            'group_confusion_matrix': {
+                'urban': {'tn': 0, 'fp': 0, 'fn': 0, 'tp': 0},
+                ...
+            },
+            'group_metrics': {
+                'urban': {'acc': 0.52, 'prec': 0.12, 'rec': 0.90, 'f1': 0.53, 'iou': 0.50},
+                ...
+            }
+
+            Note: if metrics are undefined, they are set to None.
+        }
+    """
+    output = {'confusion_matrix': {}, 'group_confusion_matrix': {}, 'group_metrics': {}}
+    
+    # Per-class confusion matrices
+    for c in classes:
+        if c in class_to_idx:
+            idx = class_to_idx[c]
+            cm = confmat[idx].tolist()
+            output['confusion_matrix'][str(c)] = {
+                'tn': cm[0][0], 'fp': cm[0][1],
+                'fn': cm[1][0], 'tp': cm[1][1]
+            }
+        else:
+            output['confusion_matrix'][str(c)] = {'tn': 0, 'fp': 0, 'fn': 0, 'tp': 0}
+    
+    # Group confusion matrices and metrics
+    for group_name, group_classes in groups.items():
+        # Sum confusion matrices for all classes in group
+        group_cm = torch.zeros(2, 2, dtype=torch.long, device=confmat.device)
+        for c in group_classes:
+            if c in class_to_idx:
+                idx = class_to_idx[c]
+                group_cm += confmat[idx]
+        
+        TN, FP, FN, TP = group_cm[0, 0].item(), group_cm[0, 1].item(), group_cm[1, 0].item(), group_cm[1, 1].item()
+        output['group_confusion_matrix'][group_name] = {'tn': TN, 'fp': FP, 'fn': FN, 'tp': TP}
+        output['group_metrics'][group_name] = _compute_group_metrics(TN, FP, FN, TP)
+    
+    return output
 
 def compute_nlcd_metrics(all_preds, all_targets, nlcd_classes, groups=NLCD_GROUPS):
     """Compute metrics for NLCD classes.

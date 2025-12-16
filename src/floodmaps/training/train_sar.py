@@ -25,7 +25,8 @@ from floodmaps.utils.utils import (flatten_dict, Metrics, EarlyStopper,
                          get_samples_with_wet_percentage, scl_to_rgb, compute_pos_weight,
                          align_patches_with_shifts)
 from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
-from floodmaps.utils.metrics import compute_nlcd_metrics, compute_scl_metrics
+from floodmaps.utils.metrics import (PerClassConfusionMatrix, compute_confmat_dict,
+                        NLCD_CLASSES, NLCD_GROUPS, SCL_CLASSES, SCL_GROUPS, RunningMeanVar)
 
 from floodmaps.training.loss import LossConfig
 from floodmaps.training.dataset import FloodSampleSARDataset
@@ -48,8 +49,8 @@ def train_loop(model, dataloader, device, optimizer, minibatches, loss_config,
         # for VAE monitoring
         if ad_cfg.model.autodespeckler == 'VAE':
             running_kld_loss = torch.tensor(0.0, device=device)
-            all_mu = []
-            all_log_var = []
+            mu_mean_var = RunningMeanVar(unbiased=True).to(device)
+            log_var_mean_var = RunningMeanVar(unbiased=True).to(device)
 
     metric_collection = MetricCollection([
         BinaryAccuracy(threshold=0.5),
@@ -58,11 +59,12 @@ def train_loop(model, dataloader, device, optimizer, minibatches, loss_config,
         BinaryF1Score(threshold=0.5),
         BinaryJaccardIndex(threshold=0.5)
     ]).to(device)
-    all_preds = []
-    all_targets = []
 
     model.train()
     for batch_i, (X, y, _) in enumerate(dataloader):
+        if batch_i >= minibatches:
+            break
+
         X = X.to(device)
         y = y.to(device)
 
@@ -83,8 +85,7 @@ def train_loop(model, dataloader, device, optimizer, minibatches, loss_config,
         y_pred = nn.functional.sigmoid(logits).flatten() > 0.5
         target = y_true.flatten() > 0.5
 
-        all_preds.append(y_pred)
-        all_targets.append(target)
+        metric_collection.update(y_pred, target)
         running_tot_loss += loss.detach()
         running_cls_loss += loss_dict['classifier_loss'].detach()
 
@@ -94,18 +95,10 @@ def train_loop(model, dataloader, device, optimizer, minibatches, loss_config,
             # for VAE monitoring only
             if ad_cfg.model.autodespeckler == 'VAE':
                 # Collect mu and log_var for the whole epoch
-                all_mu.append(out_dict['mu'].detach().cpu())
-                all_log_var.append(out_dict['log_var'].detach().cpu())
+                mu_mean_var.update(out_dict['mu'])
+                log_var_mean_var.update(out_dict['log_var'])
                 running_kld_loss += loss_dict['kld_loss'].detach()
 
-        if batch_i >= minibatches:
-            break
-
-    # calculate metrics
-    all_preds = torch.cat(all_preds)
-    all_targets = torch.cat(all_targets)
-
-    metric_collection.update(all_preds, all_targets)
     metric_results = metric_collection.compute()
     epoch_loss = running_tot_loss.item() / minibatches
 
@@ -129,29 +122,32 @@ def train_loop(model, dataloader, device, optimizer, minibatches, loss_config,
         log_dict['train_ad_loss'] = cfg.train.balance_coeff * epoch_ad_loss / minibatches
 
         # ad loss percentage of total loss
-        ad_loss_percentage = (cfg.train.balance_coeff * epoch_ad_loss / running_tot_loss)
+        ad_loss_percentage = (cfg.train.balance_coeff * epoch_ad_loss / running_tot_loss.item())
         log_dict['ad_loss_percentage'] = ad_loss_percentage
 
         # VAE mu and log_var monitoring
         if ad_cfg.model.autodespeckler == 'VAE':
-            all_mu = torch.cat(all_mu, dim=0).numpy()
-            all_log_var = torch.cat(all_log_var, dim=0).numpy()
+            mu_mean_var_results = mu_mean_var.compute()
+            log_var_mean_var_results = log_var_mean_var.compute()
 
             # kld loss as percentage of total ad loss
             kld_loss_percentage = (ad_cfg.model.vae.VAE_beta
                                    * running_kld_loss.item()
                                    / epoch_ad_loss)
             log_dict.update({
-                "train_mu_mean": all_mu.mean(),
-                "train_mu_std": all_mu.std(),
-                "train_log_var_mean": all_log_var.mean(),
-                "train_log_var_std": all_log_var.std(),
+                "train_mu_mean": mu_mean_var_results['mean'].item(),
+                "train_mu_std": mu_mean_var_results['var'].sqrt().item(),
+                "train_log_var_mean": log_var_mean_var_results['mean'].item(),
+                "train_log_var_std": log_var_mean_var_results['var'].sqrt().item(),
                 "train_kld_loss": cfg.train.balance_coeff * running_kld_loss.item() / minibatches,
                 "train_kld_loss_percentage": kld_loss_percentage,
                 "beta": ad_cfg.model.vae.VAE_beta
             })
     run.log(log_dict, step=epoch)
     metric_collection.reset()
+    if ad_cfg is not None and ad_cfg.model.autodespeckler == 'VAE':
+        mu_mean_var.reset()
+        log_var_mean_var.reset()
 
     return epoch_loss
 
@@ -164,8 +160,8 @@ def test_loop(model, dataloader, device, loss_config, cfg, ad_cfg, c, run, epoch
         # for VAE monitoring
         if ad_cfg.model.autodespeckler == 'VAE':
             running_kld_vloss = torch.tensor(0.0, device=device)
-            all_mu = []
-            all_log_var = []
+            mu_mean_var = RunningMeanVar(unbiased=True).to(device)
+            log_var_mean_var = RunningMeanVar(unbiased=True).to(device)
 
     num_batches = len(dataloader)
     metric_collection = MetricCollection([
@@ -176,10 +172,8 @@ def test_loop(model, dataloader, device, loss_config, cfg, ad_cfg, c, run, epoch
         BinaryConfusionMatrix(threshold=0.5),
         BinaryJaccardIndex(threshold=0.5)
     ]).to(device)
-    all_preds = []
-    all_targets = []
-    all_nlcd_classes = []
-    all_scl_classes = []
+    nlcd_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=NLCD_CLASSES).to(device)
+    scl_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=SCL_CLASSES).to(device)
 
     window_size = cfg.data.window
     model.eval()
@@ -209,10 +203,9 @@ def test_loop(model, dataloader, device, loss_config, cfg, ad_cfg, c, run, epoch
             y_pred = nn.functional.sigmoid(logits).flatten() > 0.5
             target = y_true.flatten() > 0.5
 
-            all_preds.append(y_pred)
-            all_targets.append(target)
-            all_nlcd_classes.append(nlcd_classes.flatten())
-            all_scl_classes.append(scl_classes.flatten())
+            metric_collection.update(y_pred, target)
+            nlcd_metric_collection.update(y_pred, target, nlcd_classes.flatten())
+            scl_metric_collection.update(y_pred, target, scl_classes.flatten())
             running_tot_vloss += loss.detach()
             running_cls_vloss += loss_dict['classifier_loss'].detach()
 
@@ -221,19 +214,13 @@ def test_loop(model, dataloader, device, loss_config, cfg, ad_cfg, c, run, epoch
 
                 # for VAE monitoring only
                 if ad_cfg.model.autodespeckler == 'VAE':
-                    # Collect mu and log_var for the whole epoch
-                    all_mu.append(out_dict['mu'].detach().cpu())
-                    all_log_var.append(out_dict['log_var'].detach().cpu())
+                    mu_mean_var.update(out_dict['mu'])
+                    log_var_mean_var.update(out_dict['log_var'])
                     running_kld_vloss += loss_dict['kld_loss'].detach()
 
-    # calculate metrics
-    all_preds = torch.cat(all_preds)
-    all_targets = torch.cat(all_targets)
-    all_nlcd_classes = torch.cat(all_nlcd_classes)
-    all_scl_classes = torch.cat(all_scl_classes)
-
-    metric_collection.update(all_preds, all_targets)
     metric_results = metric_collection.compute()
+    nlcd_metrics_results = nlcd_metric_collection.compute()
+    scl_metrics_results = scl_metric_collection.compute()
     epoch_vloss = running_tot_vloss.item() / num_batches
     epoch_cls_vloss = running_cls_vloss.item() / num_batches
 
@@ -262,23 +249,23 @@ def test_loop(model, dataloader, device, loss_config, cfg, ad_cfg, c, run, epoch
         log_dict['val_ad_loss'] = cfg.train.balance_coeff * epoch_ad_vloss / num_batches
 
         # ad loss percentage of total loss
-        ad_loss_percentage = (cfg.train.balance_coeff * epoch_ad_vloss / running_tot_vloss)
+        ad_loss_percentage = (cfg.train.balance_coeff * epoch_ad_vloss / running_tot_vloss.item())
         log_dict['val_ad_loss_percentage'] = ad_loss_percentage
 
         # VAE mu and log_var monitoring
         if ad_cfg.model.autodespeckler == 'VAE':
-            all_mu = torch.cat(all_mu, dim=0).numpy()
-            all_log_var = torch.cat(all_log_var, dim=0).numpy()
+            mu_mean_var_results = mu_mean_var.compute()
+            log_var_mean_var_results = log_var_mean_var.compute()
 
             # kld loss as percentage of total ad loss
             kld_loss_percentage = (ad_cfg.model.vae.VAE_beta
                                    * running_kld_vloss.item()
                                    / epoch_ad_vloss)
             log_dict.update({
-                "val_mu_mean": all_mu.mean(),
-                "val_mu_std": all_mu.std(),
-                "val_log_var_mean": all_log_var.mean(),
-                "val_log_var_std": all_log_var.std(),
+                "val_mu_mean": mu_mean_var_results['mean'].item(),
+                "val_mu_std": mu_mean_var_results['var'].sqrt().item(),
+                "val_log_var_mean": log_var_mean_var_results['mean'].item(),
+                "val_log_var_std": log_var_mean_var_results['var'].sqrt().item(),
                 "val_kld_loss": cfg.train.balance_coeff * running_kld_vloss.item() / num_batches,
                 "val_kld_loss_percentage": kld_loss_percentage
             })
@@ -292,9 +279,18 @@ def test_loop(model, dataloader, device, loss_config, cfg, ad_cfg, c, run, epoch
         "fn": confusion_matrix[1][0],
         "tp": confusion_matrix[1][1]
     }
-    nlcd_metrics_dict = compute_nlcd_metrics(all_preds, all_targets, all_nlcd_classes)
-    scl_metrics_dict = compute_scl_metrics(all_preds, all_targets, all_scl_classes)
+    nlcd_metrics_dict = compute_confmat_dict(nlcd_metrics_results,
+                                            nlcd_metric_collection.get_class_to_idx(),
+                                            NLCD_CLASSES, groups=NLCD_GROUPS)
+    scl_metrics_dict = compute_confmat_dict(scl_metrics_results,
+                                            scl_metric_collection.get_class_to_idx(),
+                                            SCL_CLASSES, groups=SCL_GROUPS)
     metric_collection.reset()
+    nlcd_metric_collection.reset()
+    scl_metric_collection.reset()
+    if ad_cfg is not None and ad_cfg.model.autodespeckler == 'VAE':
+        mu_mean_var.reset()
+        log_var_mean_var.reset()
 
     metrics_dict = {
         'core_metrics': core_metrics_dict,
@@ -318,10 +314,8 @@ def evaluate(model, dataloader, device, loss_config, cfg, ad_cfg, c):
         BinaryConfusionMatrix(threshold=0.5),
         BinaryJaccardIndex(threshold=0.5)
     ]).to(device)
-    all_preds = []
-    all_targets = []
-    all_nlcd_classes = []
-    all_scl_classes = []
+    nlcd_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=NLCD_CLASSES).to(device)
+    scl_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=SCL_CLASSES).to(device)
 
     window_size = cfg.data.window
     model.eval()
@@ -349,20 +343,14 @@ def evaluate(model, dataloader, device, loss_config, cfg, ad_cfg, c):
             y_pred = nn.functional.sigmoid(logits).flatten() > 0.5
             target = y_true.flatten() > 0.5
 
-            all_preds.append(y_pred)
-            all_targets.append(target)
-            all_nlcd_classes.append(nlcd_classes.flatten())
-            all_scl_classes.append(scl_classes.flatten())
+            metric_collection.update(y_pred, target)
+            nlcd_metric_collection.update(y_pred, target, nlcd_classes.flatten())
+            scl_metric_collection.update(y_pred, target, scl_classes.flatten())
             running_tot_vloss += loss.detach()
 
-    # calculate metrics
-    all_preds = torch.cat(all_preds)
-    all_targets = torch.cat(all_targets)
-    all_nlcd_classes = torch.cat(all_nlcd_classes)
-    all_scl_classes = torch.cat(all_scl_classes)
-
-    metric_collection.update(all_preds, all_targets)
     metric_results = metric_collection.compute()
+    nlcd_metrics_results = nlcd_metric_collection.compute()
+    scl_metrics_results = scl_metric_collection.compute()
     epoch_vloss = running_tot_vloss.item() / num_batches
 
     core_metrics_dict = {
@@ -380,9 +368,15 @@ def evaluate(model, dataloader, device, loss_config, cfg, ad_cfg, c):
         "fn": confusion_matrix[1][0],
         "tp": confusion_matrix[1][1]
     }
-    nlcd_metrics_dict = compute_nlcd_metrics(all_preds, all_targets, all_nlcd_classes)
-    scl_metrics_dict = compute_scl_metrics(all_preds, all_targets, all_scl_classes)
+    nlcd_metrics_dict = compute_confmat_dict(nlcd_metrics_results,
+                                            nlcd_metric_collection.get_class_to_idx(),
+                                            NLCD_CLASSES, groups=NLCD_GROUPS)
+    scl_metrics_dict = compute_confmat_dict(scl_metrics_results,
+                                            scl_metric_collection.get_class_to_idx(),
+                                            SCL_CLASSES, groups=SCL_GROUPS)
     metric_collection.reset()
+    nlcd_metric_collection.reset()
+    scl_metric_collection.reset()
 
     metrics_dict = {
         'core_metrics': core_metrics_dict,
@@ -421,7 +415,7 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, ad_cfg, run
             pos_weight_val = compute_pos_weight(label_np, pos_weight_clip=clip_max,
                                                 cache_dir=cache_dir, dataset_name='train')
     cfg.train.pos_weight = pos_weight_val
-    run.config.update({"pos_weight": pos_weight_val})
+    run.config.update({"train.pos_weight": pos_weight_val})
     
     # initialize loss functions - train loss function is optimized for gradient calculations
     loss_cfg = LossConfig(cfg, ad_cfg=ad_cfg, device=device)

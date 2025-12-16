@@ -23,7 +23,7 @@ import hydra
 from floodmaps.models.model import S2WaterDetector
 from floodmaps.utils.utils import flatten_dict, get_model_params, Metrics, EarlyStopper, ChannelIndexer, nlcd_to_rgb, scl_to_rgb, get_samples_with_wet_percentage, compute_pos_weight
 from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
-from floodmaps.utils.metrics import compute_nlcd_metrics, compute_scl_metrics
+from floodmaps.utils.metrics import PerClassConfusionMatrix, compute_confmat_dict, NLCD_CLASSES, NLCD_GROUPS, SCL_CLASSES, SCL_GROUPS
 
 from floodmaps.training.loss import BCEDiceLoss, TverskyLoss
 from floodmaps.training.dataset import FloodSampleS2Dataset
@@ -67,8 +67,6 @@ def train_loop(model, dataloader, device, optimizer, loss_fn, run, epoch):
         BinaryF1Score(threshold=0.5),
         BinaryJaccardIndex(threshold=0.5)
     ]).to(device)
-    all_preds = []
-    all_targets = []
 
     model.train()
     for X, y, _ in dataloader:
@@ -84,15 +82,9 @@ def train_loop(model, dataloader, device, optimizer, loss_fn, run, epoch):
 
         y_pred = nn.functional.sigmoid(logits).flatten() > 0.5
         target = y.flatten() > 0.5
-        all_preds.append(y_pred)
-        all_targets.append(target)
+        metric_collection.update(y_pred, target)
         running_loss += loss.detach()
 
-    # calculate metrics
-    all_preds = torch.cat(all_preds)
-    all_targets = torch.cat(all_targets)
-
-    metric_collection.update(all_preds, all_targets)
     metric_results = metric_collection.compute()
     epoch_loss = running_loss.item() / len(dataloader)
 
@@ -142,10 +134,8 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
         BinaryConfusionMatrix(threshold=0.5),
         BinaryJaccardIndex(threshold=0.5)
     ]).to(device)
-    all_preds = []
-    all_targets = []
-    all_nlcd_classes = []
-    all_scl_classes = []
+    nlcd_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=NLCD_CLASSES).to(device)
+    scl_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=SCL_CLASSES).to(device)
     
     model.eval()
     with torch.no_grad():
@@ -160,20 +150,14 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
             
             y_pred = nn.functional.sigmoid(logits).flatten() > 0.5
             target = y.flatten() > 0.5
-            all_preds.append(y_pred)
-            all_targets.append(target)
-            all_nlcd_classes.append(nlcd_classes.flatten())
-            all_scl_classes.append(scl_classes.flatten())
+            metric_collection.update(y_pred, target)
+            nlcd_metric_collection.update(y_pred, target, nlcd_classes.flatten())
+            scl_metric_collection.update(y_pred, target, scl_classes.flatten())
             running_vloss += loss.detach()
 
-    # calculate metrics
-    all_preds = torch.cat(all_preds)
-    all_targets = torch.cat(all_targets)
-    all_nlcd_classes = torch.cat(all_nlcd_classes)
-    all_scl_classes = torch.cat(all_scl_classes)
-
-    metric_collection.update(all_preds, all_targets)
     metric_results = metric_collection.compute()
+    nlcd_metrics_results = nlcd_metric_collection.compute()
+    scl_metrics_results = scl_metric_collection.compute()
     epoch_vloss = running_vloss.item() / len(dataloader)
 
     core_metrics_dict = {
@@ -198,9 +182,15 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
         "fn": confusion_matrix[1][0],
         "tp": confusion_matrix[1][1]
     }
-    nlcd_metrics_dict = compute_nlcd_metrics(all_preds, all_targets, all_nlcd_classes)
-    scl_metrics_dict = compute_scl_metrics(all_preds, all_targets, all_scl_classes)
+    nlcd_metrics_dict = compute_confmat_dict(nlcd_metrics_results,
+                                            nlcd_metric_collection.get_class_to_idx(),
+                                            NLCD_CLASSES, groups=NLCD_GROUPS)
+    scl_metrics_dict = compute_confmat_dict(scl_metrics_results,
+                                            scl_metric_collection.get_class_to_idx(),
+                                            SCL_CLASSES, groups=SCL_GROUPS)
     metric_collection.reset()
+    nlcd_metric_collection.reset()
+    scl_metric_collection.reset()
 
     # separate the core loggable metrics from the nested dictionaries
     # for easier management downstream
@@ -240,7 +230,7 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run, cache_
             clip_max = float(getattr(cfg.train, 'pos_weight_clip', 10.0))
             pos_weight_val = compute_pos_weight(label_np, pos_weight_clip=clip_max,
                                                 cache_dir=cache_dir, dataset_name='train')
-    run.config.update({"pos_weight": pos_weight_val})
+    run.config.update({"train.pos_weight": pos_weight_val})
 
     # loss function
     loss_fn = get_loss_fn(cfg, device=device, pos_weight=pos_weight_val)

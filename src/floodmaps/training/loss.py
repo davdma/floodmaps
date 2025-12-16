@@ -47,13 +47,13 @@ class LossConfig():
                     print(f'max log_var: {log_var.max().item()}')
                     raise Exception('recons_loss + kld_loss is nan or inf')
 
-        # classifier loss component + true label (shifted or not)
+        # classifier loss component + true label (shifted or not) + shift indices
         if typ == 'train':
-            main_loss, y_true = self.train_loss_fn(out_dict['classifier_output'], targets)
+            main_loss, y_true, shift_indices = self.train_loss_fn(out_dict['classifier_output'], targets)
         elif typ == 'val':
-            main_loss, y_true = self.val_loss_fn(out_dict['classifier_output'], targets)
+            main_loss, y_true, shift_indices = self.val_loss_fn(out_dict['classifier_output'], targets)
         elif typ == 'test':
-            main_loss, y_true = self.test_loss_fn(out_dict['classifier_output'], targets)
+            main_loss, y_true, shift_indices = self.test_loss_fn(out_dict['classifier_output'], targets)
         else:
             raise Exception('Invalid argument: typ not equal to one of train, val, test.')
 
@@ -64,13 +64,22 @@ class LossConfig():
         loss_dict['total_loss'] = total_loss
         loss_dict['classifier_loss'] = main_loss
         loss_dict['true_label'] = y_true
+        loss_dict['shift_indices'] = shift_indices
         return loss_dict
 
     def get_label_alignment(self, inputs, targets):
         """Get the window of the target label that aligns best with the
-        prediction."""
-        _, y_shifted = self.val_loss_fn(inputs, targets)
-        return y_shifted
+        prediction, along with the shift indices used.
+        
+        Returns
+        -------
+        y_shifted : torch.Tensor
+            Aligned label windows
+        shift_indices : tuple of (torch.Tensor, torch.Tensor)
+            (row_shifts, col_shifts) for each patch in batch
+        """
+        _, y_shifted, shift_indices = self.val_loss_fn(inputs, targets)
+        return y_shifted, shift_indices
 
     def get_losses(self, cfg, device):
         """Chooses the type of loss used for training, validation, testing loop,
@@ -447,7 +456,8 @@ class ShiftInvariantLoss(nn.Module):
     loss from aligning each input patch with all possible N x N windows inside of its M x M target patch.
     The total loss is the sum of all B minimum losses.
 
-    For each patch, the corresponding N x N window in the target that produces the minimum loss is also returned.
+    For each patch, the corresponding N x N window in the target that produces the minimum loss is also returned,
+    along with the shift indices used to align each patch.
 
     To use, must specify compatible loss function (Invariant BCE Loss, Invariant BCE Dice Loss, Invariant Tversky Loss)
     at initialization.
@@ -457,6 +467,15 @@ class ShiftInvariantLoss(nn.Module):
     loss : obj
         Instance of InvariantBCELoss, InvariantBCEDiceLoss, InvariantTverskyLoss
     device : str
+    
+    Returns
+    -------
+    total_loss : torch.Tensor
+        Sum of minimum losses across all patches
+    adjusted_labels : torch.Tensor
+        Aligned label windows for each patch in batch
+    shift_indices : tuple of (torch.Tensor, torch.Tensor)
+        (row_shifts, col_shifts) - indices for each patch in batch
     """
     def __init__(self, loss, device='cpu'):
         super().__init__()
@@ -469,9 +488,15 @@ class ShiftInvariantLoss(nn.Module):
         # then we use min and argmin to calculate actual loss
         shift1 = targets.shape[-2] - inputs.shape[-2] + 1
         shift2 = targets.shape[-1] - inputs.shape[-1] + 1
+        B = inputs.shape[0]
+
+        # Compute center flat index for tie-breaking
+        center_i = shift1 // 2
+        center_j = shift2 // 2
+        center_flat = center_i * shift2 + center_j
 
         # this is so we can take min across axis of patches
-        patch_shift_err = torch.empty((inputs.shape[0], shift1 * shift2), dtype=torch.float32, device=self.device)
+        patch_shift_err = torch.empty((B, shift1 * shift2), dtype=torch.float32, device=self.device)
         candidate_shifts = torch.empty((shift1 * shift2, *inputs.shape), dtype=torch.float32, device=self.device)
 
         # first calculate all potential shift arrays
@@ -481,12 +506,23 @@ class ShiftInvariantLoss(nn.Module):
                 candidate_shifts[i * shift2 + j] = window
                 patch_shift_err[:, i * shift2 + j] = self.loss(inputs, window)
 
-        # CAN GET BACK INDICES AND MIN AT SAME TIME!!!
         min_loss, min_ij = torch.min(patch_shift_err, dim=1)
+        
+        # Prefer center index when it is tied for minimum loss
+        center_loss = patch_shift_err[:, center_flat]
+        center_is_min = center_loss == min_loss
+        min_ij = torch.where(center_is_min, 
+                             torch.tensor(center_flat, device=self.device), 
+                             min_ij)
+
         total_loss = min_loss.sum()
-        adjusted_labels = candidate_shifts[min_ij, torch.arange(len(min_ij), device=self.device)]
-        # also return adjusted labels for each patch!!!
-        return total_loss, adjusted_labels
+        adjusted_labels = candidate_shifts[min_ij, torch.arange(B, device=self.device)]
+        
+        # Convert flat indices to 2D shift coordinates
+        row_shifts = min_ij // shift2
+        col_shifts = min_ij % shift2
+        
+        return total_loss, adjusted_labels, (row_shifts, col_shifts)
 
     def change_device(self, device):
         self.loss = self.loss.to(device)
@@ -501,6 +537,15 @@ class TrainShiftInvariantLoss(nn.Module):
     loss : obj
         Instance of InvariantBCELoss, InvariantBCEDiceLoss, InvariantTverskyLoss
     device : str
+    
+    Returns
+    -------
+    total_loss : torch.Tensor
+        Sum of minimum losses across all patches
+    adjusted_labels : torch.Tensor
+        Aligned label windows for each patch in batch
+    shift_indices : tuple of (torch.Tensor, torch.Tensor)
+        (row_shifts, col_shifts) - indices for each patch in batch
     """
     def __init__(self, loss, device='cpu'):
         super().__init__()
@@ -513,10 +558,16 @@ class TrainShiftInvariantLoss(nn.Module):
         # then we use min and argmin to calculate actual loss
         shift1 = targets.shape[-2] - inputs.shape[-2] + 1
         shift2 = targets.shape[-1] - inputs.shape[-1] + 1
+        B = inputs.shape[0]
+
+        # Compute center flat index for tie-breaking
+        center_i = shift1 // 2
+        center_j = shift2 // 2
+        center_flat = center_i * shift2 + center_j
 
         # this is so we can take min across axis of patches
         with torch.no_grad():
-            patch_shift_err = torch.empty((inputs.shape[0], shift1 * shift2), dtype=torch.float32, device=self.device)
+            patch_shift_err = torch.empty((B, shift1 * shift2), dtype=torch.float32, device=self.device)
             candidate_shifts = torch.empty((shift1 * shift2, *inputs.shape), dtype=torch.float32, device=self.device)
 
             # first calculate all potential shift arrays
@@ -526,11 +577,23 @@ class TrainShiftInvariantLoss(nn.Module):
                     candidate_shifts[i * shift2 + j] = window
                     patch_shift_err[:, i * shift2 + j] = self.loss(inputs, window)
 
-            min_ij = torch.argmin(patch_shift_err, dim=1)
+            min_loss, min_ij = torch.min(patch_shift_err, dim=1)
+            
+            # Prefer center index when it is tied for minimum loss
+            center_loss = patch_shift_err[:, center_flat]
+            center_is_min = center_loss == min_loss
+            min_ij = torch.where(center_is_min, 
+                                 torch.tensor(center_flat, device=self.device), 
+                                 min_ij)
 
-        adjusted_labels = candidate_shifts[min_ij, torch.arange(len(min_ij), device=self.device)]
+        adjusted_labels = candidate_shifts[min_ij, torch.arange(B, device=self.device)]
         total_loss = self.loss(inputs, adjusted_labels).sum()
-        return total_loss, adjusted_labels
+        
+        # Convert flat indices to 2D shift coordinates
+        row_shifts = min_ij // shift2
+        col_shifts = min_ij % shift2
+        
+        return total_loss, adjusted_labels, (row_shifts, col_shifts)
 
     def change_device(self, device):
         self.loss = self.loss.to(device)
@@ -544,6 +607,15 @@ class NonShiftInvariantLoss(nn.Module):
     loss : obj
         Instance of BCELoss, BCEDiceLoss, TverskyLoss
     device : str
+    
+    Returns
+    -------
+    loss : torch.Tensor
+        Computed loss value
+    unadjusted_labels : torch.Tensor
+        Center-cropped label windows
+    shift_indices : tuple of (torch.Tensor, torch.Tensor)
+        (row_shifts, col_shifts) - fixed center indices for all batch items
     """
     def __init__(self, loss, size=68, window=64, device='cpu'):
         super().__init__()
@@ -551,13 +623,20 @@ class NonShiftInvariantLoss(nn.Module):
         self.device = device
         center_1 = (size - window) // 2
         self.c = (center_1, center_1 + window)
+        self.center_offset = center_1  # Store for index return
 
     def forward(self, inputs, targets):
-        """Calculates loss using the current alignment."""
+        """Calculates loss using the central window alignment."""
         # crop central window
         unadjusted_labels = targets[:, :, self.c[0]:self.c[1], self.c[0]:self.c[1]]
         loss = self.loss(inputs, unadjusted_labels)
-        return loss, unadjusted_labels
+        
+        # Return fixed center indices for all batch items
+        B = inputs.shape[0]
+        row_shifts = torch.full((B,), self.center_offset, dtype=torch.long, device=self.device)
+        col_shifts = torch.full((B,), self.center_offset, dtype=torch.long, device=self.device)
+        
+        return loss, unadjusted_labels, (row_shifts, col_shifts)
 
     def change_device(self, device):
         self.loss = self.loss.to(device)

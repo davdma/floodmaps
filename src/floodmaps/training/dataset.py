@@ -227,7 +227,7 @@ class FloodSampleSARDataset(Dataset):
     label : torch.Tensor
         The binary label (1 channel).
     supplementary : torch.Tensor
-        The TCI (3 channels) + NLCD (1 channel).
+        The TCI (3 channels) + NLCD (1 channel) + SCL (1 channel).
     """
     def __init__(self, sample_dir, channels=[True] * 8, typ="train", random_flip=False, transform=None, seed=3200, mmap_mode=None):
         self.sample_dir = Path(sample_dir)

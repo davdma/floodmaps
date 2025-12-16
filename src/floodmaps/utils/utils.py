@@ -1242,3 +1242,53 @@ def compute_pos_weight(labels, pos_weight_clip=10.0, cache_dir=None, dataset_nam
     logging.info(f"Percentage of positive pixels: {pos / total:.2%}")
     
     return pos_weight_val
+
+def align_patches_with_shifts(patches, row_shifts, col_shifts, window_h, window_w):
+    """Extract smaller windows within a array of larger patches given patch specific
+    row and column shifts.
+    
+    Parameters
+    ----------
+    patches : torch.Tensor
+        The larger array to extract smaller windows from. Shape (B, C, H, W).
+    row_shifts : torch.Tensor
+        The row shifts to apply to the patches. Shape (B,).
+    col_shifts : torch.Tensor
+        The column shifts to apply to the patches. Shape (B,).
+    window_h : int
+        The height of the smaller windows to extract. window_h <= H.
+    window_w : int
+        The width of the smaller windows to extract. window_w <= W.
+        
+    Returns
+    -------
+    torch.Tensor
+        The aligned patches. Shape (B, C, window_h, window_w).
+    """
+    has_channel_dim = patches.dim() == 4
+    if not has_channel_dim:
+        patches = patches.unsqueeze(1)
+
+    B, C, H, W = patches.shape
+    device = patches.device
+
+    # Ensure valid index tensors
+    row_shifts = row_shifts.to(device=device, dtype=torch.long)
+    col_shifts = col_shifts.to(device=device, dtype=torch.long)
+
+    # (B, window_h)
+    r = row_shifts[:, None] + torch.arange(window_h, device=device, dtype=torch.long)[None, :]
+    # (B, window_w)
+    c = col_shifts[:, None] + torch.arange(window_w, device=device, dtype=torch.long)[None, :]
+
+    # reshape for broadcasting to (B, window_h, window_w)
+    b = torch.arange(B, device=device, dtype=torch.long)[:, None, None]  # (B,1,1)
+    r = r[:, :, None]                                                   # (B,window_h,1)
+    c = c[:, None, :]                                                   # (B,1,window_w)
+
+    aligned = patches[b, :, r, c]  # Results (B, window_h, window_w, C)
+    aligned = aligned.permute(0, 3, 1, 2)  # (B, C, window_h, window_w)
+
+    if not has_channel_dim:
+        aligned = aligned.squeeze(1)
+    return aligned

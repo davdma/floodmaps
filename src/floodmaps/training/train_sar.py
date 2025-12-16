@@ -22,7 +22,8 @@ from omegaconf import DictConfig, OmegaConf
 from floodmaps.models.model import SARWaterDetector
 from floodmaps.utils.utils import (flatten_dict, Metrics, EarlyStopper,
                          SARChannelIndexer, get_model_params, nlcd_to_rgb,
-                         get_samples_with_wet_percentage, scl_to_rgb, compute_pos_weight)
+                         get_samples_with_wet_percentage, scl_to_rgb, compute_pos_weight,
+                         align_patches_with_shifts)
 from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
 from floodmaps.utils.metrics import compute_nlcd_metrics, compute_scl_metrics
 
@@ -38,7 +39,7 @@ LOSS_NAMES = ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
 
 # get our optimizer and metrics
 def train_loop(model, dataloader, device, optimizer, minibatches, loss_config,
-                ad_cfg, c, run, epoch):
+                cfg, ad_cfg, c, run, epoch):
     running_tot_loss = torch.tensor(0.0, device=device) # all loss components
     running_cls_loss = torch.tensor(0.0, device=device) # only classifier loss
     if ad_cfg is not None:
@@ -154,7 +155,7 @@ def train_loop(model, dataloader, device, optimizer, minibatches, loss_config,
 
     return epoch_loss
 
-def test_loop(model, dataloader, device, loss_config, ad_cfg, c, run, epoch):
+def test_loop(model, dataloader, device, loss_config, cfg, ad_cfg, c, run, epoch):
     running_tot_vloss = torch.tensor(0.0, device=device) # all loss components
     running_cls_vloss = torch.tensor(0.0, device=device) # only classifier loss
     if ad_cfg is not None:
@@ -180,14 +181,16 @@ def test_loop(model, dataloader, device, loss_config, ad_cfg, c, run, epoch):
     all_nlcd_classes = []
     all_scl_classes = []
 
+    window_size = cfg.data.window
     model.eval()
     with torch.no_grad():
         for X, y, supplementary in dataloader:
             X = X.to(device)
             y = y.to(device)
-            # for nlcd/scl data we can safely assume it is properly aligned to the SAR image
+            # for nlcd data we can safely assume it is properly aligned to the SAR image
             nlcd_classes = supplementary[:, 3, c[0]:c[1], c[0]:c[1]].to(device)
-            scl_classes = supplementary[:, 4, c[0]:c[1], c[0]:c[1]].to(device)
+            # SCL is S2 product so we align
+            scl_classes_wide = supplementary[:, 4, :, :].to(device)
 
             X_c = X[:, :, c[0]:c[1], c[0]:c[1]]
 
@@ -195,6 +198,12 @@ def test_loop(model, dataloader, device, loss_config, ad_cfg, c, run, epoch):
             loss_dict = loss_config.compute_loss(out_dict, y.float(), typ='val')
             loss = loss_dict['total_loss']
             y_true = loss_dict['true_label']
+            
+            # Align SCL using shift indices from loss computation
+            row_shifts, col_shifts = loss_dict['shift_indices']
+            scl_classes = align_patches_with_shifts(
+                scl_classes_wide, row_shifts, col_shifts, window_size, window_size
+            )
 
             logits = out_dict['classifier_output']
             y_pred = nn.functional.sigmoid(logits).flatten() > 0.5
@@ -296,7 +305,7 @@ def test_loop(model, dataloader, device, loss_config, ad_cfg, c, run, epoch):
 
     return epoch_vloss, epoch_cls_vloss, metrics_dict
 
-def evaluate(model, dataloader, device, loss_config, ad_cfg, c):
+def evaluate(model, dataloader, device, loss_config, cfg, ad_cfg, c):
     """Evaluate metrics on test set without logging."""
     running_tot_vloss = torch.tensor(0.0, device=device)
 
@@ -314,13 +323,14 @@ def evaluate(model, dataloader, device, loss_config, ad_cfg, c):
     all_nlcd_classes = []
     all_scl_classes = []
 
+    window_size = cfg.data.window
     model.eval()
     with torch.no_grad():
         for X, y, supplementary in dataloader:
             X = X.to(device)
             y = y.to(device)
             nlcd_classes = supplementary[:, 3, c[0]:c[1], c[0]:c[1]].to(device)
-            scl_classes = supplementary[:, 4, c[0]:c[1], c[0]:c[1]].to(device)
+            scl_classes_wide = supplementary[:, 4, :, :].to(device)
 
             X_c = X[:, :, c[0]:c[1], c[0]:c[1]]
 
@@ -328,6 +338,12 @@ def evaluate(model, dataloader, device, loss_config, ad_cfg, c):
             loss_dict = loss_config.compute_loss(out_dict, y.float(), typ='val')
             loss = loss_dict['total_loss']
             y_true = loss_dict['true_label']
+            
+            # Align SCL using shift indices from loss computation
+            row_shifts, col_shifts = loss_dict['shift_indices']
+            scl_classes = align_patches_with_shifts(
+                scl_classes_wide, row_shifts, col_shifts, window_size, window_size
+            )
 
             logits = out_dict['classifier_output']
             y_pred = nn.functional.sigmoid(logits).flatten() > 0.5
@@ -405,6 +421,7 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, ad_cfg, run
             pos_weight_val = compute_pos_weight(label_np, pos_weight_clip=clip_max,
                                                 cache_dir=cache_dir, dataset_name='train')
     cfg.train.pos_weight = pos_weight_val
+    run.config.update({"pos_weight": pos_weight_val})
     
     # initialize loss functions - train loss function is optimized for gradient calculations
     loss_cfg = LossConfig(cfg, ad_cfg=ad_cfg, device=device)
@@ -441,11 +458,11 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, ad_cfg, run
 
             # train loop
             avg_loss = train_loop(model, train_loader, device, optimizer, minibatches,
-                                  loss_cfg, ad_cfg, c, run, epoch)
+                                  loss_cfg, cfg, ad_cfg, c, run, epoch)
 
             # at the end of each training epoch compute validation
-            avg_vloss, avg_cls_vloss, val_set_metrics = test_loop(model, val_loader, device, loss_cfg,
-                                                   ad_cfg, c, run, epoch)
+            avg_vloss, avg_cls_vloss, val_set_metrics = test_loop(model, val_loader, device,
+                                    loss_cfg, cfg, ad_cfg, c, run, epoch)
         except Exception as err:
             raise RuntimeError(f'Error while training occurred at epoch {epoch}.') from err
 
@@ -494,7 +511,7 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, ad_cfg, run
 
     # for benchmarking purposes
     if cfg.eval.mode == 'test':
-        test_loss, test_set_metrics = evaluate(model, test_loader, device, loss_cfg, ad_cfg, c)
+        test_loss, test_set_metrics = evaluate(model, test_loader, device, loss_cfg, cfg, ad_cfg, c)
         fmetrics.save_metrics('test', partition=partition, loss=test_loss, **test_set_metrics)
         run.summary.update({f'final model {key}': value for key, value in test_set_metrics['core_metrics'].items()})
 
@@ -536,6 +553,9 @@ def save_experiment(cls_weights, ad_weights, metrics, cfg, ad_cfg, run):
 
 def sample_predictions(model, sample_set, mean, std, cfg, ad_cfg, sample_dir, dataset_name, percent_wet_patches=0.5, seed=24330):
     """Generate predictions on a subset of images in the dataset for wandb logging.
+
+    NOTE: For visualization the ground truth label is shifted if shift invariance used.
+    Other channels like TCI, NLCD, SCL are not shifted and kept in the wider format.
     
     Parameters
     ----------
@@ -563,7 +583,7 @@ def sample_predictions(model, sample_set, mean, std, cfg, ad_cfg, sample_dir, da
     if cfg.wandb.num_sample_predictions <= 0:
         return None
 
-    loss_config = LossConfig(cfg, ad_cfg=ad_cfg)
+    loss_config = LossConfig(cfg, ad_cfg=ad_cfg, device='cpu')
     columns = ["id", "tci", "nlcd", "scl"] # TCI, NLCD, SCL always included
     channels = [bool(int(x)) for x in cfg.data.channels]
     my_channels = SARChannelIndexer(channels)
@@ -611,6 +631,7 @@ def sample_predictions(model, sample_set, mean, std, cfg, ad_cfg, sample_dir, da
 
     center_1 = (cfg.data.size - cfg.data.window) // 2
     center_2 = center_1 + cfg.data.window
+    window_size = cfg.data.window
     for id, k in enumerate(samples):
         # get all images to shape (H, W, C) with C = 1 or 3 (1 for grayscale, 3 for RGB)
         X, y, supplementary = sample_set[k]
@@ -621,7 +642,8 @@ def sample_predictions(model, sample_set, mean, std, cfg, ad_cfg, sample_dir, da
             out_dict = model(X_c.unsqueeze(0))
             logits = out_dict['classifier_output']
             despeckler_output = out_dict['despeckler_output'].squeeze(0) if model.uses_autodespeckler() else None
-            y_shifted = loss_config.get_label_alignment(logits, y.unsqueeze(0).float()).squeeze(0)
+            y_shifted, shift_indices = loss_config.get_label_alignment(logits, y.unsqueeze(0).float())
+            y_shifted = y_shifted.squeeze(0)
 
         y_pred = torch.where(nn.functional.sigmoid(logits) > 0.5, 1.0, 0.0).squeeze(0) # (1, x, y)
 
@@ -843,7 +865,8 @@ def run_experiment_s1(cfg, ad_cfg=None):
             "total_parameters": total_params,
             "trainable_parameters": trainable_params,
             "parameter_size_mb": param_size_in_mb
-        }
+        },
+        allow_val_change=True
     )
 
     try:

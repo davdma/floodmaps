@@ -240,6 +240,7 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run, cache_
             clip_max = float(getattr(cfg.train, 'pos_weight_clip', 10.0))
             pos_weight_val = compute_pos_weight(label_np, pos_weight_clip=clip_max,
                                                 cache_dir=cache_dir, dataset_name='train')
+    run.config.update({"pos_weight": pos_weight_val})
 
     # loss function
     loss_fn = get_loss_fn(cfg, device=device, pos_weight=pos_weight_val)
@@ -623,7 +624,8 @@ def run_experiment_s2(cfg):
             "total_parameters": total_params,
             "trainable_parameters": trainable_params,
             "parameter_size_mb": param_size_in_mb
-        }
+        },
+        allow_val_change=True
     )
 
     try:

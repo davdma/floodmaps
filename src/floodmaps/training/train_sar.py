@@ -400,7 +400,7 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, ad_cfg, run
         Device:          {device}
     ''')
     # log weights and gradients each epoch
-    run.watch(model, log="all", log_freq=10)
+    run.watch(model, log="all", log_freq=cfg.logging.grad_norm_freq)
 
     # compute pos_weight if enabled for rebalancing
     pos_weight_val = None
@@ -415,7 +415,7 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, ad_cfg, run
             pos_weight_val = compute_pos_weight(label_np, pos_weight_clip=clip_max,
                                                 cache_dir=cache_dir, dataset_name='train')
     cfg.train.pos_weight = pos_weight_val
-    run.config.update({"train.pos_weight": pos_weight_val})
+    run.config.update({"train.pos_weight": pos_weight_val}, allow_val_change=True)
     
     # initialize loss functions - train loss function is optimized for gradient calculations
     loss_cfg = LossConfig(cfg, ad_cfg=ad_cfg, device=device)
@@ -427,7 +427,7 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, ad_cfg, run
 
     # load checkpoint if it exists
     if cfg.train.checkpoint.load_chkpt:
-        chkpt = load_checkpoint(cfg.train.checkpoint.chkpt_path, model, optimizer=optimizer, scheduler=scheduler, early_stopper=early_stopper)
+        chkpt = load_checkpoint(cfg.train.checkpoint.load_chkpt_path, model, optimizer=optimizer, scheduler=scheduler, early_stopper=early_stopper)
         start_epoch = chkpt['epoch'] + 1
         if cfg.train.epochs < start_epoch:
             raise ValueError(f"Epochs specified in config ({cfg.train.epochs}) is less than the epoch at which the checkpoint was saved ({start_epoch}).")
@@ -859,8 +859,7 @@ def run_experiment_s1(cfg, ad_cfg=None):
             "total_parameters": total_params,
             "trainable_parameters": trainable_params,
             "parameter_size_mb": param_size_in_mb
-        },
-        allow_val_change=True
+        }
     )
 
     try:

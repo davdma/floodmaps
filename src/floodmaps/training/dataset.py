@@ -231,7 +231,7 @@ class FloodSampleSARDataset(Dataset):
     """
     def __init__(self, sample_dir, channels=[True] * 8, typ="train", random_flip=False, transform=None, seed=3200, mmap_mode=None):
         self.sample_dir = Path(sample_dir)
-        self.channels = channels + [True] * 5 # always keep label, tci, nlcd
+        self.channels = channels + [True] * 6 # always keep label, tci, nlcd, scl
         self.typ = typ
         self.random_flip = random_flip
         self.transform = transform
@@ -254,9 +254,9 @@ class FloodSampleSARDataset(Dataset):
 
     def __getitem__(self, idx):
         patch = self.dataset[idx]
-        image = torch.from_numpy(patch[:-5, :, :])
-        label = torch.from_numpy(patch[-5, :, :]).unsqueeze(0)
-        supplementary = torch.from_numpy(patch[-4:, :, :])
+        image = torch.from_numpy(patch[:-6, :, :])
+        label = torch.from_numpy(patch[-6, :, :]).unsqueeze(0)
+        supplementary = torch.from_numpy(patch[-5:, :, :])
 
         if self.transform:
             # for standardization only standardize the non-binary channels!

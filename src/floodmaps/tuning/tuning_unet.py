@@ -7,10 +7,13 @@ import pandas as pd
 import socket
 from pathlib import Path
 import hydra
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
+import torch
+import torch.multiprocessing as mp
 
 from floodmaps.training.train_s2 import run_experiment_s2
 from floodmaps.training.train_sar import run_experiment_s1
+from floodmaps.training.train_sar_ddp import run_experiment_s1 as run_experiment_s1_ddp
 from floodmaps.utils.tuning_utils import load_stopper_info, save_stopper_info, print_save_best_params, save_problem
 
 def run_s2(parameters, cfg: DictConfig):
@@ -98,14 +101,43 @@ def tuning_s2(cfg: DictConfig) -> None:
 def run_s1(parameters, cfg: DictConfig):
     """For setting the params in the cfg object make sure they are predeclared
     either as None or as some value to avoid error"""
-    cfg.wandb.project = 'S1_NoDEM_All_Tuning'
-    cfg.wandb.group = 'UNet'
+    # cfg.wandb.project = 'S1_NoDEM_All_Tuning'
+    # cfg.wandb.group = 'UNet'
     cfg.train.loss = parameters['loss']
     cfg.train.lr = parameters['learning_rate']
     cfg.train.LR_scheduler = parameters['LR_scheduler']
     cfg.model.unet.dropout = parameters['dropout']
     ad_cfg = getattr(cfg, 'ad', None)
     fmetrics = run_experiment_s1(cfg, ad_cfg=ad_cfg)
+    results = fmetrics.get_metrics(split='val', partition='shift_invariant')
+    return results['core_metrics']['val f1']
+
+def run_experiment_s1_ddp_wrapper(rank, world_size, cfg, ad_cfg, result_queue):
+    fmetrics = run_experiment_s1_ddp(rank, world_size, cfg, ad_cfg)
+
+    # Only rank 0 reports the result
+    if rank == 0 and fmetrics is not None:
+        result_queue.put(fmetrics)
+
+def run_s1_ddp(parameters, cfg: DictConfig):
+    """DDP version for a S1 tuning run"""
+    cfg.train.loss = parameters['loss']
+    cfg.train.lr = parameters['learning_rate']
+    cfg.train.LR_scheduler = parameters['LR_scheduler']
+    cfg.model.unet.dropout = parameters['dropout']
+
+    ad_cfg = getattr(cfg, 'ad', None)
+    # resolve cfgs before pickling
+    resolved_cfg = OmegaConf.to_container(cfg, resolve=True)
+    resolved_ad_cfg = OmegaConf.to_container(ad_cfg, resolve=True) if ad_cfg is not None else None
+    world_size = torch.cuda.device_count()
+    print(f"world_size = {world_size}")
+
+    result_queue = mp.SimpleQueue()
+    mp.spawn(run_experiment_s1_ddp_wrapper, args=(world_size, resolved_cfg, resolved_ad_cfg, result_queue), nprocs=world_size)
+
+    # Wait for all processes to finish and get the results
+    fmetrics = result_queue.get()
     results = fmetrics.get_metrics(split='val', partition='shift_invariant')
     return results['core_metrics']['val f1']
 
@@ -127,12 +159,6 @@ def tuning_s1(cfg: DictConfig) -> None:
     problem.add_hyperparameter((0.05, 0.40), "dropout")
     problem.add_hyperparameter(["BCELoss", "BCEDiceLoss", "TverskyLoss"], "loss")
     problem.add_hyperparameter(['Constant', 'ReduceLROnPlateau'], 'LR_scheduler')
-
-    # optional autodespeckler CNN first
-    # problem.add_hyperparameter([1, 2, 3, 4, 5], "AD_num_layers")
-    # problem.add_hyperparameter([3, 5, 7], "AD_kernel_size")
-    # problem.add_hyperparameter((0.05, 0.30), "AD_dropout")
-    # problem.add_hyperparameter(["leaky_relu", "relu"], "AD_activation_func")
 
     # save problem to json
     save_problem(problem, search_dir / 'problem.json')

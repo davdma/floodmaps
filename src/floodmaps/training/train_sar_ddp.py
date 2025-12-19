@@ -880,8 +880,8 @@ def run_experiment_s1(rank, world_size, cfg, ad_cfg=None):
     # explicitly fork num workers in DDP to avoid memory bloat
     train_loader = DataLoader(train_set,
                              batch_size=cfg.train.batch_size,
-                             num_workers=0,
-                             persistent_workers=False,
+                             num_workers=cfg.train.num_workers,
+                             persistent_workers=cfg.train.num_workers>0,
                              pin_memory=True,
                              sampler=DistributedSampler(train_set, seed=cfg.seed, drop_last=True),
                              multiprocessing_context='fork',
@@ -889,8 +889,8 @@ def run_experiment_s1(rank, world_size, cfg, ad_cfg=None):
 
     val_loader = DataLoader(val_set,
                             batch_size=cfg.train.batch_size,
-                            num_workers=0,
-                            persistent_workers=False,
+                            num_workers=cfg.train.num_workers,
+                            persistent_workers=cfg.train.num_workers>0,
                             pin_memory=True,
                             sampler=DistributedSampler(val_set, shuffle=False, drop_last=False),
                             multiprocessing_context='fork',
@@ -898,8 +898,8 @@ def run_experiment_s1(rank, world_size, cfg, ad_cfg=None):
 
     test_loader = DataLoader(test_set,
                             batch_size=cfg.train.batch_size,
-                            num_workers=0,
-                            persistent_workers=False,
+                            num_workers=cfg.train.num_workers,
+                            persistent_workers=cfg.train.num_workers>0,
                             pin_memory=True,
                             shuffle=False,
                             multiprocessing_context='fork',

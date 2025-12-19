@@ -877,13 +877,14 @@ def run_experiment_s1(rank, world_size, cfg, ad_cfg=None):
                                         typ="test", transform=standardize) if (rank == 0 and cfg.eval.mode == 'test') else None
 
     # dataloaders
-    # num workers set to 0 to avoid issues with DDP
+    # explicitly fork num workers in DDP to avoid memory bloat
     train_loader = DataLoader(train_set,
                              batch_size=cfg.train.batch_size,
                              num_workers=0,
                              persistent_workers=False,
                              pin_memory=True,
                              sampler=DistributedSampler(train_set, seed=cfg.seed, drop_last=True),
+                             multiprocessing_context='fork',
                              shuffle=False)
 
     val_loader = DataLoader(val_set,
@@ -891,7 +892,8 @@ def run_experiment_s1(rank, world_size, cfg, ad_cfg=None):
                             num_workers=0,
                             persistent_workers=False,
                             pin_memory=True,
-                            sampler=DistributedSampler(val_set, seed=cfg.seed, shuffle=False, drop_last=False),
+                            sampler=DistributedSampler(val_set, shuffle=False, drop_last=False),
+                            multiprocessing_context='fork',
                             shuffle=False)
 
     test_loader = DataLoader(test_set,
@@ -900,6 +902,7 @@ def run_experiment_s1(rank, world_size, cfg, ad_cfg=None):
                             persistent_workers=False,
                             pin_memory=True,
                             shuffle=False,
+                            multiprocessing_context='fork',
                             drop_last=False) if (rank == 0 and cfg.eval.mode == 'test') else None
 
     # initialize wandb run

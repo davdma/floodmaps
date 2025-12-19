@@ -810,7 +810,8 @@ def run_experiment_s1(cfg, ad_cfg=None):
     # datasets (all can be memory mapped if desired)
     train_set = FloodSampleSARDataset(sample_dir, channels=channels,
                                         typ="train", transform=standardize, random_flip=cfg.data.random_flip,
-                                        seed=cfg.seed+1, mmap_mode='r' if cfg.data.mmap else None)
+                                        seed=cfg.seed+1, mmap_mode='r' if cfg.data.mmap else None,
+                                        keep_contiguous_in_mem=getattr(cfg.train, 'keep_contiguous_in_mem', True))
     val_set = FloodSampleSARDataset(sample_dir, channels=channels,
                                     typ="val", transform=standardize)
     test_set = FloodSampleSARDataset(sample_dir, channels=channels,

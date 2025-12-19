@@ -1,3 +1,4 @@
+from pydantic_core.core_schema import none_schema
 import rasterio
 import torch
 import numpy as np
@@ -190,6 +191,12 @@ class FloodSampleSARDataset(Dataset):
     lazily loaded into CPU memory at initialization and then retrieved by indexing. Subsetting
     channels is done during retrieval.
 
+    NOTE: For speed, if all data is kept in memory (mmap=None), then the data is copied as
+    a contiguous array to avoid per sample advanced indexing. If however, memory mapping
+    is used with mmap='r', then the data is kept as a memory mapped array and advanced
+    indexing is used during __getitem__. Avoid mmapping unless absolutely necessary since
+    it is a large slow down in data loading.
+
     The class does not have knowledge of the dimensions of the patches of the dataset which are
     set during preprocessing. The class assumes the data has 13 channels with the first 8 channels
     being:
@@ -219,6 +226,12 @@ class FloodSampleSARDataset(Dataset):
     random_flip : bool
         Randomly flip patches (vertically or horizontally) for augmentation.
     seed : int
+    mmap_mode : str
+        Mode to use for memory mapping the dataset. (Default: None)
+    keep_contiguous_in_mem : bool
+        Whether to keep the dataset as a contiguous array in memory. If mmap_mode
+        is 'r', the dataset still gets copied into memory as a contiguous array.
+        For large memmapped data avoid setting this to True. (Default: True)
 
     Returns
     -------
@@ -229,7 +242,7 @@ class FloodSampleSARDataset(Dataset):
     supplementary : torch.Tensor
         The TCI (3 channels) + NLCD (1 channel) + SCL (1 channel).
     """
-    def __init__(self, sample_dir, channels=[True] * 8, typ="train", random_flip=False, transform=None, seed=3200, mmap_mode=None):
+    def __init__(self, sample_dir, channels=[True] * 8, typ="train", random_flip=False, transform=None, seed=3200, mmap_mode=None, keep_contiguous_in_mem=True):
         self.sample_dir = Path(sample_dir)
         self.channels = channels + [True] * 6 # always keep label, tci, nlcd, scl
         self.typ = typ
@@ -237,11 +250,14 @@ class FloodSampleSARDataset(Dataset):
         self.transform = transform
         self.seed = seed
         self.mmap_mode = mmap_mode
+        self.needs_channel_select = not all(self.channels)
+        self.keep_contiguous_in_mem = keep_contiguous_in_mem
 
         base = np.load(self.sample_dir / f"{typ}_patches.npy", mmap_mode=mmap_mode)
 
         # One-time channel selection to avoid per-sample advanced indexing copies
-        if not all(self.channels):
+        if self.needs_channel_select and self.keep_contiguous_in_mem:
+            # copies entire dataset as contiguous block in memory!
             base = np.ascontiguousarray(base[:, self.channels, :, :])
         
         self.dataset = base
@@ -253,7 +269,11 @@ class FloodSampleSARDataset(Dataset):
         return self.dataset.shape[0]
 
     def __getitem__(self, idx):
-        patch = self.dataset[idx]
+        if not self.needs_channel_select or self.keep_contiguous_in_mem:
+            patch = self.dataset[idx]
+        else:
+            patch = self.dataset[idx, self.channels, :, :]
+
         image = torch.from_numpy(patch[:-6, :, :])
         label = torch.from_numpy(patch[-6, :, :]).unsqueeze(0)
         supplementary = torch.from_numpy(patch[-5:, :, :])
@@ -295,6 +315,11 @@ class FloodSampleS2Dataset(Dataset):
     lazily loaded into CPU memory at initialization and then retrieved by indexing. Subsetting
     channels is done during retrieval.
 
+    NOTE: For speed, if all data is kept in memory (mmap=None), then the data is copied as
+    a contiguous array to avoid per sample advanced indexing. If however, memory mapping
+    is used with mmap='r', then the data is kept as a memory mapped array and advanced
+    indexing is used during __getitem__.
+
     The class does not have knowledge of the dimensions of the patches of the dataset which are
     set during preprocessing. The class assumes the data has 16 input channels:
 
@@ -331,6 +356,12 @@ class FloodSampleS2Dataset(Dataset):
         Randomly flip patches (vertically or horizontally) for augmentation.
     seed : int
         Random seed.
+    mmap_mode : str
+        Mode to use for memory mapping the dataset. (Default: None)
+    keep_contiguous_in_mem : bool
+        Whether to keep the dataset as a contiguous array in memory. If mmap_mode
+        is 'r', the dataset still gets copied into memory as a contiguous array.
+        For large memmapped data avoid setting this to True. (Default: True)
 
     Returns
     -------
@@ -341,7 +372,7 @@ class FloodSampleS2Dataset(Dataset):
     supplementary : torch.Tensor
         The TCI (3 channels) + NLCD (1 channel) + SCL (1 channel) = 5 channels.
     """
-    def __init__(self, sample_dir, channels=[True] * 16, typ="train", random_flip=False, transform=None, seed=3200, mmap_mode=None):
+    def __init__(self, sample_dir, channels=[True] * 16, typ="train", random_flip=False, transform=None, seed=3200, mmap_mode=None, keep_contiguous_in_mem=True):
         self.sample_dir = Path(sample_dir)
         self.channels = channels + [True] * 6 # always keep label, tci, nlcd, scl
         self.typ = typ
@@ -349,11 +380,13 @@ class FloodSampleS2Dataset(Dataset):
         self.transform = transform
         self.seed = seed
         self.mmap_mode = mmap_mode
+        self.needs_channel_select = not all(self.channels)
+        self.keep_contiguous_in_mem = keep_contiguous_in_mem
 
         base = np.load(self.sample_dir / f"{typ}_patches.npy", mmap_mode=mmap_mode)
 
         # One-time channel selection to avoid per-sample advanced indexing copies
-        if not all(self.channels):
+        if self.needs_channel_select and self.keep_contiguous_in_mem:
             base = np.ascontiguousarray(base[:, self.channels, :, :])
         
         self.dataset = base
@@ -365,7 +398,10 @@ class FloodSampleS2Dataset(Dataset):
         return self.dataset.shape[0]
 
     def __getitem__(self, idx):
-        patch = self.dataset[idx]
+        if not self.needs_channel_select or self.keep_contiguous_in_mem:
+            patch = self.dataset[idx]
+        else:
+            patch = self.dataset[idx, self.channels, :, :]
         image = torch.from_numpy(patch[:-6, :, :])
         label = torch.from_numpy(patch[-6, :, :]).unsqueeze(0)
         supplementary = torch.from_numpy(patch[-5:, :, :])

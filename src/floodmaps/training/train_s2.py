@@ -7,7 +7,9 @@ from torch.utils.data import DataLoader
 from datetime import datetime
 from torchvision import transforms
 from torchmetrics import MetricCollection
-from torchmetrics.classification import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score, BinaryConfusionMatrix, BinaryJaccardIndex
+from torchmetrics.classification import (BinaryAccuracy, BinaryPrecision,
+                                        BinaryRecall, BinaryF1Score, BinaryConfusionMatrix,
+                                        BinaryJaccardIndex, BinaryAveragePrecision)
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
 import random
@@ -80,7 +82,7 @@ def train_loop(model, dataloader, device, optimizer, loss_fn, run, epoch):
         loss.backward()
         optimizer.step()
 
-        y_pred = nn.functional.sigmoid(logits).flatten() > 0.5
+        y_pred = nn.functional.sigmoid(logits).flatten()
         target = y.flatten() > 0.5
         metric_collection.update(y_pred, target)
         running_loss += loss.detach()
@@ -132,7 +134,8 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
         BinaryRecall(threshold=0.5),
         BinaryF1Score(threshold=0.5),
         BinaryConfusionMatrix(threshold=0.5),
-        BinaryJaccardIndex(threshold=0.5)
+        BinaryJaccardIndex(threshold=0.5),
+        BinaryAveragePrecision(thresholds=None)
     ]).to(device)
     nlcd_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=NLCD_CLASSES).to(device)
     scl_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=SCL_CLASSES).to(device)
@@ -148,7 +151,7 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
             logits = model(X)
             loss = loss_fn(logits, y.float())
             
-            y_pred = nn.functional.sigmoid(logits).flatten() > 0.5
+            y_pred = nn.functional.sigmoid(logits).flatten()
             target = y.flatten() > 0.5
             metric_collection.update(y_pred, target)
             nlcd_metric_collection.update(y_pred, target, nlcd_classes.flatten())
@@ -165,7 +168,8 @@ def test_loop(model, dataloader, device, loss_fn, run, epoch, typ='val'):
         f"{typ} precision": metric_results['BinaryPrecision'].item(),
         f"{typ} recall": metric_results['BinaryRecall'].item(),
         f"{typ} f1": metric_results['BinaryF1Score'].item(),
-        f"{typ} IoU": metric_results['BinaryJaccardIndex'].item()
+        f"{typ} IoU": metric_results['BinaryJaccardIndex'].item(),
+        f"{typ} AUPRC": metric_results['BinaryAveragePrecision'].item()
     }
     
     # Only log to wandb for validation (not for test evaluation)

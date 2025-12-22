@@ -64,10 +64,10 @@ def build_sar_classifier(cfg):
     channels = [bool(int(x)) for x in cfg.data.channels]
     n_channels = sum(channels)
     if cfg.model.classifier == 'unet':
-        return UNet(n_channels, dropout=cfg.model.unet.dropout)
+        return UNet(n_channels, dropout=cfg.model.unet.dropout).to('cpu')
     elif cfg.model.classifier == 'unet++':
         return NestedUNet(n_channels, dropout=cfg.model.unetpp.dropout,
-                          deep_supervision=cfg.model.unetpp.deep_supervision)
+                          deep_supervision=cfg.model.unetpp.deep_supervision).to('cpu')
     else:
         raise Exception('Invalid classifier config.')
 
@@ -83,7 +83,8 @@ def build_multispectral_classifier(cfg):
     if cfg.model.classifier == "unet":
         return UNet(n_channels, dropout=cfg.model.unet.dropout).to('cpu')
     elif cfg.model.classifier == "unet++":
-        return NestedUNet(n_channels, dropout=cfg.model.unetpp.dropout, deep_supervision=cfg.model.unetpp.deep_supervision).to('cpu')
+        return NestedUNet(n_channels, dropout=cfg.model.unetpp.dropout,
+                        deep_supervision=cfg.model.unetpp.deep_supervision).to('cpu')
     else:
         raise Exception("model unknown")
 

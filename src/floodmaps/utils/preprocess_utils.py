@@ -1,6 +1,8 @@
 import numpy as np
 from typing import Tuple, List
 from datetime import datetime
+from math import exp
+from numba import jit
 
 # S2 processing baseline offset correction
 # SEE: https://sentiwiki.copernicus.eu/web/s2-products
@@ -156,3 +158,152 @@ def calculate_missing_percent(missing_mask: np.ndarray) -> float:
 def calculate_cloud_percent(scl: np.ndarray, classes: List[int]) -> float:
     """Calculate the percentage of cloud classes in the SCL array."""
     return (np.isin(scl, classes).sum() / scl.size)
+
+DAMP_DEFAULT = 1.0
+CU_DEFAULT = 0.523 # 0.447 is sqrt(1/number of looks)
+CMAX_DEFAULT = 1.73 # 1.183 is sqrt(1 + 2/number of looks)
+
+# for Enhanced Lee filter for SAR dataset
+@jit(nopython=True)
+def _enhanced_lee_filter_numba(image, kernel_size, d, cu, cmax):
+    """Numba-optimized enhanced lee filter core."""
+    height, width = image.shape
+    half_size = kernel_size // 2
+    filtered_image = np.zeros((height, width), dtype=np.float64)
+    
+    for y in range(height):
+        for x in range(width):
+            pix_value = image[y, x]
+            if pix_value == 0:
+                filtered_image[y, x] = 0
+                continue
+
+            # Window bounds
+            xleft = max(0, x - half_size)
+            xright = min(width, x + half_size + 1)
+            yup = max(0, y - half_size)
+            ydown = min(height, y + half_size + 1)
+
+            # Compute mean and std excluding zeros
+            total = 0.0
+            total_sq = 0.0
+            count = 0
+            for yy in range(yup, ydown):
+                for xx in range(xleft, xright):
+                    val = image[yy, xx]
+                    if val != 0:
+                        total += val
+                        total_sq += val * val
+                        count += 1
+
+            if count == 0:
+                filtered_image[y, x] = 0
+                continue
+
+            w_mean = total / count
+            if count == 1:
+                w_std = 0.0
+            else:
+                variance = (total_sq / count) - (w_mean * w_mean)
+                # Bessel correction for sample std
+                variance = variance * count / (count - 1)
+                w_std = np.sqrt(max(0.0, variance))
+
+            # Weighting calculation
+            ci = w_std / w_mean if w_mean != 0 else 0.0
+            if ci <= cu:
+                w_t = 1.0
+            elif ci >= cmax:
+                w_t = 0.0
+            else:
+                w_t = exp((-d * (ci - cu)) / (cmax - ci))
+
+            new_pix_value = (w_mean * w_t) + (pix_value * (1.0 - w_t))
+            filtered_image[y, x] = new_pix_value
+
+    return filtered_image
+
+def dbToPower(x, nodata=-9999):
+    """Convert SAR raster from db scale to power scale.
+    Missing values are set to 0.
+
+    Parameters
+    ----------
+    x : ndarray
+    nodata : int, optional
+        No data value of the raster x.
+
+    Returns
+    -------
+    x : ndarray
+    """
+    # set all missing values back to zero
+    missing_mask = x == nodata
+    nonzero_mask = x != nodata
+    x[nonzero_mask] = np.float_power(10, x[nonzero_mask] / 10, dtype=np.float64)  # Inverse of log10 transformation
+    x[missing_mask] = 0
+    return x
+
+def powerToDb(x, nodata=-9999):
+    """Convert SAR raster from power scale to db scale. Missing values set to nodata.
+
+    Parameters
+    ----------
+    x : ndarray
+    nodata : int, optional
+        No data value of the raster x.
+
+    Returns
+    -------
+    x : ndarray
+    """
+    nonzero_mask = x > 0
+    missing_mask = x <= 0
+    x[nonzero_mask] = 10 * np.log10(x[nonzero_mask], dtype=np.float64)
+    x[missing_mask] = nodata
+    return x
+
+def enhanced_lee_filter(image, kernel_size=7, d=DAMP_DEFAULT, cu=CU_DEFAULT,
+                        cmax=CMAX_DEFAULT, nodata=-9999):
+    """Optimized enhanced lee filter using Numba JIT.
+    
+    Implements the enhanced lee filter outlined here:
+    https://desktop.arcgis.com/en/arcmap/latest/manage-data/raster-and-images/speckle-function.htm
+    https://catalyst.earth/catalyst-system-files/help/concepts/orthoengine_c/Chapter_825.html
+    https://pyradar-tools.readthedocs.io/en/latest/_modules/pyradar/filters/lee_enhanced.html#lee_enhanced_filter
+
+    Missing data will not be used in the calculation, and if the center pixel is missing,
+    then the filter output will preserve the missing data.
+    
+    Parameters
+    ----------
+    image : ndarray
+        SAR image to filter.
+    kernel_size : int
+        Size of the kernel.
+    d : float
+        Damping factor.
+    cu : float
+        Noise variation coefficient.
+    cmax : float
+        Maximum noise variation coefficient.
+    nodata : int, optional
+        No data value of the raster image.
+
+    Returns
+    -------
+    filtered_image : ndarray
+        Filtered SAR image.
+    """
+    image = np.float64(image)
+    image = dbToPower(image, nodata=nodata)
+    
+    if image.ndim == 2:
+        filtered_image = _enhanced_lee_filter_numba(image, kernel_size, d, cu, cmax)
+    elif image.ndim == 3 and image.shape[0] == 1:
+        filtered_image = _enhanced_lee_filter_numba(image[0], kernel_size, d, cu, cmax)
+        filtered_image = filtered_image[np.newaxis, :, :]
+    else:
+        raise ValueError("Image must be shape (H, W) or (1, H, W)")
+    
+    return powerToDb(filtered_image, nodata=nodata)

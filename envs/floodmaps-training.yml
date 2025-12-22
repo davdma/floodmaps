@@ -16,6 +16,7 @@ dependencies:
   - scikit-learn=1.2.2
   - jupyterlab
   - scikit-image
+  - numba
   - pip
   - pip:
     - "rasterio[s3]"

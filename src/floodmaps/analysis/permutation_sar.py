@@ -23,7 +23,7 @@ from pathlib import Path
 from floodmaps.models.model import SARWaterDetector
 from floodmaps.utils.config import Config
 from floodmaps.utils.utils import (SRC_DIR, RESULTS_DIR, SARChannelIndexer)
-from floodmaps.training.loss import LossConfig
+from floodmaps.training.loss import SARLossConfig
 from floodmaps.training.dataset import FloodSampleSARDataset
 
 LOSS_NAMES = ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
@@ -182,11 +182,11 @@ def permutation_importance(cfg, ad_cfg=None, dir_path=None):
                             shuffle=True,
                             drop_last=False)
 
-    loss_cfg = LossConfig(cfg, ad_cfg=ad_cfg, device=device)
+    loss_cfg = SARLossConfig(cfg, ad_cfg=ad_cfg, device=device)
     indexer = SARChannelIndexer(channels)
         
     # initialize loss functions - train loss function is optimized for gradient calculations
-    loss_cfg = LossConfig(cfg, ad_cfg=ad_cfg, device=device)
+    loss_cfg = SARLossConfig(cfg, ad_cfg=ad_cfg, device=device)
     center_1 = (cfg.data.size - cfg.data.window) // 2
     center_2 = center_1 + cfg.data.window
     c = (center_1, center_2)

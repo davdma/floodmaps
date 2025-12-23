@@ -4,9 +4,10 @@ import torch.nn.functional as F
 
 ALPHA = 0.3
 BETA = 0.7
+GAMMA = 4/3
 AD_LOSS_NAMES = ['MSELoss', 'L1Loss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss', 'JSDLoss']
 
-class LossConfig():
+class SARLossConfig():
     """Special loss handling object for training SAR flood mapping models. Includes
     logic for handling shift invariant loss calculation, adjusting the window
     inside the true label to align it properly with the SAR patch."""
@@ -17,14 +18,35 @@ class LossConfig():
         self.uses_autodespeckler = ad_cfg is not None
 
         # classifier logit output losses
-        self.train_loss_fn, self.val_loss_fn, self.test_loss_fn = self.get_losses(cfg, device)
+        # shift losses (diff implementation for train, val, test loops for efficiency)
+        self.shift_train_loss_fn, self.shift_val_loss_fn, self.shift_test_loss_fn = self.get_shift_losses(cfg, device)
+        # non shift loss (same function used for train, val, test)
+        self.non_shift_loss_fn = self.get_non_shift_loss(cfg, device)
 
         # autodespeckler reconstruction losses
         self.ad_loss_fn = get_ad_loss(ad_cfg).to(device) if self.uses_autodespeckler else None
 
-    def compute_loss(self, out_dict, targets, typ='train'):
+    def compute_loss(self, out_dict, targets, typ='train', shift_invariant=True):
         """For autodespeckler architecture, will add reconstruction loss
-        from output of despeckler to the final loss."""
+        from output of despeckler to the final loss.
+        
+        Parameters
+        ----------
+        out_dict : dict
+            Dictionary containing the output of the model.
+        targets : torch.Tensor
+            True labels
+        typ : str
+            Type of loss to compute necessary for shift invariant loss.
+            Must be one of 'train', 'val', 'test'.
+        shift_invariant : bool
+            Whether to compute shift invariant loss.
+        
+        Returns
+        -------
+        loss_dict : dict
+            Dictionary containing the computed loss.
+        """
         # autodespeckler loss component - calculate reconstruction loss with respect to sar input
         loss_dict = dict()
         if self.uses_autodespeckler:
@@ -48,14 +70,17 @@ class LossConfig():
                     raise Exception('recons_loss + kld_loss is nan or inf')
 
         # classifier loss component + true label (shifted or not) + shift indices
-        if typ == 'train':
-            main_loss, y_true, shift_indices = self.train_loss_fn(out_dict['classifier_output'], targets)
-        elif typ == 'val':
-            main_loss, y_true, shift_indices = self.val_loss_fn(out_dict['classifier_output'], targets)
-        elif typ == 'test':
-            main_loss, y_true, shift_indices = self.test_loss_fn(out_dict['classifier_output'], targets)
+        if shift_invariant:
+            if typ == 'train':
+                main_loss, y_true, shift_indices = self.shift_train_loss_fn(out_dict['classifier_output'], targets)
+            elif typ == 'val':
+                main_loss, y_true, shift_indices = self.shift_val_loss_fn(out_dict['classifier_output'], targets)
+            elif typ == 'test':
+                main_loss, y_true, shift_indices = self.shift_test_loss_fn(out_dict['classifier_output'], targets)
+            else:
+                raise Exception('Invalid argument: typ not equal to one of train, val, test.')
         else:
-            raise Exception('Invalid argument: typ not equal to one of train, val, test.')
+            main_loss, y_true, shift_indices = self.non_shift_loss_fn(out_dict['classifier_output'], targets)
 
         total_loss = (
             self.cfg.train.balance_coeff * recons_loss + main_loss
@@ -67,9 +92,19 @@ class LossConfig():
         loss_dict['shift_indices'] = shift_indices
         return loss_dict
 
-    def get_label_alignment(self, inputs, targets):
+    def get_label_alignment(self, inputs, targets, shift_invariant=True):
         """Get the window of the target label that aligns best with the
         prediction, along with the shift indices used.
+
+        Parameters
+        ----------
+        inputs : torch.Tensor
+            Predicted logits
+        targets : torch.Tensor
+            True labels
+        shift_invariant : bool
+            Whether to align using shift invariant loss. If false returns
+            centered window with the same centered indices.
         
         Returns
         -------
@@ -78,62 +113,75 @@ class LossConfig():
         shift_indices : tuple of (torch.Tensor, torch.Tensor)
             (row_shifts, col_shifts) for each patch in batch
         """
-        _, y_shifted, shift_indices = self.val_loss_fn(inputs, targets)
+        if shift_invariant:
+            _, y_shifted, shift_indices = self.shift_val_loss_fn(inputs, targets)
+        else:
+            _, y_shifted, shift_indices = self.non_shift_loss_fn(inputs, targets)
         return y_shifted, shift_indices
 
-    def get_losses(self, cfg, device):
+    def get_shift_losses(self, cfg, device):
         """Chooses the type of loss used for training, validation, testing loop,
         and also based on whether losses used are shift invariant and
         best for memory performance."""
-        if cfg.train.loss == 'BCELoss':
-            if cfg.train.shift_invariant:
-                train_loss_fn = TrainShiftInvariantLoss(InvariantBCELoss(pos_weight=cfg.train.pos_weight), device=device)
-                val_loss_fn = ShiftInvariantLoss(InvariantBCELoss(pos_weight=cfg.train.pos_weight), device=device)
-                test_loss_fn = val_loss_fn
-            else:
-                # non shift wrapper
-                train_loss_fn = NonShiftInvariantLoss(nn.BCEWithLogitsLoss(pos_weight=cfg.train.pos_weight),
-                                                    size=cfg.data.size,
-                                                    window=cfg.data.window,
+        loss_name = cfg.train.loss
+        assert loss_name in ['BCELoss', 'BCEDiceLoss', 'TverskyLoss', 'FocalTverskyLoss'], 'Loss function not supported.'
+        if loss_name == 'BCELoss':
+            train_loss_fn = TrainShiftInvariantLoss(InvariantBCELoss(pos_weight=cfg.train.pos_weight), device=device)
+            val_loss_fn = test_loss_fn = ShiftInvariantLoss(InvariantBCELoss(pos_weight=cfg.train.pos_weight), device=device)
+        elif loss_name == 'BCEDiceLoss':
+            train_loss_fn = TrainShiftInvariantLoss(InvariantBCEDiceLoss(pos_weight=cfg.train.pos_weight), device=device)
+            val_loss_fn = test_loss_fn = ShiftInvariantLoss(InvariantBCEDiceLoss(pos_weight=cfg.train.pos_weight), device=device)
+        elif loss_name == 'TverskyLoss':
+            train_loss_fn = TrainShiftInvariantLoss(InvariantTverskyLoss(alpha=cfg.train.tversky.alpha,
+                                                                        beta=1-cfg.train.tversky.alpha),
                                                     device=device)
-                val_loss_fn = train_loss_fn
-                test_loss_fn = train_loss_fn
-        elif cfg.train.loss == 'BCEDiceLoss':
-            if cfg.train.shift_invariant:
-                train_loss_fn = TrainShiftInvariantLoss(InvariantBCEDiceLoss(pos_weight=cfg.train.pos_weight), device=device)
-                val_loss_fn = ShiftInvariantLoss(InvariantBCEDiceLoss(pos_weight=cfg.train.pos_weight), device=device)
-                test_loss_fn = val_loss_fn
-            else:
-                train_loss_fn = NonShiftInvariantLoss(BCEDiceLoss(pos_weight=cfg.train.pos_weight),
-                                                    size=cfg.data.size,
-                                                    window=cfg.data.window,
+            val_loss_fn = test_loss_fn = ShiftInvariantLoss(InvariantTverskyLoss(alpha=cfg.train.tversky.alpha,
+                                                    beta=1-cfg.train.tversky.alpha),
                                                     device=device)
-                val_loss_fn = train_loss_fn
-                test_loss_fn = train_loss_fn
-        elif cfg.train.loss == 'TverskyLoss':
-            if cfg.train.shift_invariant:
-                train_loss_fn = TrainShiftInvariantLoss(
-                    InvariantTverskyLoss(alpha=cfg.train.tversky.alpha,
-                                         beta=1-cfg.train.tversky.alpha),
-                                         device=device)
-                val_loss_fn = ShiftInvariantLoss(
-                    InvariantTverskyLoss(alpha=cfg.train.tversky.alpha,
-                                         beta=1-cfg.train.tversky.alpha),
-                                         device=device)
-                test_loss_fn = val_loss_fn
-            else:
-                train_loss_fn = NonShiftInvariantLoss(
-                    TverskyLoss(alpha=cfg.train.tversky.alpha,
-                                beta=1-cfg.train.tversky.alpha),
-                                size=cfg.data.size,
-                                window=cfg.data.window,
-                                device=device)
-                val_loss_fn = train_loss_fn
-                test_loss_fn = train_loss_fn
+        elif loss_name == 'FocalTverskyLoss':
+            train_loss_fn = TrainShiftInvariantLoss(InvariantFocalTverskyLoss(alpha=cfg.train.tversky.alpha,
+                                                        beta=1-cfg.train.tversky.alpha,
+                                                        gamma=cfg.train.focal_tversky.gamma),
+                                                    device=device)
+            val_loss_fn = test_loss_fn = ShiftInvariantLoss(InvariantFocalTverskyLoss(alpha=cfg.train.tversky.alpha,
+                                                        beta=1-cfg.train.tversky.alpha,
+                                                        gamma=cfg.train.focal_tversky.gamma),
+                                                    device=device)
         else:
             raise Exception('Loss function not found.')
 
         return train_loss_fn, val_loss_fn, test_loss_fn
+    
+    def get_non_shift_loss(self, cfg, device):
+        """Returns the loss function used for non shift invariant loss, which
+        is the same for train, val, test loops."""
+        loss_name = cfg.train.loss
+        assert loss_name in ['BCELoss', 'BCEDiceLoss', 'TverskyLoss', 'FocalTverskyLoss'], 'Loss function not supported.'
+        if loss_name == 'BCELoss':
+            return NonShiftInvariantLoss(nn.BCEWithLogitsLoss(pos_weight=cfg.train.pos_weight),
+                                        size=cfg.data.size,
+                                        window=cfg.data.window,
+                                        device=device)
+        elif loss_name == 'BCEDiceLoss':
+            return NonShiftInvariantLoss(BCEDiceLoss(pos_weight=cfg.train.pos_weight),
+                                        size=cfg.data.size,
+                                        window=cfg.data.window,
+                                        device=device)
+        elif loss_name == 'TverskyLoss':
+            return NonShiftInvariantLoss(TverskyLoss(alpha=cfg.train.tversky.alpha,
+                                            beta=1-cfg.train.tversky.alpha),
+                                        size=cfg.data.size,
+                                        window=cfg.data.window,
+                                        device=device)
+        elif loss_name == 'FocalTverskyLoss':
+            return NonShiftInvariantLoss(FocalTverskyLoss(alpha=cfg.train.tversky.alpha,
+                                            beta=1-cfg.train.tversky.alpha,
+                                            gamma=cfg.train.focal_tversky.gamma),
+                                        size=cfg.data.size,
+                                        window=cfg.data.window,
+                                        device=device)
+        else:
+            raise Exception('Loss function not found.')
 
     def contains_reconstruction_loss(self):
         return self.uses_autodespeckler
@@ -258,7 +306,7 @@ class JSD(nn.Module):
         return jsd_vv + jsd_vh
 
 class BCEDiceLoss(nn.Module):
-    def __init__(self, weight=None, size_average=True, pos_weight=None):
+    def __init__(self, pos_weight=None):
         super().__init__()
         # optional positive class weighting for the BCE component only
         self.pos_weight = pos_weight
@@ -282,7 +330,7 @@ class BCEDiceLoss(nn.Module):
         return BCEDice
 
 class TverskyLoss(nn.Module):
-    def __init__(self, alpha=ALPHA, beta=BETA, weight=None, size_average=True):
+    def __init__(self, alpha=ALPHA, beta=BETA):
         super().__init__()
         self.alpha = alpha
         self.beta = beta
@@ -304,6 +352,33 @@ class TverskyLoss(nn.Module):
         Tversky = (TP + smooth) / (TP + self.alpha * FP + self.beta * FN + smooth)
 
         return 1 - Tversky
+
+class FocalTverskyLoss(nn.Module):
+    """Implements FTL as defined in https://arxiv.org/pdf/1810.07842"""
+    def __init__(self, alpha=ALPHA, beta=BETA, gamma=GAMMA):
+        super().__init__()
+        assert 1 <= gamma <= 3, "Gamma must be in [1, 3]"
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+
+    def forward(self, inputs, targets, smooth=1):
+
+        # comment out if your model contains a sigmoid or equivalent activation layer
+        inputs = F.sigmoid(inputs)
+
+        # flatten label and prediction tensors
+        inputs = inputs.reshape(-1)
+        targets = targets.reshape(-1)
+
+        #True Positives, False Positives & False Negatives
+        TP = (inputs * targets).sum()
+        FP = ((1-targets) * inputs).sum()
+        FN = (targets * (1-inputs)).sum()
+
+        Tversky = (TP + smooth) / (TP + self.alpha * FP + self.beta * FN + smooth)
+
+        return (1 - Tversky) ** self.gamma
 
 class InvariantBCELoss(nn.Module):
     """BCE loss with per-sample (patch) reduction for use with ShiftInvariantLoss.
@@ -450,6 +525,53 @@ class InvariantTverskyLoss(nn.Module):
 
         return 1 - Tversky
 
+class InvariantFocalTverskyLoss(nn.Module):
+    """Focal Tversky loss with per-sample (patch) reduction for use with ShiftInvariantLoss.
+    
+    Unlike standard loss functions which reduce across the entire batch (returning a scalar),
+    this loss reduces across pixels *within each sample*, returning a tensor of shape (batch_size,)
+    with one loss value per sample. This per-sample output is required by ShiftInvariantLoss to
+    find the optimal alignment shift independently for each sample in the batch.
+
+    Parameters
+    ----------
+    alpha : float, optional
+        Weight for false positives. Default is ALPHA constant.
+    beta : float, optional
+        Weight for false negatives. Default is BETA constant.
+    gamma : float, optional
+        Focusing parameter in [1, 3]. Default is GAMMA constant.
+
+    Returns
+    -------
+    torch.Tensor
+        Loss tensor of shape (batch_size,) containing Focal Tversky loss for each sample.
+    """
+    def __init__(self, alpha=ALPHA, beta=BETA, gamma=GAMMA):
+        super().__init__()
+        assert 1 <= gamma <= 3, "Gamma must be in [1, 3]"
+        self.register_buffer('alpha', torch.tensor(alpha))
+        self.register_buffer('beta', torch.tensor(beta))
+        self.register_buffer('gamma', torch.tensor(gamma))
+
+    def forward(self, inputs, targets, smooth=1):
+        # comment out if your model contains a sigmoid or equivalent activation layer
+        inputs = F.sigmoid(inputs)
+
+        # flatten label and prediction tensors but sample wise
+        inputs = inputs.reshape(inputs.shape[0], -1)
+        targets = targets.reshape(targets.shape[0], -1)
+
+        #True Positives, False Positives & False Negatives
+        TP = (inputs * targets).sum(axis=1) # sum across samples
+        FP = ((1-targets) * inputs).sum(axis=1)
+        FN = (targets * (1-inputs)).sum(axis=1)
+
+        # want this to be list of size samples
+        Tversky = (TP + smooth) / (TP + self.alpha * FP + self.beta * FN + smooth)
+
+        return (1 - Tversky) ** self.gamma
+
 class ShiftInvariantLoss(nn.Module):
     """Implementation of a shift invariant loss function. Given a batch size B of input patches of dimension N x N
     and corresponding target patches of dimension M x M, where M > N, the loss function calculates the minimum
@@ -465,7 +587,7 @@ class ShiftInvariantLoss(nn.Module):
     Parameters
     ----------
     loss : obj
-        Instance of InvariantBCELoss, InvariantBCEDiceLoss, InvariantTverskyLoss
+        Instance of InvariantBCELoss, InvariantBCEDiceLoss, InvariantTverskyLoss, InvariantFocalTverskyLoss
     device : str
     
     Returns
@@ -535,7 +657,7 @@ class TrainShiftInvariantLoss(nn.Module):
     Parameters
     ----------
     loss : obj
-        Instance of InvariantBCELoss, InvariantBCEDiceLoss, InvariantTverskyLoss
+        Instance of InvariantBCELoss, InvariantBCEDiceLoss, InvariantTverskyLoss, InvariantFocalTverskyLoss
     device : str
     
     Returns
@@ -605,7 +727,7 @@ class NonShiftInvariantLoss(nn.Module):
     Parameters
     ----------
     loss : obj
-        Instance of BCELoss, BCEDiceLoss, TverskyLoss
+        Instance of BCELoss, BCEDiceLoss, TverskyLoss, FocalTverskyLoss
     device : str
     
     Returns

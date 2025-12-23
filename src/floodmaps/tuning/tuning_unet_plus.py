@@ -106,9 +106,10 @@ def run_s1(parameters, cfg: DictConfig):
     cfg.model.unetpp.deep_supervision = parameters['deep_supervision']
     
     ad_cfg = getattr(cfg, 'ad', None)
+    partition = 'shift_invariant' if cfg.train.shift_invariant else 'non_shift_invariant'
     fmetrics = run_experiment_s1(cfg, ad_cfg=ad_cfg)
-    results = fmetrics.get_metrics(split='val', partition='shift_invariant')
-    return results['core_metrics']['val f1']
+    results = fmetrics.get_metrics(split='val', partition=partition)
+    return results['core_metrics']['val AUPRC']
 
 def run_experiment_s1_ddp_wrapper(rank, world_size, cfg, ad_cfg, result_queue):
     fmetrics = run_experiment_s1_ddp(rank, world_size, cfg, ad_cfg)
@@ -126,6 +127,7 @@ def run_s1_ddp(parameters, cfg: DictConfig):
     cfg.model.unetpp.deep_supervision = parameters['deep_supervision']
 
     ad_cfg = getattr(cfg, 'ad', None)
+    partition = 'shift_invariant' if cfg.train.shift_invariant else 'non_shift_invariant'
     # resolve cfgs before pickling
     resolved_cfg = OmegaConf.to_container(cfg, resolve=True)
     resolved_ad_cfg = OmegaConf.to_container(ad_cfg, resolve=True) if ad_cfg is not None else None
@@ -137,8 +139,8 @@ def run_s1_ddp(parameters, cfg: DictConfig):
 
     # Wait for all processes to finish and get the results
     fmetrics = result_queue.get()
-    results = fmetrics.get_metrics(split='val', partition='shift_invariant')
-    return results['core_metrics']['val f1']
+    results = fmetrics.get_metrics(split='val', partition=partition)
+    return results['core_metrics']['val AUPRC']
 
 def tuning_s1(cfg: DictConfig) -> None:
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -153,9 +155,9 @@ def tuning_s1(cfg: DictConfig) -> None:
     # define the variable you want to optimize
     # We want to create model w dem and model wo dem
     problem = HpProblem()
-    problem.add_hyperparameter((0.00001, 0.01), "learning_rate") # real parameter
-    problem.add_hyperparameter((0.05, 0.40), "dropout")
-    problem.add_hyperparameter(["BCELoss", "BCEDiceLoss", "TverskyLoss"], "loss")
+    problem.add_hyperparameter((0.00001, 0.01, "log-uniform"), "learning_rate") # real parameter
+    problem.add_hyperparameter((0.05, 0.50), "dropout")
+    problem.add_hyperparameter(["BCELoss", "BCEDiceLoss", "TverskyLoss", "FocalTverskyLoss"], "loss")
     problem.add_hyperparameter(['Constant', 'ReduceLROnPlateau'], 'LR_scheduler')
     problem.add_hyperparameter([True, False], "deep_supervision")
 
@@ -175,7 +177,7 @@ def tuning_s1(cfg: DictConfig) -> None:
         method_kwargs.update({"callbacks": [early_stopper]})
 
     # define the evaluator to distribute the computation
-    with Evaluator.create(run_s1, method="process", method_kwargs=method_kwargs) as evaluator:
+    with Evaluator.create(run_s1_ddp, method="process", method_kwargs=method_kwargs) as evaluator:
         print(f"Created new evaluator with {evaluator.num_workers} \
             worker{'s' if evaluator.num_workers > 1 else ''} and config: {method_kwargs}")
         search = CBO(problem, evaluator, surrogate_model="RF", log_dir=search_dir, random_state=cfg.tuning.random_state)

@@ -36,7 +36,7 @@ from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
 from floodmaps.utils.metrics import (PerClassConfusionMatrix, compute_confmat_dict,
                         NLCD_CLASSES, NLCD_GROUPS, SCL_CLASSES, SCL_GROUPS, RunningMeanVar)
 
-from floodmaps.training.loss import LossConfig
+from floodmaps.training.loss import SARLossConfig
 from floodmaps.training.dataset import FloodSampleSARDataset
 from floodmaps.training.optim import get_optimizer
 from floodmaps.training.scheduler import get_scheduler
@@ -44,7 +44,7 @@ from floodmaps.training.scheduler import get_scheduler
 MODEL_NAMES = ['unet', 'unet++']
 AUTODESPECKLER_NAMES = ['CNN1', 'CNN2', 'DAE', 'VAE']
 NOISE_NAMES = ['normal', 'masking', 'log_gamma']
-LOSS_NAMES = ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
+LOSS_NAMES = ['BCELoss', 'BCEDiceLoss', 'TverskyLoss', 'FocalTverskyLoss']
 
 # get our optimizer and metrics
 def train_loop(rank, world_size, model, dataloader, device, optimizer, loss_config,
@@ -82,7 +82,8 @@ def train_loop(rank, world_size, model, dataloader, device, optimizer, loss_conf
         out_dict = model(X_c)
 
         # also pass SAR layers for reconstruction loss
-        loss_dict = loss_config.compute_loss(out_dict, y.float(), typ='train')
+        loss_dict = loss_config.compute_loss(out_dict, y.float(), typ='train',
+                                            shift_invariant=cfg.train.shift_invariant)
         loss = loss_dict['total_loss']
         y_true = loss_dict['true_label']
 
@@ -202,7 +203,8 @@ def test_loop(rank, world_size, model, dataloader, device, loss_config, cfg, ad_
             X_c = X[:, :, c[0]:c[1], c[0]:c[1]]
 
             out_dict = model(X_c)
-            loss_dict = loss_config.compute_loss(out_dict, y.float(), typ='val')
+            loss_dict = loss_config.compute_loss(out_dict, y.float(), typ='val',
+                                                shift_invariant=cfg.train.shift_invariant)
             loss = loss_dict['total_loss']
             y_true = loss_dict['true_label']
             
@@ -333,11 +335,16 @@ def test_loop(rank, world_size, model, dataloader, device, loss_config, cfg, ad_
     return epoch_vloss, epoch_cls_vloss, metrics_dict
 
 def evaluate(model, dataloader, device, loss_config, cfg, ad_cfg, c):
-    """Evaluate metrics on test set without logging. Should only be called by rank 0."""
-    running_tot_vloss = torch.tensor(0.0, device=device)
+    """Evaluate metrics on test set without logging.
+    Computes both shift-invariant and non-shift-invariant loss and
+    metrics. Should only be called by rank 0."""
+    running_tot_shift_vloss = torch.tensor(0.0, device=device)
+    running_tot_non_shift_vloss = torch.tensor(0.0, device=device)
 
     num_batches = len(dataloader)
-    metric_collection = MetricCollection([
+    
+    # Shift-invariant metric collections
+    shift_metric_collection = MetricCollection([
         BinaryAccuracy(threshold=0.5, sync_on_compute=False),
         BinaryPrecision(threshold=0.5, sync_on_compute=False),
         BinaryRecall(threshold=0.5, sync_on_compute=False),
@@ -346,8 +353,21 @@ def evaluate(model, dataloader, device, loss_config, cfg, ad_cfg, c):
         BinaryJaccardIndex(threshold=0.5, sync_on_compute=False),
         BinaryAveragePrecision(thresholds=None, sync_on_compute=False)
     ]).to(device)
-    nlcd_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=NLCD_CLASSES, sync_on_compute=False).to(device)
-    scl_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=SCL_CLASSES, sync_on_compute=False).to(device)
+    shift_nlcd_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=NLCD_CLASSES, sync_on_compute=False).to(device)
+    shift_scl_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=SCL_CLASSES, sync_on_compute=False).to(device)
+    
+    # Non-shift-invariant metric collections
+    non_shift_metric_collection = MetricCollection([
+        BinaryAccuracy(threshold=0.5, sync_on_compute=False),
+        BinaryPrecision(threshold=0.5, sync_on_compute=False),
+        BinaryRecall(threshold=0.5, sync_on_compute=False),
+        BinaryF1Score(threshold=0.5, sync_on_compute=False),
+        BinaryConfusionMatrix(threshold=0.5, sync_on_compute=False),
+        BinaryJaccardIndex(threshold=0.5, sync_on_compute=False),
+        BinaryAveragePrecision(thresholds=None, sync_on_compute=False)
+    ]).to(device)
+    non_shift_nlcd_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=NLCD_CLASSES, sync_on_compute=False).to(device)
+    non_shift_scl_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=SCL_CLASSES, sync_on_compute=False).to(device)
 
     window_size = cfg.data.window
     model.eval()
@@ -361,64 +381,130 @@ def evaluate(model, dataloader, device, loss_config, cfg, ad_cfg, c):
             X_c = X[:, :, c[0]:c[1], c[0]:c[1]]
 
             out_dict = model(X_c)
-            loss_dict = loss_config.compute_loss(out_dict, y.float(), typ='val')
-            loss = loss_dict['total_loss']
-            y_true = loss_dict['true_label']
+            logits = out_dict['classifier_output']
+            y_pred_probs = nn.functional.sigmoid(logits).flatten()
+            
+            # Compute shift-invariant loss and metrics
+            shift_loss_dict = loss_config.compute_loss(out_dict, y.float(), typ='test', shift_invariant=True)
+            shift_loss = shift_loss_dict['total_loss']
+            y_true_shift = shift_loss_dict['true_label']
             
             # Align SCL using shift indices from loss computation
-            row_shifts, col_shifts = loss_dict['shift_indices']
-            scl_classes = align_patches_with_shifts(
+            row_shifts, col_shifts = shift_loss_dict['shift_indices']
+            scl_classes_shift = align_patches_with_shifts(
                 scl_classes_wide, row_shifts, col_shifts, window_size, window_size
             )
+            
+            target_shift = y_true_shift.flatten() > 0.5
+            shift_metric_collection.update(y_pred_probs, target_shift)
+            shift_nlcd_metric_collection.update(y_pred_probs, target_shift, nlcd_classes.flatten())
+            shift_scl_metric_collection.update(y_pred_probs, target_shift, scl_classes_shift.flatten())
+            
+            # Compute non-shift-invariant loss and metrics
+            non_shift_loss_dict = loss_config.compute_loss(out_dict, y.float(), typ='test', shift_invariant=False)
+            non_shift_loss = non_shift_loss_dict['total_loss']
+            y_true_non_shift = non_shift_loss_dict['true_label']
+            
+            # Align SCL using center indices for non-shift
+            row_shifts_ns, col_shifts_ns = non_shift_loss_dict['shift_indices']
+            scl_classes_non_shift = align_patches_with_shifts(
+                scl_classes_wide, row_shifts_ns, col_shifts_ns, window_size, window_size
+            )
+            
+            target_non_shift = y_true_non_shift.flatten() > 0.5
+            non_shift_metric_collection.update(y_pred_probs, target_non_shift)
+            non_shift_nlcd_metric_collection.update(y_pred_probs, target_non_shift, nlcd_classes.flatten())
+            non_shift_scl_metric_collection.update(y_pred_probs, target_non_shift, scl_classes_non_shift.flatten())
+            
+            running_tot_shift_vloss += shift_loss.detach()
+            running_tot_non_shift_vloss += non_shift_loss.detach()
 
-            logits = out_dict['classifier_output']
-            y_pred = nn.functional.sigmoid(logits).flatten()
-            target = y_true.flatten() > 0.5
+    # Compute shift-invariant metrics
+    shift_metric_results = shift_metric_collection.compute()
+    shift_nlcd_metrics_results = shift_nlcd_metric_collection.compute()
+    shift_scl_metrics_results = shift_scl_metric_collection.compute()
+    
+    # Compute non-shift-invariant metrics  
+    non_shift_metric_results = non_shift_metric_collection.compute()
+    non_shift_nlcd_metrics_results = non_shift_nlcd_metric_collection.compute()
+    non_shift_scl_metrics_results = non_shift_scl_metric_collection.compute()
+    
+    epoch_shift_vloss = running_tot_shift_vloss.item() / num_batches
+    epoch_non_shift_vloss = running_tot_non_shift_vloss.item() / num_batches
 
-            metric_collection.update(y_pred, target)
-            nlcd_metric_collection.update(y_pred, target, nlcd_classes.flatten())
-            scl_metric_collection.update(y_pred, target, scl_classes.flatten())
-            running_tot_vloss += loss.detach()
-
-    metric_results = metric_collection.compute()
-    nlcd_metrics_results = nlcd_metric_collection.compute()
-    scl_metrics_results = scl_metric_collection.compute()
-    epoch_vloss = running_tot_vloss.item() / num_batches
-
-    core_metrics_dict = {
-        "test accuracy": metric_results['BinaryAccuracy'].item(),
-        "test precision": metric_results['BinaryPrecision'].item(),
-        "test recall": metric_results['BinaryRecall'].item(),
-        "test f1": metric_results['BinaryF1Score'].item(),
-        "test IoU": metric_results['BinaryJaccardIndex'].item(),
-        "test AUPRC": metric_results['BinaryAveragePrecision'].item()
+    # Build shift-invariant core metrics dict
+    shift_core_metrics_dict = {
+        "test accuracy": shift_metric_results['BinaryAccuracy'].item(),
+        "test precision": shift_metric_results['BinaryPrecision'].item(),
+        "test recall": shift_metric_results['BinaryRecall'].item(),
+        "test f1": shift_metric_results['BinaryF1Score'].item(),
+        "test IoU": shift_metric_results['BinaryJaccardIndex'].item(),
+        "test AUPRC": shift_metric_results['BinaryAveragePrecision'].item()
     }
     
-    confusion_matrix = metric_results['BinaryConfusionMatrix'].tolist()
-    confusion_matrix_dict = {
-        "tn": confusion_matrix[0][0],
-        "fp": confusion_matrix[0][1],
-        "fn": confusion_matrix[1][0],
-        "tp": confusion_matrix[1][1]
+    # Build non-shift-invariant core metrics dict
+    non_shift_core_metrics_dict = {
+        "test accuracy": non_shift_metric_results['BinaryAccuracy'].item(),
+        "test precision": non_shift_metric_results['BinaryPrecision'].item(),
+        "test recall": non_shift_metric_results['BinaryRecall'].item(),
+        "test f1": non_shift_metric_results['BinaryF1Score'].item(),
+        "test IoU": non_shift_metric_results['BinaryJaccardIndex'].item(),
+        "test AUPRC": non_shift_metric_results['BinaryAveragePrecision'].item()
     }
-    nlcd_metrics_dict = compute_confmat_dict(nlcd_metrics_results,
-                                            nlcd_metric_collection.get_class_to_idx(),
+    
+    # Build shift-invariant confusion matrix and per-class metrics
+    shift_confusion_matrix = shift_metric_results['BinaryConfusionMatrix'].tolist()
+    shift_confusion_matrix_dict = {
+        "tn": shift_confusion_matrix[0][0],
+        "fp": shift_confusion_matrix[0][1],
+        "fn": shift_confusion_matrix[1][0],
+        "tp": shift_confusion_matrix[1][1]
+    }
+    shift_nlcd_metrics_dict = compute_confmat_dict(shift_nlcd_metrics_results,
+                                            shift_nlcd_metric_collection.get_class_to_idx(),
                                             NLCD_CLASSES, groups=NLCD_GROUPS)
-    scl_metrics_dict = compute_confmat_dict(scl_metrics_results,
-                                            scl_metric_collection.get_class_to_idx(),
+    shift_scl_metrics_dict = compute_confmat_dict(shift_scl_metrics_results,
+                                            shift_scl_metric_collection.get_class_to_idx(),
                                             SCL_CLASSES, groups=SCL_GROUPS)
-    metric_collection.reset()
-    nlcd_metric_collection.reset()
-    scl_metric_collection.reset()
+    
+    # Build non-shift-invariant confusion matrix and per-class metrics
+    non_shift_confusion_matrix = non_shift_metric_results['BinaryConfusionMatrix'].tolist()
+    non_shift_confusion_matrix_dict = {
+        "tn": non_shift_confusion_matrix[0][0],
+        "fp": non_shift_confusion_matrix[0][1],
+        "fn": non_shift_confusion_matrix[1][0],
+        "tp": non_shift_confusion_matrix[1][1]
+    }
+    non_shift_nlcd_metrics_dict = compute_confmat_dict(non_shift_nlcd_metrics_results,
+                                            non_shift_nlcd_metric_collection.get_class_to_idx(),
+                                            NLCD_CLASSES, groups=NLCD_GROUPS)
+    non_shift_scl_metrics_dict = compute_confmat_dict(non_shift_scl_metrics_results,
+                                            non_shift_scl_metric_collection.get_class_to_idx(),
+                                            SCL_CLASSES, groups=SCL_GROUPS)
+    
+    # Reset all metric collections
+    shift_metric_collection.reset()
+    shift_nlcd_metric_collection.reset()
+    shift_scl_metric_collection.reset()
+    non_shift_metric_collection.reset()
+    non_shift_nlcd_metric_collection.reset()
+    non_shift_scl_metric_collection.reset()
 
-    metrics_dict = {
-        'core_metrics': core_metrics_dict,
-        'confusion_matrix': confusion_matrix_dict,
-        'nlcd_metrics': nlcd_metrics_dict,
-        'scl_metrics': scl_metrics_dict
+    # Return both shift-invariant and non-shift-invariant metrics
+    shift_metrics_dict = {
+        'core_metrics': shift_core_metrics_dict,
+        'confusion_matrix': shift_confusion_matrix_dict,
+        'nlcd_metrics': shift_nlcd_metrics_dict,
+        'scl_metrics': shift_scl_metrics_dict
+    }
+    non_shift_metrics_dict = {
+        'core_metrics': non_shift_core_metrics_dict,
+        'confusion_matrix': non_shift_confusion_matrix_dict,
+        'nlcd_metrics': non_shift_nlcd_metrics_dict,
+        'scl_metrics': non_shift_scl_metrics_dict
     }
 
-    return epoch_vloss, metrics_dict
+    return epoch_shift_vloss, epoch_non_shift_vloss, shift_metrics_dict, non_shift_metrics_dict
 
 def train(rank, world_size, model, train_loader, val_loader, test_loader, device, cfg, ad_cfg, run, cache_dir=None):
     # log weights and gradients each epoch
@@ -453,7 +539,7 @@ def train(rank, world_size, model, train_loader, val_loader, test_loader, device
         run.config.update({"train.pos_weight": pos_weight_val}, allow_val_change=True)
     
     # initialize loss functions - train loss function is optimized for gradient calculations
-    loss_cfg = LossConfig(cfg, ad_cfg=ad_cfg, device=device)
+    loss_cfg = SARLossConfig(cfg, ad_cfg=ad_cfg, device=device)
 
     # optimizer and scheduler for reducing learning rate
     optimizer = get_optimizer(model, cfg)
@@ -553,9 +639,12 @@ def train(rank, world_size, model, train_loader, val_loader, test_loader, device
 
         # for benchmarking purposes
         if cfg.eval.mode == 'test':
-            test_loss, test_set_metrics = evaluate(model, test_loader, device, loss_cfg, cfg, ad_cfg, c)
-            fmetrics.save_metrics('test', partition=partition, loss=test_loss, **test_set_metrics)
-            run.summary.update({f'final model {key}': value for key, value in test_set_metrics['core_metrics'].items()})
+            # benchmark both non shift and shift invariant metrics
+            shift_test_loss, non_shift_test_loss, shift_test_set_metrics, non_shift_test_set_metrics = evaluate(model, test_loader, device, loss_cfg, cfg, ad_cfg, c)
+            fmetrics.save_metrics('test', partition="shift_invariant", loss=shift_test_loss, **shift_test_set_metrics)
+            fmetrics.save_metrics('test', partition="non_shift_invariant", loss=non_shift_test_loss, **non_shift_test_set_metrics)
+            run.summary.update({f'final model shift {key}': value for key, value in shift_test_set_metrics['core_metrics'].items()})
+            run.summary.update({f'final model non shift {key}': value for key, value in non_shift_test_set_metrics['core_metrics'].items()})
 
     return cls_weights, ad_weights, fmetrics
 
@@ -625,7 +714,7 @@ def sample_predictions(model, sample_set, mean, std, cfg, ad_cfg, sample_dir, da
     if cfg.wandb.num_sample_predictions <= 0:
         return None
 
-    loss_config = LossConfig(cfg, ad_cfg=ad_cfg, device='cpu')
+    loss_config = SARLossConfig(cfg, ad_cfg=ad_cfg, device='cpu')
     columns = ["id", "tci", "nlcd", "scl"] # TCI, NLCD, SCL always included
     channels = [bool(int(x)) for x in cfg.data.channels]
     my_channels = SARChannelIndexer(channels)
@@ -684,7 +773,8 @@ def sample_predictions(model, sample_set, mean, std, cfg, ad_cfg, sample_dir, da
             out_dict = model(X_c.unsqueeze(0))
             logits = out_dict['classifier_output']
             despeckler_output = out_dict['despeckler_output'].squeeze(0) if model.uses_autodespeckler() else None
-            y_shifted, shift_indices = loss_config.get_label_alignment(logits, y.unsqueeze(0).float())
+            y_shifted, shift_indices = loss_config.get_label_alignment(logits, y.unsqueeze(0).float(),
+                                                                    shift_invariant=cfg.train.shift_invariant)
             y_shifted = y_shifted.squeeze(0)
 
         y_pred = torch.where(nn.functional.sigmoid(logits) > 0.5, 1.0, 0.0).squeeze(0) # (1, x, y)
@@ -990,6 +1080,9 @@ def validate_config(cfg):
     assert cfg.save in [True, False], "Save must be a boolean"
     if cfg.train.loss == 'TverskyLoss':
         assert 0.0 <= cfg.train.tversky.alpha <= 1.0, "Tversky alpha must be in [0, 1]"
+    if cfg.train.loss == 'FocalTverskyLoss':
+        assert 0.0 <= cfg.train.tversky.alpha <= 1.0, "Focal Tversky alpha must be in [0, 1]"
+        assert 1 <= cfg.train.focal_tversky.gamma <= 3, "Focal Tversky gamma must be in [1, 3]"
     assert cfg.train.lr > 0, "Learning rate must be positive"
     assert cfg.train.loss in LOSS_NAMES, f"Loss must be one of {LOSS_NAMES}"
     assert cfg.train.optimizer in ['Adam', 'SGD', 'AdamW'], f"Optimizer must be one of {['Adam', 'SGD', 'AdamW']}"

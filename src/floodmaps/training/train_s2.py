@@ -27,7 +27,7 @@ from floodmaps.utils.utils import flatten_dict, get_model_params, Metrics, Early
 from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
 from floodmaps.utils.metrics import PerClassConfusionMatrix, compute_confmat_dict, NLCD_CLASSES, NLCD_GROUPS, SCL_CLASSES, SCL_GROUPS
 
-from floodmaps.training.loss import BCEDiceLoss, TverskyLoss
+from floodmaps.training.loss import BCEDiceLoss, TverskyLoss, FocalTverskyLoss
 from floodmaps.training.dataset import FloodSampleS2Dataset
 from floodmaps.training.optim import get_optimizer
 from floodmaps.training.scheduler import get_scheduler
@@ -36,7 +36,7 @@ from floodmaps.training.scheduler import get_scheduler
 # COULD ALSO CONSIDER REMOVING DISCRIMINATOR, ONLY ATTACHING FOR TEST SET EVALUATION
 
 MODEL_NAMES = ['unet', 'unet++']
-LOSS_NAMES = ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
+LOSS_NAMES = ['BCELoss', 'BCEDiceLoss', 'TverskyLoss', 'FocalTverskyLoss']
 
 def get_loss_fn(cfg, device=None, pos_weight=None):
     if cfg.train.loss == 'BCELoss':
@@ -54,6 +54,8 @@ def get_loss_fn(cfg, device=None, pos_weight=None):
             loss_fn = BCEDiceLoss()
     elif cfg.train.loss == 'TverskyLoss':
         loss_fn = TverskyLoss(alpha=cfg.train.tversky.alpha, beta=1-cfg.train.tversky.alpha)
+    elif cfg.train.loss == 'FocalTverskyLoss':
+        loss_fn = FocalTverskyLoss(alpha=cfg.train.tversky.alpha, beta=1-cfg.train.tversky.alpha, gamma=cfg.train.focal_tversky.gamma)
     else:
         raise Exception(f'Loss function not found. Must be one of {LOSS_NAMES}')
 
@@ -669,6 +671,9 @@ def validate_config(cfg):
     assert cfg.save in [True, False], "Save must be a boolean"
     if cfg.train.loss == 'TverskyLoss':
         assert 0.0 <= cfg.train.tversky.alpha <= 1.0, "Tversky alpha must be in [0, 1]"
+    if cfg.train.loss == 'FocalTverskyLoss':
+        assert 0.0 <= cfg.train.tversky.alpha <= 1.0, "Focal Tversky alpha must be in [0, 1]"
+        assert 1 <= cfg.train.focal_tversky.gamma <= 3, "Focal Tversky gamma must be in [1, 3]"
     assert cfg.train.batch_size is not None and cfg.train.batch_size > 0, "Batch size must be defined and positive"
     assert cfg.train.lr > 0, "Learning rate must be positive"
     assert cfg.train.loss in LOSS_NAMES, f"Loss must be one of {LOSS_NAMES}"

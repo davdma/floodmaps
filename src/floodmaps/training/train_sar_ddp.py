@@ -885,13 +885,13 @@ def sample_predictions(model, sample_set, mean, std, cfg, ad_cfg, sample_dir, da
 
     return table
 
-def init_distributed(rank, world_size):
+def init_distributed(rank, world_size, free_port):
     os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "23304"
+    os.environ["MASTER_PORT"] = str(free_port)
     torch.cuda.set_device(rank)
     dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
-def run_experiment_s1(rank, world_size, cfg, ad_cfg=None):
+def run_experiment_s1(rank, world_size, free_port, cfg, ad_cfg=None):
     """Run a single node, multi-GPU S1 SAR model experiment given the configuration parameters.
 
     NOTE: For OmegaConf objects, pass in OmegaConf.to_container(cfg, resolve=True)
@@ -903,6 +903,8 @@ def run_experiment_s1(rank, world_size, cfg, ad_cfg=None):
         The rank of the current process
     world_size : int
         The total number of processes
+    free_port : int
+        The free port for the DDP process
     cfg : dict
         Config dictionary for the SAR classifier.
     ad_cfg : dict, optional
@@ -917,7 +919,7 @@ def run_experiment_s1(rank, world_size, cfg, ad_cfg=None):
     cfg = OmegaConf.create(cfg)
     ad_cfg = OmegaConf.create(ad_cfg) if ad_cfg is not None else None
 
-    init_distributed(rank, world_size)
+    init_distributed(rank, world_size, free_port)
 
     if rank == 0 and not wandb.login():
         raise Exception("Failed to login to wandb.")
@@ -1096,6 +1098,13 @@ def validate_config(cfg):
     assert cfg.wandb.project is not None, "Wandb project must be specified"
     assert validate_channels(cfg.data.channels), "Channels must be a binary string of length 8"
 
+def find_free_port():
+    """Returns free master port for DDP"""
+    import socket
+    with socket.socket() as sock:
+        sock.bind(('', 0))
+        return sock.getsockname()[1]
+
 @hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig):
     validate_config(cfg)
@@ -1106,8 +1115,10 @@ def main(cfg: DictConfig):
     resolved_ad_cfg = OmegaConf.to_container(ad_cfg, resolve=True) if ad_cfg is not None else None
 
     world_size = torch.cuda.device_count()
+    free_port = find_free_port()
     print(f"world_size = {world_size}")
-    mp.spawn(run_experiment_s1, args=(world_size, resolved_cfg, resolved_ad_cfg), nprocs=world_size)
+    print(f"Found free port: {free_port}")
+    mp.spawn(run_experiment_s1, args=(world_size, free_port, resolved_cfg, resolved_ad_cfg), nprocs=world_size)
 
 if __name__ == '__main__':
     main()

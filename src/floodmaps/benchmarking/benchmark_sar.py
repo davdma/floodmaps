@@ -137,7 +137,8 @@ def save_config(config_path: Path, cfg: DictConfig) -> None:
 
 
 def compute_summary_statistics(trials_df: pd.DataFrame, 
-                               exclude_cols: list = None) -> Dict[str, Any]:
+                               exclude_cols: list = None,
+                               prefix: str = '') -> Dict[str, Any]:
     """Compute mean and std for all numeric metric columns.
     
     Parameters
@@ -164,12 +165,12 @@ def compute_summary_statistics(trials_df: pd.DataFrame,
         valid_values = trials_df[col].dropna()
         
         if len(valid_values) > 0:
-            stats[f'mean_{col}'] = float(valid_values.mean())
-            stats[f'std_{col}'] = float(valid_values.std())
+            stats[f'mean_{prefix}_{col}'] = float(valid_values.mean())
+            stats[f'std_{prefix}_{col}'] = float(valid_values.std())
         else:
             # All values were None/NaN
-            stats[f'mean_{col}'] = None
-            stats[f'std_{col}'] = None
+            stats[f'mean_{prefix}_{col}'] = None
+            stats[f'std_{prefix}_{col}'] = None
     
     return stats
 
@@ -192,9 +193,9 @@ def save_summary(summary_path: Path, summary: Dict[str, Any]) -> None:
 def benchmark_sar(cfg: DictConfig) -> None:
     """Benchmarks SAR classifier model on test set with multiple random seeds.
     
-    Runs n trials with different random seeds, collects all metrics (core metrics,
-    NLCD group metrics, SCL group metrics), and computes summary statistics.
-    Supports checkpointing for resuming interrupted runs.
+    Runs n trials with different random seeds, collects all metrics for shift
+    and non-shift invariant cases(core metrics, NLCD group metrics, SCL group metrics),
+    and computes summary statistics. Supports checkpointing for resuming interrupted runs.
     
     The benchmark saves three files:
     1. {config_id}_trials.csv - Individual trial results with all metrics
@@ -235,9 +236,6 @@ def benchmark_sar(cfg: DictConfig) -> None:
     """
     assert cfg.eval.mode == 'test', 'Benchmarking must be run on test set.'
     
-    # Determine partition based on shift invariance setting
-    partition = 'shift_invariant' if cfg.train.shift_invariant else 'non_shift_invariant'
-    
     # Get autodespeckler config if present
     ad_cfg = getattr(cfg, 'ad', None)
     
@@ -245,7 +243,8 @@ def benchmark_sar(cfg: DictConfig) -> None:
     save_dir = Path(cfg.benchmarking.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     config_id = cfg.benchmarking.config_id
-    trials_path = save_dir / f"{config_id}_trials.csv"
+    shift_trials_path = save_dir / f"{config_id}_shift_trials.csv"
+    non_shift_trials_path = save_dir / f"{config_id}_non_shift_trials.csv"
     config_path = save_dir / f"{config_id}_config.yaml"
     summary_path = save_dir / f"{config_id}_summary.csv"
     
@@ -253,8 +252,9 @@ def benchmark_sar(cfg: DictConfig) -> None:
     save_config(config_path, cfg)
     
     # Load or initialize trials DataFrame
-    trials_df = load_trials_checkpoint(trials_path)
-    count = len(trials_df)
+    shift_trials_df = load_trials_checkpoint(shift_trials_path)
+    non_shift_trials_df = load_trials_checkpoint(non_shift_trials_path)
+    count = len(shift_trials_df)
     
     if count > 0:
         print(f"Resuming from trial {count + 1}/{cfg.benchmarking.trials}")
@@ -284,29 +284,40 @@ def benchmark_sar(cfg: DictConfig) -> None:
             
             # Extract all metrics (automatically handles any structure changes)
             # SAR uses partitions, so we pass the partition parameter
-            trial_metrics = extract_trial_metrics(fmetrics, split=cfg.eval.mode, partition=partition)
+            shift_trial_metrics = extract_trial_metrics(fmetrics, split=cfg.eval.mode, partition="shift_invariant")
+            non_shift_trial_metrics = extract_trial_metrics(fmetrics, split=cfg.eval.mode, partition="non_shift_invariant")
             
             # Add metadata
-            trial_results = {
+            shift_trial_results = {
                 'trial': trial_num,
                 'seed': trial_seed,
-                **trial_metrics
+                **shift_trial_metrics
+            }
+            non_shift_trial_results = {
+                'trial': trial_num,
+                'seed': trial_seed,
+                **non_shift_trial_metrics
             }
             
             # Append to DataFrame
-            trials_df = pd.concat(
-                [trials_df, pd.DataFrame([trial_results])], 
+            shift_trials_df = pd.concat(
+                [shift_trials_df, pd.DataFrame([shift_trial_results])], 
+                ignore_index=True
+            )
+            non_shift_trials_df = pd.concat(
+                [non_shift_trials_df, pd.DataFrame([non_shift_trial_results])], 
                 ignore_index=True
             )
             
             # Save checkpoint after each trial
-            save_trials_checkpoint(trials_path, trials_df)
-            print(f"Trial {trial_num + 1} completed and saved to {trials_path}")
-            
+            save_trials_checkpoint(shift_trials_path, shift_trials_df)
+            save_trials_checkpoint(non_shift_trials_path, non_shift_trials_df)
+            print(f"Trial {trial_num + 1} completed. Shift metrics saved to {shift_trials_path}, non-shift metrics saved to {non_shift_trials_path}")
         except Exception as err:
             err.add_note(f'Happened on benchmark trial number {trial_num + 1}.')
             print(f'\nERROR: Trial {trial_num + 1} failed. Checkpoint saved.')
-            save_trials_checkpoint(trials_path, trials_df)
+            save_trials_checkpoint(shift_trials_path, shift_trials_df)
+            save_trials_checkpoint(non_shift_trials_path, non_shift_trials_df)
             raise err
     
     count += cur_evals
@@ -318,7 +329,8 @@ def benchmark_sar(cfg: DictConfig) -> None:
         print(f"{'='*70}\n")
         
         # Compute summary statistics
-        stats = compute_summary_statistics(trials_df)
+        shift_stats = compute_summary_statistics(shift_trials_df, prefix="shift")
+        non_shift_stats = compute_summary_statistics(non_shift_trials_df, prefix="non_shift")
         
         # Build summary with metadata columns first
         summary = {
@@ -331,19 +343,22 @@ def benchmark_sar(cfg: DictConfig) -> None:
             'channels': cfg.data.channels,
             'shift_invariant': cfg.train.shift_invariant,
             'trials': cfg.benchmarking.trials,
-            **stats
+            **shift_stats,
+            **non_shift_stats
         }
         
         # Save summary
         save_summary(summary_path, summary)
         
         print(f"Benchmark complete!")
-        print(f"  - Trials: {trials_path}")
+        print(f"  - Shift trials: {shift_trials_path}")
+        print(f"  - Non-shift trials: {non_shift_trials_path}")
         print(f"  - Config: {config_path}")
         print(f"  - Summary: {summary_path}")
     else:
         print(f"\nProgress: {count}/{cfg.benchmarking.trials} trials completed")
-        print(f"Checkpoint saved to: {trials_path}")
+        print(f"Checkpoint saved to: {shift_trials_path}")
+        print(f"Checkpoint saved to: {non_shift_trials_path}")
         print(f"Run again to continue from trial {count + 1}")
 
 

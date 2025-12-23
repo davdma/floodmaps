@@ -13,8 +13,13 @@ import torch.multiprocessing as mp
 
 from floodmaps.training.train_s2 import run_experiment_s2
 from floodmaps.training.train_sar import run_experiment_s1
-from floodmaps.training.train_sar_ddp import run_experiment_s1 as run_experiment_s1_ddp
+from floodmaps.training.train_sar_ddp import run_experiment_s1 as run_experiment_s1_ddp, find_free_port
 from floodmaps.utils.tuning_utils import load_stopper_info, save_stopper_info, print_save_best_params, save_problem
+
+# FIX FOR S1 DISTRIBUTED RUN MULTIPROCESSING CONTEXT CONFLICT
+# Set spawn method BEFORE any multiprocessing objects are created
+# This ensures DeepHyper's process pool and mp.spawn use the same context
+mp.set_start_method("spawn", force=True)
 
 def run_s2(parameters, cfg: DictConfig):
     cfg.train.loss = parameters['loss']
@@ -106,13 +111,13 @@ def run_s1(parameters, cfg: DictConfig):
     cfg.model.unetpp.deep_supervision = parameters['deep_supervision']
     
     ad_cfg = getattr(cfg, 'ad', None)
-    partition = 'shift_invariant' if cfg.train.shift_invariant else 'non_shift_invariant'
     fmetrics = run_experiment_s1(cfg, ad_cfg=ad_cfg)
+    partition = 'shift_invariant' if cfg.train.shift_invariant else 'non_shift_invariant'
     results = fmetrics.get_metrics(split='val', partition=partition)
     return results['core_metrics']['val AUPRC']
 
-def run_experiment_s1_ddp_wrapper(rank, world_size, cfg, ad_cfg, result_queue):
-    fmetrics = run_experiment_s1_ddp(rank, world_size, cfg, ad_cfg)
+def run_experiment_s1_ddp_wrapper(rank, world_size, free_port, cfg, ad_cfg, result_queue):
+    fmetrics = run_experiment_s1_ddp(rank, world_size, free_port, cfg, ad_cfg)
 
     # Only rank 0 reports the result
     if rank == 0 and fmetrics is not None:
@@ -127,18 +132,20 @@ def run_s1_ddp(parameters, cfg: DictConfig):
     cfg.model.unetpp.deep_supervision = parameters['deep_supervision']
 
     ad_cfg = getattr(cfg, 'ad', None)
-    partition = 'shift_invariant' if cfg.train.shift_invariant else 'non_shift_invariant'
     # resolve cfgs before pickling
     resolved_cfg = OmegaConf.to_container(cfg, resolve=True)
     resolved_ad_cfg = OmegaConf.to_container(ad_cfg, resolve=True) if ad_cfg is not None else None
     world_size = torch.cuda.device_count()
     print(f"world_size = {world_size}")
+    free_port = find_free_port()
+    print(f"Found free port: {free_port}")
 
     result_queue = mp.SimpleQueue()
-    mp.spawn(run_experiment_s1_ddp_wrapper, args=(world_size, resolved_cfg, resolved_ad_cfg, result_queue), nprocs=world_size)
+    mp.spawn(run_experiment_s1_ddp_wrapper, args=(world_size, free_port, resolved_cfg, resolved_ad_cfg, result_queue), nprocs=world_size)
 
     # Wait for all processes to finish and get the results
     fmetrics = result_queue.get()
+    partition = 'shift_invariant' if cfg.train.shift_invariant else 'non_shift_invariant'
     results = fmetrics.get_metrics(split='val', partition=partition)
     return results['core_metrics']['val AUPRC']
 

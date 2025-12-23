@@ -125,12 +125,16 @@ class SARLossConfig():
         best for memory performance."""
         loss_name = cfg.train.loss
         assert loss_name in ['BCELoss', 'BCEDiceLoss', 'TverskyLoss', 'FocalTverskyLoss'], 'Loss function not supported.'
+        
+        # Get pos_weight as float - loss classes handle float-to-tensor conversion internally
+        pos_weight = getattr(cfg.train, 'pos_weight', None)
+        
         if loss_name == 'BCELoss':
-            train_loss_fn = TrainShiftInvariantLoss(InvariantBCELoss(pos_weight=cfg.train.pos_weight), device=device)
-            val_loss_fn = test_loss_fn = ShiftInvariantLoss(InvariantBCELoss(pos_weight=cfg.train.pos_weight), device=device)
+            train_loss_fn = TrainShiftInvariantLoss(InvariantBCELoss(pos_weight=pos_weight), device=device)
+            val_loss_fn = test_loss_fn = ShiftInvariantLoss(InvariantBCELoss(pos_weight=pos_weight), device=device)
         elif loss_name == 'BCEDiceLoss':
-            train_loss_fn = TrainShiftInvariantLoss(InvariantBCEDiceLoss(pos_weight=cfg.train.pos_weight), device=device)
-            val_loss_fn = test_loss_fn = ShiftInvariantLoss(InvariantBCEDiceLoss(pos_weight=cfg.train.pos_weight), device=device)
+            train_loss_fn = TrainShiftInvariantLoss(InvariantBCEDiceLoss(pos_weight=pos_weight), device=device)
+            val_loss_fn = test_loss_fn = ShiftInvariantLoss(InvariantBCEDiceLoss(pos_weight=pos_weight), device=device)
         elif loss_name == 'TverskyLoss':
             train_loss_fn = TrainShiftInvariantLoss(InvariantTverskyLoss(alpha=cfg.train.tversky.alpha,
                                                                         beta=1-cfg.train.tversky.alpha),
@@ -157,13 +161,19 @@ class SARLossConfig():
         is the same for train, val, test loops."""
         loss_name = cfg.train.loss
         assert loss_name in ['BCELoss', 'BCEDiceLoss', 'TverskyLoss', 'FocalTverskyLoss'], 'Loss function not supported.'
+        
+        # Get pos_weight as float - our custom loss classes handle conversion internally
+        pos_weight = getattr(cfg.train, 'pos_weight', None)
+        
         if loss_name == 'BCELoss':
-            return NonShiftInvariantLoss(nn.BCEWithLogitsLoss(pos_weight=cfg.train.pos_weight),
+            # nn.BCEWithLogitsLoss requires pos_weight to be a tensor, so convert here
+            pos_weight_tensor = torch.tensor(float(pos_weight), device=device) if pos_weight is not None else None
+            return NonShiftInvariantLoss(nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor),
                                         size=cfg.data.size,
                                         window=cfg.data.window,
                                         device=device)
         elif loss_name == 'BCEDiceLoss':
-            return NonShiftInvariantLoss(BCEDiceLoss(pos_weight=cfg.train.pos_weight),
+            return NonShiftInvariantLoss(BCEDiceLoss(pos_weight=pos_weight),
                                         size=cfg.data.size,
                                         window=cfg.data.window,
                                         device=device)
@@ -307,9 +317,13 @@ class JSD(nn.Module):
 
 class BCEDiceLoss(nn.Module):
     def __init__(self, pos_weight=None):
+        """pos_weight can be a float or tensor - will be converted to tensor and registered as buffer."""
         super().__init__()
         # optional positive class weighting for the BCE component only
-        self.pos_weight = pos_weight
+        if pos_weight is None:
+            self.pos_weight = None
+        else:
+            self.register_buffer('pos_weight', torch.as_tensor(pos_weight))
 
     def forward(self, inputs, targets, smooth=1):
         # BCE Loss (use logits)
@@ -332,8 +346,8 @@ class BCEDiceLoss(nn.Module):
 class TverskyLoss(nn.Module):
     def __init__(self, alpha=ALPHA, beta=BETA):
         super().__init__()
-        self.alpha = alpha
-        self.beta = beta
+        self.register_buffer('alpha', torch.as_tensor(alpha))
+        self.register_buffer('beta', torch.as_tensor(beta))
 
     def forward(self, inputs, targets, smooth=1):
 
@@ -358,9 +372,9 @@ class FocalTverskyLoss(nn.Module):
     def __init__(self, alpha=ALPHA, beta=BETA, gamma=GAMMA):
         super().__init__()
         assert 1 <= gamma <= 3, "Gamma must be in [1, 3]"
-        self.alpha = alpha
-        self.beta = beta
-        self.gamma = gamma
+        self.register_buffer('alpha', torch.as_tensor(alpha))
+        self.register_buffer('beta', torch.as_tensor(beta))
+        self.register_buffer('gamma', torch.as_tensor(gamma))
 
     def forward(self, inputs, targets, smooth=1):
 
@@ -406,9 +420,18 @@ class InvariantBCELoss(nn.Module):
     """
     def __init__(self, weight=None, reduction='mean', pos_weight=None):
         super().__init__()
-        self.weight = weight
         self.reduction = reduction
-        self.pos_weight = pos_weight
+        
+        # Use register_buffer for tensor parameters (ensures device consistency)
+        if weight is None:
+            self.weight = None
+        else:
+            self.register_buffer('weight', torch.as_tensor(weight))
+            
+        if pos_weight is None:
+            self.pos_weight = None
+        else:
+            self.register_buffer('pos_weight', torch.as_tensor(pos_weight))
 
     def forward(self, inputs, targets):
         # remove if your model contains a sigmoid or equivalent activation layer

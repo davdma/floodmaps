@@ -327,14 +327,14 @@ class BCEDiceLoss(nn.Module):
 
     def forward(self, inputs, targets, smooth=1):
         # BCE Loss (use logits)
-        logits = inputs.view(-1)
+        logits = inputs.reshape(-1)
 
         # remove if your model contains a sigmoid or equivalent activation layer
         probs = F.sigmoid(inputs)
 
         # flatten label and prediction tensors
-        probs = probs.view(-1)
-        targets = targets.view(-1)
+        probs = probs.reshape(-1)
+        targets = targets.reshape(-1)
 
         intersection = (probs * targets).sum()
         dice_loss = 1 - (2. * intersection + smooth) / (probs.sum() + targets.sum() + smooth)

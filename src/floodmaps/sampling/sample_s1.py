@@ -307,6 +307,25 @@ def main(cfg: DictConfig) -> None:
     ----------
     cfg : DictConfig
         Configuration object.
+    
+    cfg.sampling parameters
+    -----------------------
+    dir_path : str
+        Path to directory with already downloaded S2 samples.
+    within_days : int
+        Number of days surrounding S2 dates allowed for S1 download.
+    maxcoverpercentage : int
+        Maximum cloud and no data cover percentage.
+    replace : bool
+        Whether to overwrite existing SAR files found in the S2 sample folder
+    source : str
+        Source for S1 data. ['mpc', 'aws', 'cdse']
+    max_runtime : str
+        Maximum runtime in the format of HH:MM:SS
+        
+    Returns
+    -------
+    int
     """
     assert cfg.sampling.dir_path is not None, 'Need to specify a directory'
     assert Path(cfg.sampling.dir_path).is_dir(), 'Directory invalid'

@@ -29,7 +29,6 @@ from floodmaps.utils.sampling_utils import (
     NLCD_CODE_TO_RGB,
     PRISMData,
     DateCRSOrganizer,
-    get_default_dir_name,
     get_date_interval,
     has_date_after_PRISM,
     setup_logging,

@@ -29,7 +29,6 @@ from floodmaps.utils.sampling_utils import (
     NLCD_CODE_TO_RGB,
     PRISMData,
     DateCRSOrganizer,
-    get_default_dir_name,
     get_date_interval,
     has_date_after_PRISM,
     setup_logging,
@@ -1463,7 +1462,15 @@ def event_sample(s2_stac_provider, s1_stac_provider, event_date, event_precip, p
     logger.info('Metadata and raster generation completed. Event finished.')
     return True
 
-def run_sample_s2_s1(cfg: DictConfig) -> None:
+def get_default_dir_name(threshold: int, days_before: int, days_after: int, maxcoverpercentage: int, region: str = None) -> str:
+    """Default directory name."""
+    if region is None:
+        return f's2_s1_{threshold}_{days_before}_{days_after}_{maxcoverpercentage}/'
+    else:
+        return f's2_s1_{region}_{threshold}_{days_before}_{days_after}_{maxcoverpercentage}/'
+
+@hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
+def main(cfg: DictConfig) -> None:
     """
     Samples imagery of events queried from PRISM using a given minimum precipitation threshold.
     Downloaded samples will contain multispectral data and sar data from within specified interval of event date between
@@ -1484,6 +1491,38 @@ def run_sample_s2_s1(cfg: DictConfig) -> None:
 
     Note: In the future if more L2A data become available, some previously processed and skipped events become viable.
     In that case do not use history object during run.
+
+    Parameters
+    ----------
+    cfg : DictConfig
+        Configuration object.
+    
+    cfg.sampling parameters
+    -----------------------
+    threshold : int
+        Minimum daily cumulative precipitation (mm) threshold for search
+    days_before : int
+        Number of days of interest before precipitation event.
+    days_after : int
+        Number of days of interest following precipitation event.
+    maxcoverpercentage : int
+        Maximum cloud and no data cover percentage.
+    maxevents: int or None
+        Specify a limit to the number of extreme precipitation events to process.
+    within_hours : int
+        Floods event must have S1 and S2 data within this many hours.
+    region : str, optional
+        Region to sample from.
+    manual : str, optional
+        Path to text file containing manual event indices in lines with format: time, y, x
+    s2_source : str
+        Source for S2 data. ['mpc', 'aws', 'cdse']
+    s1_source : str
+        Source for S1 data. ['mpc', 'aws', 'cdse']
+        
+    Returns
+    -------
+    int
     """
     # make directory
     if cfg.sampling.dir_path is None:
@@ -1620,9 +1659,6 @@ def run_sample_s2_s1(cfg: DictConfig) -> None:
     rootLogger.debug(f"Number of events already completed: {alr_completed}")
     rootLogger.debug(f"Number of successful events sampled from this run: {count}/{search_count}")
 
-@hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
-def main(cfg: DictConfig) -> None:
-    run_sample_s2_s1(cfg)
 
 if __name__ == '__main__':
     main()

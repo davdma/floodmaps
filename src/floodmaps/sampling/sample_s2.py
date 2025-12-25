@@ -29,7 +29,6 @@ from floodmaps.utils.sampling_utils import (
     NLCD_CODE_TO_RGB,
     PRISMData,
     DateCRSOrganizer,
-    get_default_dir_name,
     get_date_interval,
     has_date_after_PRISM,
     setup_logging,
@@ -1222,7 +1221,14 @@ def event_sample(stac_provider, event_date, event_precip, prism_bbox, eid, dir_p
     
     logger.info('Metadata and raster generation completed. Event finished.')
     return True
-    
+
+def get_default_dir_name(threshold: int, days_before: int, days_after: int, maxcoverpercentage: int, region: str = None) -> str:
+    """Default directory name."""
+    if region is None:
+        return f's2_{threshold}_{days_before}_{days_after}_{maxcoverpercentage}/'
+    else:
+        return f's2_{region}_{threshold}_{days_before}_{days_after}_{maxcoverpercentage}/'
+
 @hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig) -> None:
     """

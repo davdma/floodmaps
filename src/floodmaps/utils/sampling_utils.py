@@ -426,12 +426,17 @@ def db_scale(x: np.ndarray, no_data: int = -9999) -> np.ndarray:
         Array of SAR data.
     no_data : int
         No_data value to set invalid values to.
+        
+    Returns
+    -------
+    np.ndarray
+        New array with values converted to dB scale.
     """
+    result = np.empty_like(x)
     nonzero_mask = x > 0
-    missing_mask = x <= 0
-    x[nonzero_mask] = 10 * np.log10(x[nonzero_mask])
-    x[missing_mask] = no_data
-    return x
+    result[nonzero_mask] = 10 * np.log10(x[nonzero_mask])
+    result[~nonzero_mask] = no_data
+    return result
 
 def setup_logging(
     output_dir: str,

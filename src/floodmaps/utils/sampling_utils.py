@@ -110,6 +110,10 @@ class PRISMData:
         """Get PRISM reference date (day 0)."""
         return datetime.fromisoformat(num2date(0, units=self.time_info[0], calendar=self.time_info[1]).isoformat())
     
+    def get_last_date(self) -> datetime:
+        """Get last available date in PRISM data."""
+        return datetime.fromisoformat(num2date(self.precip_data.shape[0] - 1, units=self.time_info[0], calendar=self.time_info[1]).isoformat())
+    
     def get_event_datetime(self, time_index: int) -> datetime:
         """Get datetime.datetime object for specific time index in PRISM data."""
         return datetime.fromisoformat(num2date(time_index, units=self.time_info[0], calendar=self.time_info[1]).isoformat())
@@ -359,13 +363,6 @@ class NoElevationError(Exception):
     """Exception raised when elevation data is not found."""
     pass
 
-def get_default_dir_name(threshold: int, days_before: int, days_after: int, maxcoverpercentage: int, region: str = None) -> str:
-    """Default directory name for sampling scripts."""
-    if region is None:
-        return f'samples_{threshold}_{days_before}_{days_after}_{maxcoverpercentage}/'
-    else:
-        return f'samples_{region}_{threshold}_{days_before}_{days_after}_{maxcoverpercentage}/'
-
 def get_date_interval(event_date: str, days_before: int, days_after: int) -> str:
     """Returns a date interval made of a tuple of start and end date strings given event date string and 
     number of days extending before and after the event.
@@ -532,6 +529,62 @@ def parse_date_string(date_string: str) -> datetime:
             continue
 
     raise ValueError(f"Date string '{date_string}' doesn't match expected formats YYYYMMDD or YYYY-MM-DD")
+
+def read_cell_coords(txt_file: str) -> List[Tuple[datetime, int, int, str]]:
+    """
+    Reads in y, x coordinates with optional 3rd parameter specifying CRS (e.g., EPSG:32617).
+    If not provided, defaults to None for automatic CRS selection.
+    Used for specifying cells for multitemporal SAR sampling script.
+
+    Parameters
+    ----------
+    txt_file : str
+        Path to text file containing y, x coordinates, optionally with CRS.
+
+    Returns
+    -------
+    List[Tuple[int, int, str]]
+        List of tuples containing y, x coordinates and optional CRS string.
+    """
+    def validate_epsg(code: str) -> bool:
+        """Validate EPSG code."""
+        if not re.fullmatch(r"EPSG:\d+", code):
+            return False
+        try:
+            CRS.from_string(code)
+            return True
+        except Exception:
+            return False
+
+    cells = []
+    with open(txt_file, 'r') as f:
+        for lineno, line in enumerate(f, 1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith('#'):  # skip empty lines and comments
+                continue
+            parts = [p.strip() for p in stripped.split(',')]
+            if len(parts) not in [2, 3]:
+                raise ValueError(f"Line {lineno}: Expected 2 or 3 comma-separated values, got {parts}")
+
+            # Extract CRS if provided (4th parameter)
+            crs = None
+            if len(parts) == 3:
+                if validate_epsg(parts[2]):
+                    crs = parts[2]
+                else:
+                    raise ValueError(f"Line {lineno}: Not a valid CRS: {parts[2]}")
+
+            try:
+                values = tuple(map(int, parts[:2]))
+            except ValueError:
+                raise ValueError(f"Line {lineno}: Invalid integers: {parts[:2]}")
+            if any(v < 0 for v in values):
+                raise ValueError(f"Line {lineno}: All y, x coord values must be non-negative ints: {values}")
+
+            y, x = values
+            cells.append((y, x, crs))
+
+    return cells
 
 def read_manual_indices(manual_file: str) -> List[Tuple[datetime, int, int, str]]:
     """

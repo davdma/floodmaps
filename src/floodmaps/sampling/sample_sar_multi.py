@@ -16,8 +16,24 @@ from typing import List, Tuple, Dict
 from fiona.transform import transform
 import hydra
 from omegaconf import DictConfig
+import sys
+import os
+import re
+import random
 
-from floodmaps.utils.sampling_utils import PRISM_CRS, SEARCH_CRS, setup_logging, get_item_crs, walltime_seconds
+from floodmaps.utils.stac_providers import get_stac_provider, STACProvider
+
+from floodmaps.utils.sampling_utils import (
+    PRISMData,
+    read_cell_coords,
+    PRISM_CRS,
+    SEARCH_CRS,
+    setup_logging,
+    get_item_crs,
+    walltime_seconds,
+    get_history,
+    db_scale
+)
 
 def is_completed(sample_dir: Path) -> bool:
     """Check if the sample has already been processed."""
@@ -25,17 +41,6 @@ def is_completed(sample_dir: Path) -> bool:
         any(sample_dir.glob("vv_*.tif")) and \
         any(sample_dir.glob("vh_*.tif")) and \
         any(sample_dir.glob("metadata.json"))
-
-def get_bbox(sample: str) -> Tuple[float, float, float, float]:
-    with open(sample + 'metadata.json') as json_data:
-        d = json.load(json_data)
-        event_date = d['metadata']['Precipitation Event Date']
-        minx = d['metadata']['Bounding Box']['minx']
-        miny = d['metadata']['Bounding Box']['miny']
-        maxx = d['metadata']['Bounding Box']['maxx']
-        maxy = d['metadata']['Bounding Box']['maxy']
-        
-    return event_date, minx, miny, maxx, maxy
 
 def get_date_interval(start_dt, end_dt):
     """Returns a date interval from start date to end date.
@@ -51,46 +56,6 @@ def get_date_interval(start_dt, end_dt):
         Interval with start and end date strings formatted as YYYY-MM-DD.
     """
     return start_dt.strftime("%Y-%m-%d") + '/' + end_dt.strftime("%Y-%m-%d")
-
-def db_scale(x: np.ndarray) -> np.ndarray:
-    """Convert SAR backscatter to dB scale."""
-    nonzero_mask = x > 0
-    missing_mask = x <= 0
-    x[nonzero_mask] = 10 * np.log10(x[nonzero_mask])
-    x[missing_mask] = -9999
-    return x
-
-def get_sar_items(bbox: Tuple[float, float, float, float], 
-                  time_of_interest: str,
-                  logger: logging.Logger) -> List:
-    """Query Planetary Computer STAC API for Sentinel-1 items."""
-    max_attempts = 3
-    for attempt in range(1, max_attempts + 1):
-        try:
-            catalog = pystac_client.Client.open(
-                "https://planetarycomputer.microsoft.com/api/stac/v1"
-            )
-            
-            search = catalog.search(
-                collections=["sentinel-1-rtc"],
-                bbox=bbox,
-                datetime=time_of_interest
-            )
-            
-            items = search.item_collection()
-            logger.info(f"Found {len(items)} SAR scenes")
-            return items
-            
-        except pystac_client.exceptions.APIError as err:
-            logger.error(f'PySTAC API Error: {err}, {type(err)}')
-            if attempt == max_attempts:
-                logger.error(f'Maximum number of attempts reached. Exiting.')
-                return []
-            else:
-                logger.info(f'Retrying ({attempt}/{max_attempts})...')
-        except Exception as err:
-            logger.error(f'Catalog search failed: {err}, {type(err)}')
-            raise err
 
 def reproject(href, target_crs, resampling=Resampling.bilinear):
     """
@@ -142,7 +107,7 @@ def validate_shapes(temporal_data: Dict[str, np.ndarray], logger: logging.Logger
     return fixed_temporal_data
 
 def download_and_process_sar(items: List, 
-                           output_dir: str,
+                           dir_path: Path,
                            bbox: Tuple[float, float, float, float],
                            acquisitions: int,
                            allow_missing: bool,
@@ -153,8 +118,8 @@ def download_and_process_sar(items: List,
     ----------
     items : List
         List of STAC items to process.
-    output_dir : str
-        Output directory for saving files.
+    dir_path : Path
+        Directory path for saving files.
     bbox : Tuple[float, float, float, float]
         Bounding box of the search area in SEARCH_CRS = EPSG:4326.
     acquisitions : int
@@ -271,15 +236,21 @@ def download_and_process_sar(items: List,
     dates_obj = [datetime.strptime(date, '%Y-%m-%d') for date in dates]
     start_dt = min(dates_obj)
     end_dt = max(dates_obj)
+
     # Save metadata
     metadata = {
+        "Download Date": datetime.now().strftime('%Y-%m-%d'),
+        "Sample ID": eid,
+        "CRS": crs,
+        "Bounding Box": bbox,
+        "S1 Products": s1_products,
+        "Source": source,
         'first_acquisition': start_dt.strftime('%Y-%m-%d'),
         'last_acquisition': end_dt.strftime('%Y-%m-%d'),
         'acquisition_dates': dates,
         'search_bbox': bbox,
         'transform': vv_transform,
         'search_crs': SEARCH_CRS,
-        'item_crs': crs
     }
     
     return temporal_data, metadata
@@ -327,55 +298,90 @@ def save_multitemporal(temporal_data: Dict[str, np.ndarray],
     # save metadata as json file
     metadata_path = SAVE_DIR / 'metadata.json'
     metadata.pop('transform')
-    with open(metadata_path, 'w') as f:
-        json.dump(metadata, f)
+    with open(metadata_path, 'w') as json_file:
+        json.dump(metadata, json_file, indent=4)
 
-def download_multi(search_bbox: Tuple[float, float, float, float], search_start_dt: object,
-                search_end_dt: object, event_dt: object, eid: str, cfg: DictConfig, logger: logging.Logger):
-    """Downloads and composites SAR data for a given time interval and stack size.
-    
-    Parameters
-    ----------
-    search_bbox : Tuple[float, float, float, float]
-        Bounding box of the search area.
-    search_start_dt : datetime object
-        Start date of the search interval.
-    search_end_dt : datetime object
-        End date of the search interval.
-    event_dt : datetime object
-        Date of the flood event.
-    eid : str
-        Event ID of the flood event.
-    cfg : DictConfig
-        Configuration object.
-    logger : logging.Logger
-        Logger for logging messages.
-    """
+def multi_sample(s1_stac_provider: STACProvider, y: int, x: int, crs: str, eid: str,
+            dir_path: Path, prism_data: PRISMData, seed: int,
+            cfg: DictConfig, logger: logging.Logger):
+    """Downloads and composites SAR data for a given time interval and stack size."""
+
+    def valid_interval_start_idx(arr, N, X, x=0):
+        """
+        Return start indices i (0 <= i <= L-N) such that
+        arr[max(0, i-x) : i+N] has all values < X.
+        """
+        arr = np.asarray(arr)
+        L = arr.shape[0]
+        if N <= 0 or N > L:
+            return np.array([], dtype=int)
+        if x < 0:
+            raise ValueError("x must be >= 0")
+
+        bad = (arr >= X).astype(np.int32)                 # 1 where condition fails
+        pref = np.concatenate(([0], np.cumsum(bad)))      # pref[k] = #bad in arr[:k]
+
+        i = np.arange(L - N + 1)
+        a = np.maximum(0, i - x)
+        b = i + N
+
+        bad_count = pref[b] - pref[a]                     # #bad in arr[a:b]
+        return np.flatnonzero(bad_count == 0)
+
     # should log and save the time interval of composite: i.e. the date of the
     # first and last acquisitions
-    logger.info(f'Downloading multitemporal sar for bbox {search_bbox} \
-                with time interval {cfg.sampling.time_interval} between {search_start_dt} and {search_end_dt}.')
+    prism_bbox = prism_data.get_bounding_box(x, y)
+    minx, miny, maxx, maxy = prism_bbox
+    conversion = transform(PRISM_CRS, SEARCH_CRS, (minx, maxx), (miny, maxy))
+    search_bbox = (conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1])
+    rng = random.Random(seed)
 
-    # Get SAR items from STAC API
-    current_start = search_start_dt
-    current_end = current_start + timedelta(days=cfg.sampling.time_interval)
-    found = False
-    fails = 0
-    while current_end <= search_end_dt:
-        # if search interval within num_days of event_date, skip
-        if (event_dt - current_end).days < cfg.sampling.num_days and (current_start - event_dt).days < cfg.sampling.num_days:
-            logger.info(f'Skipping {current_start} to {current_end} due to overlap with event date {event_dt}...')
-            current_start += timedelta(days=cfg.sampling.time_interval)
-            current_end = current_start + timedelta(days=cfg.sampling.time_interval)
-            continue
+    logger.info(f'Downloading multitemporal sar at coordinates {y}, {x} with bbox {search_bbox} and CRS {crs} \
+                with time interval={cfg.sampling.time_interval} and number of intervals={cfg.sampling.num_time_intervals}')
+    
+    # sample a random interval between all prism dates
+    # that does not have precip above a certain threshold if threshold not None
+    # prefilter here
+    prism_data_for_cell = prism_data.precip_data[:, y, x]
 
-        time_of_interest = get_date_interval(current_start, current_end)
+    if cfg.sampling.threshold is not None:
+        all_intervals = list(valid_interval_start_idx(prism_data_for_cell,
+                                                        cfg.sampling.time_interval,
+                                                        cfg.sampling.threshold,
+                                                        x=cfg.sampling.num_days))
+    else:
+        all_intervals = list(range(0, prism_data_for_cell.shape[0]))
+    
+    if len(all_intervals) == 0:
+        logger.error(f'No valid intervals found after prefiltering by threshold={cfg.sampling.threshold}')
+        return
+    
+    rng.shuffle(all_intervals)
+
+    attempts = 0
+    num_intervals_sampled = 0
+    target_intervals_sampled = cfg.sampling.num_time_intervals
+    max_tries = cfg.sampling.max_tries
+    for interval in all_intervals:
+        if num_intervals_sampled >= target_intervals_sampled:
+            logger.info(f"Reached target number of intervals {target_intervals_sampled}. Stopping...")
+            break
+        
+        if attempts >= max_tries:
+            logger.error(f"No SAR scenes found after {max_tries} consecutive failed download attempts. Skipping search for bbox {search_bbox} \
+                        with time interval {cfg.sampling.time_interval}.")
+            return
+
+        interval_start_dt = prism_data.get_event_datetime(interval)
+        interval_end_dt = interval_start_dt + timedelta(days=cfg.sampling.time_interval)
+
+        time_of_interest = get_date_interval(interval_start_dt, interval_end_dt)
         logger.info(f'Searching {time_of_interest}...')
-        items = get_sar_items(search_bbox, time_of_interest, logger)
+        items = s1_stac_provider.search_s1(search_bbox, time_of_interest, query={"sar:instrument_mode": {"eq": "IW"}})
         if len(items) >= cfg.sampling.acquisitions:
             logger.info(f'{len(items)} >= {cfg.sampling.acquisitions} minimum acquisitions found...')
             # Download and process SAR data
-            temporal_data, metadata = download_and_process_sar(items, cfg.sampling.output_dir,
+            temporal_data, metadata = download_and_process_sar(items, dir_path,
                                                               search_bbox, cfg.sampling.acquisitions,
                                                               cfg.sampling.allow_missing,
                                                               logger)
@@ -386,17 +392,10 @@ def download_multi(search_bbox: Tuple[float, float, float, float], search_start_
                 found = True
                 break
 
-        if fails >= 3:
-            logger.error(f"No SAR scenes found after 3 consecutive failed download attempts. Skipping search for bbox {search_bbox} \
-                        with time interval {cfg.sampling.time_interval} between {search_start_dt} and {search_end_dt}.")
-            return
-
-        current_start += timedelta(days=cfg.sampling.time_interval)
-        current_end = current_start + timedelta(days=cfg.sampling.time_interval)
 
     if not found:
         error_msg = f"No SAR scenes found. Skipping search for bbox {search_bbox} \
-                    with time interval {cfg.sampling.time_interval} between {search_start_dt} and {search_end_dt}."
+                    with time interval {cfg.sampling.time_interval}."
         logger.error(error_msg)
         return
     
@@ -412,78 +411,160 @@ def download_multi(search_bbox: Tuple[float, float, float, float], search_start_
     
     logger.info(f"Completed multitemporal SAR data collection and compositing for {search_bbox}")
 
+def get_default_dir_name(time_interval: int, num_time_intervals: int, acquisitions: int, num_days: int) -> str:
+    """Default directory name."""
+    return f's1_multi_{time_interval}_{num_time_intervals}_{acquisitions}_{num_days}/'
 
 @hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig) -> None:
-    """Initializes multitemporal SAR data collection. Compositing should be done
-    during preprocessing of the data, not here.
+    """Runs multitemporal SAR data collection on a specified set of PRISM cells.
+    Should specify to script a number of acquisitions to acquire per PRISM cell
+    (the size of the multitemporal stack), the max size of the time interval
+    allowed between first and last acquisition in days, and number of intervals.
+    For each PRISM cell, the script randomly searches time intervals of the
+    specified size within the limits of the global dates search space while
+    avoiding a flood event date if specified (plus minus cfg.sampling.num_days).
 
-    Should specify to script a max number of acquisitions to acquire, and a time
-    interval for samples. It will randomly sample a time interval that fits
-    within the limits of the search space (and avoids the flood event date).
+    For source it is recommended to use 'mpc' for Radiometric Terrain Correction
+    data.
 
-    Metadata should store the date of each acquisition in order and the bounding
-    box of the roi.
+    NOTE: To avoid the failure mode of mixing geometries due to compositing
+    ascending with descending orbits, the acquisitions for each time interval
+    will only contain one orbit. De-duplication is also done for multiple
+    acquisitions on the same datatake.
+    
+    NOTE: Compositing is done during preprocessing of the data, not here.
+
+    Parameters
+    ----------
+    cfg : DictConfig
+        Configuration object.
+    
+    cfg.sampling parameters
+    -----------------------
+    dir_path : str
+        Path to directory where downloaded multitemporal samples will be saved.
+    cells_file : str
+        Path to text file containing cell coordinates in lines with format: y, x
+    seed : int
+        Seed for random sampling time intervals.
+    acquisitions : int
+        Number of acquisitions to download in each random time interval.
+    time_interval : int
+        Time interval in days between first and last acquisition.
+    num_time_intervals : int
+        Number of time intervals to sample for each cell for temporal diversity.
+    threshold : int
+        Precipitation threshold in mm to consider as flood event date and to
+        filter out time intervals. If None then no threshold is applied.
+    num_days : int
+        Number of days after flood event date to avoid sampling.
+    allow_missing : bool
+        If True, allow missing values in the multitemporal SAR data.
+    max_tries : int
+        Max number of time intervals to try for each cell before giving up.
+    max_runtime : str
+        Maximum runtime in the format of HH:MM:SS
+    source : str
+        Source for S1 data. ['mpc', 'aws', 'cdse']
+        
+    Returns
+    -------
+    int
     """
-    # Setup logging
-    logger = setup_logging(
-        cfg.sampling.output_dir,
-        logger_name='multitemporal_sar', 
-        log_level=logging.DEBUG,
-        include_console=False
+    # make directory
+    if cfg.sampling.dir_path is None:
+        cfg.sampling.dir_path = str(Path(cfg.paths.imagery_dir) / get_default_dir_name(cfg.sampling.time_interval, cfg.sampling.num_time_intervals, cfg.sampling.acquisitions, cfg.sampling.num_days))
+        Path(cfg.sampling.dir_path).mkdir(parents=True, exist_ok=True)
+    else:
+        # Create directory if it doesn't exist
+        try:
+            Path(cfg.sampling.dir_path).mkdir(parents=True, exist_ok=True)
+        except (OSError, ValueError) as e:
+            print(f"Invalid directory path '{cfg.sampling.dir_path}'. Using default.", file=sys.stderr)
+            cfg.sampling.dir_path = str(Path(cfg.paths.imagery_dir) / get_default_dir_name(cfg.sampling.time_interval, cfg.sampling.num_time_intervals, cfg.sampling.acquisitions, cfg.sampling.num_days))
+            Path(cfg.sampling.dir_path).mkdir(parents=True, exist_ok=True)
+        
+        # Ensure trailing slash
+        cfg.sampling.dir_path = os.path.join(cfg.sampling.dir_path, '')
+
+    # root logger
+    rootLogger = setup_logging(cfg.sampling.dir_path, logger_name='main', log_level=logging.DEBUG, mode='w', include_console=False)
+
+    # event logger
+    logger = setup_logging(cfg.sampling.dir_path, logger_name='events', log_level=logging.DEBUG, mode='a', include_console=False)
+
+    # log sampling parameters used
+    rootLogger.info(
+        "S1 multitemporal SAR sampling parameters used:\n"
+        f"  Save directory: {cfg.sampling.dir_path}\n"
+        f"  Use cells in file: {cfg.sampling.cells_file}\n"
+        f"  Random seed: {cfg.sampling.seed}\n"
+        f"  Number of acquisitions: {cfg.sampling.acquisitions}\n"
+        f"  Time interval: {cfg.sampling.time_interval}\n"
+        f"  Number of time intervals: {cfg.sampling.num_time_intervals}\n"
+        f"  Precipitation threshold: {cfg.sampling.threshold}\n"
+        f"  Number of days to avoid precip event date: {cfg.sampling.num_days}\n"
+        f"  Allow missing data: {cfg.sampling.allow_missing}\n"
+        f"  Max number of tries: {cfg.sampling.max_tries}\n"
+        f"  Max runtime: {getattr(cfg.sampling, 'max_runtime', 'Unlimited')}\n"
+        f"  Source: {cfg.sampling.source}\n"
     )
     logger.info("Starting multitemporal SAR data collection")
     
-    # log sampling parameters
-    logger.info(f"Max runtime: {getattr(cfg.sampling, 'max_runtime', 'Unlimited')}")
-    
     # to track runtime
-    max_runtime_seconds = (
-        walltime_seconds(cfg.sampling.max_runtime)
-        if hasattr(cfg.sampling, 'max_runtime') and cfg.sampling.max_runtime is not None
-        else float('inf')
-    )
-    start_time = time.time()
-    
-    # global search space:
-    search_start_dt = datetime(2016, 9, 20)
-    search_end_dt = datetime(2025, 4, 29)
+    # max_runtime_seconds = (
+    #     walltime_seconds(cfg.sampling.max_runtime)
+    #     if hasattr(cfg.sampling, 'max_runtime') and cfg.sampling.max_runtime is not None
+    #     else float('inf')
+    # )
+    # start_time = time.time()
 
-    # only do single bbox - for testing purposes
-    if cfg.sampling.bbox is not None:
-        bbox = tuple(cfg.sampling.bbox)
-        minx, miny, maxx, maxy = bbox
-        conversion = transform(PRISM_CRS, SEARCH_CRS, (minx, maxx), (miny, maxy))
+    # history will just be based on cell coords
+    ## Set of (y, x) tuples
+    history = get_history(Path(cfg.sampling.dir_path) / 'history.pickle')
 
-        event_dt = datetime(2017, 8, 26) # placeholder for testing
-        eid = '20170826_487_695'
+    # filter out time intervals containing PRISM precip above a certain threshold (plus minus num_days)
+    # more general
+    # load PRISM data object
+    prism_data = PRISMData.from_file(cfg.paths.prism_data)
 
-        search_bbox = (conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1])
-        download_multi(search_bbox, search_start_dt, search_end_dt, event_dt, eid, cfg, logger)
+    # first gather all the PRISM cells and dates from input directory / manual file
+    ## List of (y, x, crs) tuples where crs can be None
+    if Path(cfg.sampling.cells_file).exists():
+        cells = read_cell_coords(cfg.sampling.cells_file)
     else:
-        # get all bboxes in the sample directory
-        samples = glob('samples_200_6_4_10_sar/*_*_*/')
-        for sample in samples:
-            if time.time() - start_time > max_runtime_seconds:
-                logger.info(f"Maximum runtime of {getattr(cfg.sampling, 'max_runtime', 'Unlimited')} reached. Stopping sample processing...")
-                break
+        raise ValueError(f"Cells file {cfg.sampling.cells_file} does not exist")
 
-            # first check if the sample has already been processed
-            eid = sample.split('/')[-2]
-            sample_dir = Path(cfg.sampling.output_dir) / eid
-            if is_completed(sample_dir):
-                logger.info(f"Sample {eid} already processed. Skipping...")
-                continue
+    # if no cells specified raise
+    if len(cells) == 0:
+        raise ValueError(f"No cells found in file {cfg.sampling.cells_file} for multitemporal SAR sampling")
 
-            event_date, minx, miny, maxx, maxy = get_bbox(sample)
-            conversion = transform(PRISM_CRS, SEARCH_CRS, (minx, maxx), (miny, maxy))
-            search_bbox = (conversion[0][0], conversion[1][0], conversion[0][1], conversion[1][1])
-            event_dt = datetime(int(event_date[0:4]), int(event_date[4:6]), int(event_date[6:8]))
+    logger.info(f"Found {len(cells)} cells in file {cfg.sampling.cells_file} for multitemporal SAR sampling")
+    filtered_cells = [cell for cell in cells if (cell[0], cell[1]) not in history]
+    logger.info(f"Filtered to {len(filtered_cells)} cells not in history for multitemporal SAR sampling")
 
-            logger.info(f'Downloading multitemporal sar for EID {eid}...')
-            download_multi(search_bbox, search_start_dt, search_end_dt, event_dt, eid, cfg, logger)
-    
-    return 0
+    s1_stac_provider = get_stac_provider(cfg.sampling.source.lower(),
+                                        mpc_api_key=getattr(cfg, "mpc_api_key", None),
+                                        aws_access_key_id=getattr(cfg, "aws_access_key_id", None),
+                                        aws_secret_access_key=getattr(cfg, "aws_secret_access_key", None),
+                                        logger=logger)
+
+    sample_dir = Path(cfg.sampling.dir_path)
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    for cell in filtered_cells:
+        y, x, crs = cell
+        logger.info(f"Downloading multitemporal sar for cell {y}, {x} in CRS {crs}...")
+
+        # first check if the sample has already been processed
+        eid = f'{y}_{x}'
+        dir_path = sample_dir / eid
+        if is_completed(dir_path):
+            logger.info(f"Sample {eid} already processed. Skipping...")
+            continue
+
+        multi_sample(s1_stac_provider, y, x, crs, eid, dir_path, prism_data, cfg, logger)
+
 
 if __name__ == '__main__':
     main()

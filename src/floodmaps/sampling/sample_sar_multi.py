@@ -189,7 +189,7 @@ def dedupe_items_by_date(items: List, stac_provider: STACProvider, prism_bbox: T
     return result
 
 
-def process_interval(stac_provider: STACProvider, items_with_info: List[Tuple], dir_path: Path, 
+def process_interval(stac_provider: STACProvider, items_with_info: List[Tuple], dir_path: Path, eid : str,
                      prism_bbox: Tuple[float, float, float, float], orbit_direction: str, crs : Optional[str],
                      logger: logging.Logger) -> Optional[Dict]:
     """Downloads and stacks N SAR acquisitions for a time interval.
@@ -205,6 +205,8 @@ def process_interval(stac_provider: STACProvider, items_with_info: List[Tuple], 
         List of (item, missing_pct, item_crs) tuples sorted by date.
     dir_path : Path
         Directory path for saving files.
+    eid : str
+        Event/cell ID.
     prism_bbox : Tuple[float, float, float, float]
         Bounding box in PRISM CRS.
     orbit_direction : str
@@ -282,7 +284,7 @@ def process_interval(stac_provider: STACProvider, items_with_info: List[Tuple], 
     # Create output filenames
     start_date = acquisition_dates[0].replace('-', '')
     end_date = acquisition_dates[-1].replace('-', '')
-    stack_id = f"multi_{start_date}-{end_date}"
+    stack_id = f"multi_{start_date}-{end_date}_{eid}"
     
     vv_path = dir_path / f"{stack_id}_vv.tif"
     vh_path = dir_path / f"{stack_id}_vh.tif"
@@ -416,7 +418,7 @@ def cell_sample(s1_stac_provider: STACProvider, y: int, x: int, manual_crs: Opti
     target_stacks = cfg.sampling.num_time_intervals
     max_tries = cfg.sampling.max_tries
     stacks_metadata = {}
-    cell_crs = None
+    cell_crs = manual_crs # can be None
     
     for interval_idx in all_intervals:
         if stacks_sampled >= target_stacks:
@@ -484,7 +486,7 @@ def cell_sample(s1_stac_provider: STACProvider, y: int, x: int, manual_crs: Opti
         # Process the interval
         try:
             stack_metadata = process_interval(
-                s1_stac_provider, selected_items, dir_path,
+                s1_stac_provider, selected_items, dir_path, eid,
                 prism_bbox, selected_orbit, cell_crs, logger
             )
             

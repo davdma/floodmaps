@@ -9,6 +9,7 @@ AWS, and other providers.
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, Tuple
 import logging
+import time
 import pystac_client
 import planetary_computer
 from pystac import Item, ItemCollection
@@ -53,8 +54,10 @@ class STACProvider(ABC):
     def search_s2(self,
                   bbox: Tuple[float, float, float, float], 
                   time_of_interest: str, query: dict = None) -> ItemCollection:
-        """Search for Sentinel-2 items."""
-        max_attempts = 3
+        """Search for Sentinel-2 items with exponential backoff retry."""
+        max_attempts = 5
+        base_delay = 1.0  # seconds
+        
         for attempt in range(1, max_attempts + 1):
             try:
                 search = self.catalog.search(
@@ -70,7 +73,9 @@ class STACProvider(ABC):
                     self.logger.error(f'Maximum number of attempts reached. Exiting.')
                     return ItemCollection([])
                 else:
-                    self.logger.info(f'Retrying ({attempt}/{max_attempts})...')
+                    delay = base_delay * (2 ** (attempt - 1))
+                    self.logger.info(f'Retrying in {delay:.1f}s ({attempt}/{max_attempts})...')
+                    time.sleep(delay)
             except Exception as err:
                 self.logger.error(f'Catalog search failed: {err}, {type(err)}')
                 raise err
@@ -79,8 +84,10 @@ class STACProvider(ABC):
                   bbox: Tuple[float, float, float, float], 
                   time_of_interest: str,
                   query: dict = None) -> ItemCollection:
-        """Search for Sentinel-1 items."""
-        max_attempts = 3
+        """Search for Sentinel-1 items with exponential backoff retry."""
+        max_attempts = 5
+        base_delay = 1.0  # seconds
+        
         for attempt in range(1, max_attempts + 1):
             try:
                 search = self.catalog.search(
@@ -96,7 +103,9 @@ class STACProvider(ABC):
                     self.logger.error(f'Maximum number of attempts reached. Exiting.')
                     return ItemCollection([])
                 else:
-                    self.logger.info(f'Retrying ({attempt}/{max_attempts})...')
+                    delay = base_delay * (2 ** (attempt - 1))
+                    self.logger.info(f'Retrying in {delay:.1f}s ({attempt}/{max_attempts})...')
+                    time.sleep(delay)
             except Exception as err:
                 self.logger.error(f'Catalog search failed: {err}, {type(err)}')
                 raise err

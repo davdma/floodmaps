@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 import os
@@ -1081,10 +1082,13 @@ def colormap_to_rgb(arr: np.ndarray, cmap: str = 'viridis', r: Tuple[float, floa
 
     return rgb_array
 
-def crop_to_bounds(item_href, bounds, dst_crs, nodata=0, resampling=Resampling.nearest):
+def crop_to_bounds(item_href, bounds, dst_crs, nodata=0, resampling=Resampling.nearest, 
+                   max_attempts=5, base_delay=1.0):
     """Crops provided raster using a bounding box and corresponding box CRS a single item.
     If the item is in a different CRS than the bounding box, it will be reprojected using a Warped VRT.
     Replaces rasterio.merge.merge() for faster warping and cropping.
+    
+    Includes retry logic with exponential backoff for handling transient connection errors.
     
     Parameters
     ----------
@@ -1098,6 +1102,10 @@ def crop_to_bounds(item_href, bounds, dst_crs, nodata=0, resampling=Resampling.n
         No data value to fill pixels in bounding box that falls outside the raster
     resampling : Resampling, optional
         Resampling method.
+    max_attempts : int, optional
+        Maximum number of retry attempts. Default is 5.
+    base_delay : float, optional
+        Base delay in seconds for exponential backoff. Default is 1.0.
 
     Returns
     -------
@@ -1105,51 +1113,70 @@ def crop_to_bounds(item_href, bounds, dst_crs, nodata=0, resampling=Resampling.n
         Cropped image.
     out_transform : Affine
         Transform of the cropped image.
+        
+    Raises
+    ------
+    rasterio.errors.RasterioIOError
+        If all retry attempts fail.
     """
     dst_w, dst_s, dst_e, dst_n = bounds
-
     dst_crs = CRS.from_string(dst_crs)
-    with rasterio.open(item_href) as src:
-        res = src.res
-        crs = src.crs
-        count = src.count
-        out_transform = Affine.translation(dst_w, dst_n) * Affine.scale(res[0], -res[1])
-        out_width = int(round((dst_e - dst_w) / res[0]))
-        out_height = int(round((dst_n - dst_s) / res[1]))
-        out_shape = (count, out_height, out_width)
+    
+    last_exception = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with rasterio.open(item_href) as src:
+                res = src.res
+                crs = src.crs
+                count = src.count
+                out_transform = Affine.translation(dst_w, dst_n) * Affine.scale(res[0], -res[1])
+                out_width = int(round((dst_e - dst_w) / res[0]))
+                out_height = int(round((dst_n - dst_s) / res[1]))
+                out_shape = (count, out_height, out_width)
 
-        if crs is None:
-            raise ValueError("Source CRS is missing from file.")
+                if crs is None:
+                    raise ValueError("Source CRS is missing from file.")
 
-        # if the file is the same crs, no need to reproject
-        if dst_crs == crs:
-            src_window = windows.from_bounds(dst_w, dst_s, dst_e, dst_n, src.transform)
+                # if the file is the same crs, no need to reproject
+                if dst_crs == crs:
+                    src_window = windows.from_bounds(dst_w, dst_s, dst_e, dst_n, src.transform)
 
-            src_window_rnd_shp = src_window.round_lengths()
-            # need to double check the read args are correct
-            out_image = src.read(
-                out_shape=out_shape,
-                window=src_window_rnd_shp,
-                boundless=True, # in order to allow bounds slightly outside the capture
-                masked=False, # do not want masked array
-                indexes=None,
-                resampling=resampling,
-                fill_value=nodata # fill empty pixels with nodata
+                    src_window_rnd_shp = src_window.round_lengths()
+                    # need to double check the read args are correct
+                    out_image = src.read(
+                        out_shape=out_shape,
+                        window=src_window_rnd_shp,
+                        boundless=True, # in order to allow bounds slightly outside the capture
+                        masked=False, # do not want masked array
+                        indexes=None,
+                        resampling=resampling,
+                        fill_value=nodata # fill empty pixels with nodata
+                    )
+                else:
+                    # need to reproject
+                    vrt_options = {
+                        'resampling': resampling,
+                        'crs': dst_crs,
+                        'transform': out_transform,
+                        'height': out_height,
+                        'width': out_width,
+                        'nodata': nodata
+                    }
+                    with WarpedVRT(src, **vrt_options) as vrt:
+                        out_image = vrt.read()
+
+            return out_image, out_transform
+            
+        except (rasterio.errors.RasterioIOError, OSError) as e:
+            last_exception = e
+            if attempt == max_attempts:
+                raise
+            delay = base_delay * (2 ** (attempt - 1))
+            logging.getLogger(__name__).warning(
+                f"crop_to_bounds failed (attempt {attempt}/{max_attempts}): {e}. "
+                f"Retrying in {delay:.1f}s..."
             )
-        else:
-            # need to reproject
-            vrt_options = {
-                'resampling': resampling,
-                'crs': dst_crs,
-                'transform': out_transform,
-                'height': out_height,
-                'width': out_width,
-                'nodata': nodata
-            }
-            with WarpedVRT(src, **vrt_options) as vrt:
-                out_image = vrt.read()
-
-    return out_image, out_transform
+            time.sleep(delay)
 
 def unzip_file(zip_path: Path, remove_zip: bool = True, extract_to: Path = None) -> None:
     """Unzip a file to the same directory and optionally remove the original zip.

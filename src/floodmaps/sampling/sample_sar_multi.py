@@ -40,6 +40,7 @@ _prism_data: Optional[PRISMData] = None
 # Worker-local state (initialized once per worker via _worker_init)
 _worker_cfg: Optional[DictConfig] = None
 _worker_stac_provider: Optional[STACProvider] = None
+_worker_logger: Optional[logging.Logger] = None
 
 
 def _worker_init(cfg_dict: dict) -> None:
@@ -50,14 +51,28 @@ def _worker_init(cfg_dict: dict) -> None:
     cfg_dict : dict
         Configuration dictionary (from OmegaConf.to_container).
     """
-    global _worker_cfg, _worker_stac_provider
+    global _worker_cfg, _worker_stac_provider, _worker_logger
     _worker_cfg = OmegaConf.create(cfg_dict)
+    
+    # Create worker-specific logger that outputs to stdout
+    pid = os.getpid()
+    _worker_logger = logging.getLogger(f"worker_{pid}")
+    _worker_logger.setLevel(logging.DEBUG)
+    
+    # Only add handler if not already present (avoid duplicate handlers on re-init)
+    if not _worker_logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setLevel(logging.DEBUG)
+        formatter = logging.Formatter(f'[Worker {pid}] %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        _worker_logger.addHandler(handler)
+    
     _worker_stac_provider = get_stac_provider(
         _worker_cfg.sampling.source.lower(),
         mpc_api_key=getattr(_worker_cfg, "mpc_api_key", None),
         aws_access_key_id=getattr(_worker_cfg, "aws_access_key_id", None),
         aws_secret_access_key=getattr(_worker_cfg, "aws_secret_access_key", None),
-        logger=None  # No logging in workers
+        logger=_worker_logger
     )
 
 
@@ -215,7 +230,9 @@ def dedupe_items_by_date(items: List, stac_provider: STACProvider, prism_bbox: T
                     best_item = item
                     best_crs = item_crs
                     
-            except Exception:
+            except Exception as e:
+                if _worker_logger:
+                    _worker_logger.debug(f"Item {item.id} skipped during dedup: {type(e).__name__}: {e}")
                 continue
         
         # Add best item if it passes the missing threshold
@@ -402,6 +419,7 @@ def cell_sample_worker(y: int, x: int, manual_crs: Optional[str],
     cfg = _worker_cfg
     s1_stac_provider = _worker_stac_provider
     prism_data = _prism_data
+    logger = _worker_logger
     
     try:
         # Clean up any partial downloads from previous runs
@@ -461,7 +479,9 @@ def cell_sample_worker(y: int, x: int, manual_crs: Optional[str],
             # Search for S1 items
             try:
                 items = s1_stac_provider.search_s1(search_bbox, time_of_interest, query={"sar:instrument_mode": {"eq": "IW"}})
-            except Exception:
+            except Exception as e:
+                if logger:
+                    logger.warning(f"[{eid}] STAC search failed for interval {interval_idx} ({time_of_interest}): {type(e).__name__}: {e}")
                 attempts += 1
                 continue
             
@@ -516,7 +536,9 @@ def cell_sample_worker(y: int, x: int, manual_crs: Optional[str],
                 
                 stacks_sampled += 1
                 
-            except Exception:
+            except Exception as e:
+                if logger:
+                    logger.warning(f"[{eid}] process_interval failed for interval {interval_idx} ({time_of_interest}): {type(e).__name__}: {e}")
                 attempts += 1
                 continue
         

@@ -495,13 +495,37 @@ def sample_patches_parallel(multi: List[Tuple[Path, Path]], size: int, num_sampl
 
 @hydra.main(version_base=None, config_path='pkg://configs', config_name='config.yaml')
 def main(cfg: DictConfig) -> None:
-    """Preprocesses multitemporal SAR tiles into paired single vs composite patches for conditional generation.
-    Also uses parallel workers.
+    """Preprocesses multitemporal SAR tiles into paired single vs composite patches
+    for conditional generation training. Uses a leave-one-out method where given a
+    time interval with N SAR images, each image is paired with the composite
+    from the remaining N-1 images, producing N pairings of each multitemporal stack of N
+    images.
 
-    Parameters
-    ----------
-    cfg : DictConfig
-        Hydra configuration object containing all preprocessing parameters.
+    Sample directories are s1_multi directories containing SAR imagery across time intervals
+    sampled using the floodmaps/sampling/sample_s1_multi script.
+
+    cfg.preprocess.split_csv should be the path to a CSV file with columns "y", "x", "split"
+    where each PRISM cell coordinate (y, x) is associated with a split "train", "val", "test".
+    If provided, allows for pre determined split rather than random split. This is preferred
+    over the random splitting to avoid data leakage from similar dates / regions.
+
+    NOTE: For large datasets on HPC, use the scratch directory for speed.
+    
+    cfg.preprocess Parameters:
+    - size: int (pixel width of patch)
+    - method: str ['random', 'strided']
+    - samples: int (number of samples per image for random method)
+    - stride: int (for strided method)
+    - missing_percent: float (maximum missing percentage for patch acceptance) (default: 0.0)
+    - seed: int (random number generator seed for random method)
+    - n_workers: int (number of workers for parallel processing)
+    - chunk_size: int (number of tiles to process per worker before saving as temp file) (default: 100)
+    - s1.sample_dirs: List[str] (list of sample directories under cfg.data.imagery_dir)
+    - suffix: str (optional suffix to append to preprocessed folder)
+    - split_csv: str (path to CSV file with columns "y", "x", "split" for PRISM cell coordinates)
+    - val_ratio: used for random splitting if no split_json is provided
+    - test_ratio: used for random splitting if no split_json is provided
+    - scratch_dir: str (optional path to the scratch directory for intermediate files and faster streaming)
     """
     # Extract parameters from config
     logger = logging.getLogger('preprocessing')

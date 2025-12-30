@@ -5,9 +5,13 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 from pathlib import Path
 from typing import Dict, Any, Optional
+import torch
+import torch.multiprocessing as mp
 
-from floodmaps.training.train_sar import run_experiment_s1
+from floodmaps.training.train_sar_ddp import run_experiment_s1 as run_experiment_s1_ddp, find_free_port
 
+# To avoid fork vs spawn context conflicts
+mp.set_start_method("spawn", force=True)
 
 def flatten_group_metrics(metrics_dict: Dict[str, Any], prefix: str) -> Dict[str, Any]:
     """Flatten nested group metrics into a single-level dictionary.
@@ -190,8 +194,17 @@ def save_summary(summary_path: Path, summary: Dict[str, Any]) -> None:
     print(f"Summary saved to {summary_path}")
 
 
+def run_experiment_s1_ddp_wrapper(rank, world_size, free_port, cfg, ad_cfg, result_queue):
+    fmetrics = run_experiment_s1_ddp(rank, world_size, free_port, cfg, ad_cfg)
+
+    # Only rank 0 reports the result
+    if rank == 0 and fmetrics is not None:
+        result_queue.put(fmetrics)
+
+
 def benchmark_sar(cfg: DictConfig) -> None:
-    """Benchmarks SAR classifier model on test set with multiple random seeds.
+    """Benchmarks SAR classifier model on test set with multiple random seeds,
+    uses the DDP script.
     
     Runs n trials with different random seeds, collects all metrics for shift
     and non-shift invariant cases(core metrics, NLCD group metrics, SCL group metrics),
@@ -278,7 +291,16 @@ def benchmark_sar(cfg: DictConfig) -> None:
         
         try:
             cfg.seed = trial_seed
-            fmetrics = run_experiment_s1(cfg, ad_cfg=ad_cfg)
+            # resolve cfgs before pickling
+            resolved_cfg = OmegaConf.to_container(cfg, resolve=True)
+            resolved_ad_cfg = OmegaConf.to_container(ad_cfg, resolve=True) if ad_cfg is not None else None
+            world_size = torch.cuda.device_count()
+            free_port = find_free_port()
+            result_queue = mp.SimpleQueue()
+            mp.spawn(run_experiment_s1_ddp_wrapper, args=(world_size, free_port, resolved_cfg, resolved_ad_cfg, result_queue), nprocs=world_size)
+
+            # Wait for all processes to finish and get the results
+            fmetrics = result_queue.get()
             
             # Extract all metrics (automatically handles any structure changes)
             # SAR uses partitions, so we pass the partition parameter

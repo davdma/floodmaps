@@ -513,6 +513,7 @@ def main(cfg: DictConfig) -> None:
     
     cfg.preprocess Parameters:
     - size: int (pixel width of patch)
+    - acquisitions: int (number of acquisitions in each multitemporal stack)
     - method: str ['random', 'strided']
     - samples: int (number of samples per image for random method)
     - stride: int (for strided method)
@@ -554,10 +555,11 @@ def main(cfg: DictConfig) -> None:
     ''')
 
     # make our preprocess directory
+    sampling_param = cfg.preprocess.samples if cfg.preprocess.method == 'random' else cfg.preprocess.stride
     if getattr(cfg.preprocess, 'suffix', None):
-        pre_sample_dir = Path(cfg.paths.preprocess_dir) / 'multi' / f'samples_{cfg.preprocess.size}_{cfg.preprocess.samples}_{cfg.preprocess.suffix}'
+        pre_sample_dir = Path(cfg.paths.preprocess_dir) / 'multi' / f'{cfg.preprocess.method}_{cfg.preprocess.size}_{sampling_param}_{cfg.preprocess.suffix}'
     else:
-        pre_sample_dir = Path(cfg.paths.preprocess_dir) / 'multi' / f'samples_{cfg.preprocess.size}_{cfg.preprocess.samples}'
+        pre_sample_dir = Path(cfg.paths.preprocess_dir) / 'multi' / f'{cfg.preprocess.method}_{cfg.preprocess.size}_{sampling_param}'
     pre_sample_dir.mkdir(parents=True, exist_ok=True)
 
     cfg_multi = cfg.preprocess.get('multi', {})

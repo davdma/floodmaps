@@ -15,6 +15,7 @@ from omegaconf import DictConfig, OmegaConf
 import sys
 import os
 import random
+import shutil
 
 from floodmaps.utils.stac_providers import get_stac_provider, STACProvider
 
@@ -332,6 +333,9 @@ def process_interval(stac_provider: STACProvider, items_with_info: List[Tuple], 
     start_date = acquisition_dates[0].replace('-', '')
     end_date = acquisition_dates[-1].replace('-', '')
     stack_id = f"multi_{start_date}-{end_date}_{eid}"
+
+    # make dir path directory if it doesn't exist
+    dir_path.mkdir(parents=True, exist_ok=True)
     
     vv_path = dir_path / f"{stack_id}_vv.tif"
     vh_path = dir_path / f"{stack_id}_vh.tif"
@@ -453,9 +457,6 @@ def cell_sample_worker(y: int, x: int, manual_crs: Optional[str],
         
         rng.shuffle(all_intervals)
         
-        # Create output directory
-        dir_path.mkdir(parents=True, exist_ok=True)
-        
         # Tracking variables
         attempts = 0
         stacks_sampled = 0
@@ -573,6 +574,9 @@ def cell_sample_worker(y: int, x: int, manual_crs: Optional[str],
             
             return (eid, True, None)
         else:
+            # remove the directory if it exists
+            if dir_path.exists():
+                shutil.rmtree(dir_path)
             return (eid, False, f"Max retries ({max_tries}) exceeded with no interval downloaded")
             
     except Exception as e:

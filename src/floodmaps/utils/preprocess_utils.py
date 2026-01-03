@@ -9,6 +9,62 @@ from numba import jit
 BOA_ADD_OFFSET = -1000.0
 PROCESSING_BASELINE_NAIVE = datetime(2022, 1, 25)
 
+class MinMaxAccumulator:
+    """Accumulator for tracking running min/max across batches.
+    
+    Supports parallel processing by allowing merging of multiple accumulators.
+    """
+    
+    def __init__(self, n_channels: int):
+        """Initialize accumulator with n_channels.
+        
+        Parameters
+        ----------
+        n_channels : int
+            Number of channels to track min/max for
+        """
+        self.n_channels = n_channels
+        self.min_vals = np.full(n_channels, np.inf, dtype=np.float32)
+        self.max_vals = np.full(n_channels, -np.inf, dtype=np.float32)
+    
+    def update(self, arr: np.ndarray, mask: np.ndarray) -> None:
+        """Update min/max with new data.
+        
+        Parameters
+        ----------
+        arr : np.ndarray
+            Array of shape (n_channels, n_samples)
+        mask : np.ndarray
+            Boolean mask of shape (n_samples,) indicating valid pixels
+        """
+        for c in range(self.n_channels):
+            valid_data = arr[c, mask]
+            if valid_data.size > 0:
+                self.min_vals[c] = min(self.min_vals[c], valid_data.min())
+                self.max_vals[c] = max(self.max_vals[c], valid_data.max())
+    
+    def merge(self, other: 'MinMaxAccumulator') -> None:
+        """Merge another accumulator into this one.
+        
+        Parameters
+        ----------
+        other : MinMaxAccumulator
+            Another accumulator to merge
+        """
+        self.min_vals = np.minimum(self.min_vals, other.min_vals)
+        self.max_vals = np.maximum(self.max_vals, other.max_vals)
+    
+    def finalize(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Return final min and max values.
+        
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray]
+            Tuple of (min_vals, max_vals)
+        """
+        return self.min_vals.copy(), self.max_vals.copy()
+
+
 class WelfordAccumulator:
     """Online algorithm for computing mean and variance using Welford's method."""
     

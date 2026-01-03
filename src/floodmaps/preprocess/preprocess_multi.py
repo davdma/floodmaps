@@ -12,10 +12,11 @@ from datetime import datetime
 import hydra
 from omegaconf import DictConfig
 import yaml
-from floodmaps.utils.preprocess_utils import WelfordAccumulator
+from floodmaps.utils.preprocess_utils import WelfordAccumulator, MinMaxAccumulator
 import csv
 import concurrent.futures
 import shutil
+from collections import defaultdict
 
 # Constants
 MULTI_CHANNELS = 4  # VV single, VH single, VV composite, VH composite
@@ -58,7 +59,7 @@ def load_tile_for_stats(tile_info: Tuple[Path, Path, Path]) -> Tuple[np.ndarray,
     return stack, mask
 
 
-def process_tiles_batch_for_stats(tiles_batch: List[Tuple]) -> WelfordAccumulator:
+def process_tiles_batch_for_stats(tiles_batch: List[Tuple]) -> Tuple[WelfordAccumulator, MinMaxAccumulator]:
     """Process a batch of tiles assigned to one worker using NumPy + Welford merging.
     
     Parameters
@@ -68,26 +69,28 @@ def process_tiles_batch_for_stats(tiles_batch: List[Tuple]) -> WelfordAccumulato
 
     Returns
     -------
-    WelfordAccumulator
-        Accumulator with accumulated statistics from all tiles in batch
+    Tuple[WelfordAccumulator, MinMaxAccumulator]
+        Tuple of (welford_accumulator, minmax_accumulator) with accumulated statistics
     """
-    accumulator = WelfordAccumulator(2)  # 2 SAR channels (VV, VH)
+    welford_acc = WelfordAccumulator(2)  # 2 SAR channels (VV, VH)
+    minmax_acc = MinMaxAccumulator(2)  # 2 SAR channels (VV, VH)
     
     for tile_info in tiles_batch:
         try:
             arr, mask = load_tile_for_stats(tile_info)
-            accumulator.update(arr, mask)
+            welford_acc.update(arr, mask)
+            minmax_acc.update(arr, mask)
             arr = None
             mask = None
         except Exception as e:
             cell_path, vv_file, vh_file = tile_info
             raise RuntimeError(f"Worker failed processing tile (cell: {cell_path.name}, vv: {vv_file.name}): {e}") from e
     
-    return accumulator
+    return welford_acc, minmax_acc
 
 
-def compute_statistics_parallel(train_tiles: List[Tuple], n_workers: int = None) -> Tuple[np.ndarray, np.ndarray]:
-    """Compute mean and std using optimized parallel Welford's algorithm.
+def compute_statistics_parallel(train_tiles: List[Tuple], n_workers: int = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Compute mean, std, min, and max using optimized parallel algorithms.
     
     Parameters
     ----------
@@ -102,6 +105,10 @@ def compute_statistics_parallel(train_tiles: List[Tuple], n_workers: int = None)
         Mean of the 2 SAR channels
     std : np.ndarray
         Standard deviation of the 2 SAR channels
+    min_vals : np.ndarray
+        Minimum values of the 2 SAR channels
+    max_vals : np.ndarray
+        Maximum values of the 2 SAR channels
     """
     logger = logging.getLogger('preprocessing')
     
@@ -141,24 +148,29 @@ def compute_statistics_parallel(train_tiles: List[Tuple], n_workers: int = None)
     try:
         with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
             futures = [executor.submit(process_tiles_batch_for_stats, batch) for batch in tile_batches]
-            worker_accumulators = [future.result() for future in futures]
+            worker_results = [future.result() for future in futures]
     except Exception as e:
         logger.error(f"Failed during parallel statistics computation: {e}")
         raise RuntimeError(f"Statistics computation failed: {e}") from e
     
     # Merge worker accumulators
-    final_accumulator = WelfordAccumulator(2)
+    final_welford = WelfordAccumulator(2)
+    final_minmax = MinMaxAccumulator(2)
     total_pixels = 0
     
-    for worker_acc in worker_accumulators:
-        final_accumulator.merge(worker_acc)
-        total_pixels += worker_acc.count
+    for welford_acc, minmax_acc in worker_results:
+        final_welford.merge(welford_acc)
+        final_minmax.merge(minmax_acc)
+        total_pixels += welford_acc.count
     
-    mean, std = final_accumulator.finalize()
+    mean, std = final_welford.finalize()
+    min_vals, max_vals = final_minmax.finalize()
+    
     logger.info(f'Statistics computed from {total_pixels} pixels across {len(train_tiles)} tiles')
     logger.info(f'Final statistics - Mean: {mean}, Std: {std}')
+    logger.info(f'Final statistics - Min: {min_vals}, Max: {max_vals}')
     
-    return mean, std
+    return mean, std, min_vals, max_vals
 
 
 def load_tile_for_sampling(tile_info: Tuple[Path, Path, Path], acquisitions: int) -> Tuple[List[np.ndarray], np.ndarray]:
@@ -584,6 +596,80 @@ def _stream_chunks_to_output(chunk_dir: Path, output_file: Path, size: int,
         raise RuntimeError(f"Failed to save final array: {e}") from e
 
 
+def sample_homogenous_patches(tile_infos: List[Tuple], size: int, acquisitions: int,
+                              missing_percent: float, coord_to_patch: Dict[Tuple, List[Tuple]]) -> np.ndarray:
+    """Extract homogenous patches from specified coordinates using sequential processing.
+    
+    For each tile, generates N leave-one-out tiles and extracts patches at 
+    locations specified in coord_to_patch for that cell.
+    
+    NOTE: tile_infos should be pre-filtered to only include tiles whose cells
+    have entries in coord_to_patch. This function assumes all tiles passed in
+    have corresponding patch coordinates in coord_to_patch.
+    
+    Parameters
+    ----------
+    tile_infos : List[Tuple]
+        List of (cell_path, vv_file, vh_file) tuples, pre-filtered to only include
+        cells with homogenous patch locations in coord_to_patch
+    size : int
+        Patch size (e.g., 64)
+    acquisitions : int
+        Expected number of acquisitions per stack
+    missing_percent : float
+        Maximum missing percentage for patch acceptance
+    coord_to_patch : Dict[Tuple, List[Tuple]]
+        Dictionary mapping (y, x) cell coordinates to list of (i, j) patch locations
+        
+    Returns
+    -------
+    np.ndarray
+        Array of shape (B, 4, size, size) containing extracted patches
+    """
+    logger = logging.getLogger('preprocessing')
+    all_patches = []
+    
+    for tile_info in tile_infos:
+        cell_path, vv_file, vh_file = tile_info
+        
+        # Extract cell coords from directory name (format: y_x)
+        parts = cell_path.name.split('_')
+        y, x = int(parts[0]), int(parts[1])
+        patch_coords = coord_to_patch[(y, x)]
+        
+        # Load tile and generate leave-one-out tiles
+        try:
+            tiles, union_missing_mask = load_tile_for_sampling(tile_info, acquisitions)
+        except Exception as e:
+            logger.warning(f'Failed to load tile (cell: {cell_path.name}, vv: {vv_file.name}): {e}, skipping...')
+            continue
+        
+        _, HEIGHT, WIDTH = tiles[0].shape
+        
+        # Extract patches from each leave-one-out tile at specified locations
+        for tile in tiles:  # N leave-one-out tiles
+            for (i, j) in patch_coords:
+                # Validate patch bounds
+                if i + size > HEIGHT or j + size > WIDTH:
+                    logger.debug(f'Patch at ({i}, {j}) exceeds tile bounds ({HEIGHT}, {WIDTH}), skipping...')
+                    continue
+                
+                # Check missing percentage in patch window
+                patch_missing = union_missing_mask[i:i+size, j:j+size]
+                patch_missing_pct = patch_missing.sum() / patch_missing.size
+                
+                if patch_missing_pct > missing_percent:
+                    continue
+                
+                patch = tile[:, i:i+size, j:j+size]
+                all_patches.append(patch)
+    
+    if len(all_patches) > 0:
+        return np.array(all_patches, dtype=np.float32)
+    else:
+        return np.empty((0, MULTI_CHANNELS, size, size), dtype=np.float32)
+
+
 def get_tile_infos_from_cells(cells: List[Path], acquisitions: int) -> List[Tuple[Path, Path, Path]]:
     """Get multitemporal tile info from cell directories.
     
@@ -719,11 +805,12 @@ def main(cfg: DictConfig) -> None:
     - seed: int (random number generator seed for random method)
     - n_workers: int (number of workers for parallel processing)
     - chunk_size: int (number of tiles to process per worker before saving as temp file) (default: 100)
-    - s1.sample_dirs: List[str] (list of sample directories under cfg.data.imagery_dir)
+    - s1.sample_dirs: List[str] (list of multitemporal sample directories under cfg.data.imagery_dir)
     - suffix: str (optional suffix to append to preprocessed folder)
     - split_csv: str (path to CSV file with columns "y", "x", "split" for PRISM cell coordinates)
-    - val_ratio: used for random splitting if no split_json is provided
-    - test_ratio: used for random splitting if no split_json is provided
+    - homogenous_csv: str (path to CSV file with columns "y", "x", "i", "j" for PRISM cell coordinates and homogenous patch location)
+    - val_ratio: used for random splitting if no split_csv is provided
+    - test_ratio: used for random splitting if no split_csv is provided
     - scratch_dir: str (optional path to the scratch directory for intermediate files and faster streaming)
     """
     # Setup logging
@@ -754,6 +841,7 @@ def main(cfg: DictConfig) -> None:
         Sample dir(s):   {cfg.preprocess.s1.sample_dirs}
         Suffix:          {getattr(cfg.preprocess, 'suffix', None)}
         Split CSV:       {getattr(cfg.preprocess, 'split_csv', None)}
+        Homogenous CSV:  {getattr(cfg.preprocess, 'homogenous_csv', None)}
         Val ratio:       {getattr(cfg.preprocess, 'val_ratio', None)}
         Test ratio:      {getattr(cfg.preprocess, 'test_ratio', None)}
         Scratch dir:     {getattr(cfg.preprocess, 'scratch_dir', None)}
@@ -891,13 +979,19 @@ def main(cfg: DictConfig) -> None:
 
     # Compute statistics using parallel Welford's algorithm
     logger.info('Computing training statistics for SAR VV and VH channels...')
-    mean, std = compute_statistics_parallel(train_tile_infos, n_workers)
+    mean, std, min_vals, max_vals = compute_statistics_parallel(train_tile_infos, n_workers)
 
     # Save training mean/std statistics
     stats_file = pre_sample_dir / 'mean_std.pkl'
     with open(stats_file, 'wb') as f:
         pickle.dump((mean, std), f)
     logger.info(f'Training mean std saved to {stats_file}')
+
+    # Save training min/max statistics
+    minmax_file = pre_sample_dir / 'min_max.pkl'
+    with open(minmax_file, 'wb') as f:
+        pickle.dump((min_vals, max_vals), f)
+    logger.info(f'Training min max saved to {minmax_file}')
 
     # Sample patches in parallel
     missing_percent = getattr(cfg.preprocess, 'missing_percent', 0.0)
@@ -941,6 +1035,56 @@ def main(cfg: DictConfig) -> None:
         logger.info('Parallel strided patch sampling complete.')
     else:
         raise ValueError(f"Unsupported sampling method: {cfg.preprocess.method}")
+    
+    # if homogenous patch csv provided, sample homogenous patches
+    homogenous_csv = getattr(cfg.preprocess, 'homogenous_csv', None)
+    if homogenous_csv is not None:
+        logger.info(f'Homogenous patch CSV provided: {homogenous_csv}, '
+                    'sampling homogenous patches for val and test splits...')
+        coord_to_patch = defaultdict(list)
+        with open(homogenous_csv, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                coord = (int(row['y']), int(row['x']))
+                patch = (int(row['i']), int(row['j']))
+                coord_to_patch[coord].append(patch)
+        
+        logger.info(f'Loaded {sum(len(v) for v in coord_to_patch.values())} homogenous patch locations '
+                    f'across {len(coord_to_patch)} cells from CSV')
+        
+        # Filter tile_infos to only include cells that are in the CSV
+        # This avoids iterating over all 500-1000 tiles when only 50-100 have homogenous patches
+        homogenous_coords = set(coord_to_patch.keys())
+        
+        val_tile_infos_homogenous = [
+            ti for ti in val_tile_infos
+            if (int(ti[0].name.split('_')[0]), int(ti[0].name.split('_')[1])) in homogenous_coords
+        ]
+        test_tile_infos_homogenous = [
+            ti for ti in test_tile_infos
+            if (int(ti[0].name.split('_')[0]), int(ti[0].name.split('_')[1])) in homogenous_coords
+        ]
+        
+        logger.info(f'Filtered to {len(val_tile_infos_homogenous)} val tiles and '
+                    f'{len(test_tile_infos_homogenous)} test tiles with homogenous patch locations')
+        
+        # Sample val homogenous patches
+        val_homogenous = sample_homogenous_patches(
+            val_tile_infos_homogenous, cfg.preprocess.size, acquisitions,
+            missing_percent, coord_to_patch
+        )
+        val_homogenous_file = pre_sample_dir / 'val_homogenous_patches.npy'
+        np.save(val_homogenous_file, val_homogenous)
+        logger.info(f'Saved {val_homogenous.shape[0]} val homogenous patches to {val_homogenous_file}')
+        
+        # Sample test homogenous patches
+        test_homogenous = sample_homogenous_patches(
+            test_tile_infos_homogenous, cfg.preprocess.size, acquisitions,
+            missing_percent, coord_to_patch
+        )
+        test_homogenous_file = pre_sample_dir / 'test_homogenous_patches.npy'
+        np.save(test_homogenous_file, test_homogenous)
+        logger.info(f'Saved {test_homogenous.shape[0]} test homogenous patches to {test_homogenous_file}')
 
     logger.info('Preprocessing complete.')
 

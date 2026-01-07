@@ -21,4 +21,5 @@ dependencies:
     - "deephyper[default]"
     - torcheval
     - Pillow
+    - pytorch-msssim
     - -e ..

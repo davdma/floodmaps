@@ -13,6 +13,7 @@ import pickle
 import json
 import hydra
 from omegaconf import DictConfig, OmegaConf
+from pytorch_msssim import ssim
 
 import torch
 from torch import nn
@@ -20,18 +21,22 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 
 from floodmaps.models.model import build_autodespeckler
-from floodmaps.training.dataset import ConditionalSARDataset
+from floodmaps.training.dataset import ConditionalSARDataset, HomogenousSARDataset
 from floodmaps.training.optim import get_optimizer
 from floodmaps.training.scheduler import get_scheduler
 from floodmaps.training.loss import get_ad_loss
 from floodmaps.utils.utils import (flatten_dict, ADEarlyStopper, Metrics, BetaScheduler, get_gradient_norm,
                    get_model_params, print_model_params_and_grads)
-from floodmaps.utils.metrics import (denormalize, TV_loss, var_laplacian, ssi, get_random_batch,
-                    enl, RIS, quality_m, psnr, compute_ssim)
+from floodmaps.utils.metrics import (denormalize, normalize, convert_to_amplitude, var_laplacian, enl, psnr, RunningMeanVar)
 
-AUTODESPECKLER_NAMES = ['CVAE']
-AD_LOSS_NAMES = ['L1Loss', 'MSELoss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss', 'JSDLoss']
-SCHEDULER_NAMES = ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR']
+AD_LOSS_NAMES = ['L1Loss', 'MSELoss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss']
+SCHEDULER_NAMES = ['Constant', 'ReduceLROnPlateau']
+VV_DB_MIN, VV_DB_MAX = -30, 0
+VH_DB_MIN, VH_DB_MAX = -30, -5
+amplitude_min_vv = torch.sqrt(torch.float_power(10, VV_DB_MIN / 10))
+amplitude_max_vv = torch.sqrt(torch.float_power(10, VV_DB_MAX / 10))
+amplitude_min_vh = torch.sqrt(torch.float_power(10, VH_DB_MIN / 10))
+amplitude_max_vh = torch.sqrt(torch.float_power(10, VH_DB_MAX / 10))
 
 ### Script for training CVAE with conditioning input:
 ### Separate from train_multi.py as it allows for two different validation losses
@@ -40,35 +45,35 @@ SCHEDULER_NAMES = ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR']
 def compute_loss(out_dict, targets, loss_fn, cfg, beta_scheduler=None, debug=False):
     recons_loss = loss_fn(out_dict['despeckler_output'], targets)
     loss_dict = dict()
-    if cfg.model.autodespeckler == 'CVAE':
-        # beta hyperparameter - KL regularization
-        log_var = torch.clamp(out_dict['log_var'], min=-6, max=6)
-        mu = out_dict['mu']
-        # ensure KLD loss on same scale as recons_loss! Mean over batch vs. element! imbalance = unstable
-        kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
 
-        # debug ratio between recons_loss and kld_loss
-        if debug:
-            if kld_loss > 0:
-                balance_ratio = recons_loss.item() / kld_loss.item()
-            else:
-                balance_ratio = float('inf')  # Handle division by zero if KLD loss is 0
-            print(f"Reconstruction Loss: {recons_loss.item()}, KLD Loss: {kld_loss.item()}, Balance Ratio: {balance_ratio}")
+    # beta hyperparameter - KL regularization
+    log_var = torch.clamp(out_dict['log_var'], min=-6, max=6)
+    mu = out_dict['mu']
+    # ensure KLD loss on same scale as recons_loss! Mean over batch vs. element! imbalance = unstable
+    kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
 
-        loss_dict['recons_loss'] = recons_loss
-        loss_dict['kld_loss'] = kld_loss
-        if cfg.model.autodespeckler == 'CVAE':
-            beta = beta_scheduler.get_beta() if cfg.model.cvae.beta_annealing else cfg.model.cvae.VAE_beta
-        recons_loss = recons_loss + beta * kld_loss # KLD weighting dropped for better regularization
+    # debug ratio between recons_loss and kld_loss
+    if debug:
+        if kld_loss > 0:
+            balance_ratio = recons_loss.item() / kld_loss.item()
+        else:
+            balance_ratio = float('inf')  # Handle division by zero if KLD loss is 0
+        print(f"Reconstruction Loss: {recons_loss.item()}, KLD Loss: {kld_loss.item()}, Balance Ratio: {balance_ratio}")
 
-        if torch.isnan(recons_loss).any() or torch.isinf(recons_loss).any():
-            print(f'min mu: {mu.min().item()}')
-            print(f'max mu: {mu.max().item()}')
-            print(f'min log_var: {log_var.min().item()}')
-            print(f'max log_var: {log_var.max().item()}')
-            raise Exception('recons_loss + kld_loss is nan or inf')
+    loss_dict['recons_loss'] = recons_loss
+    loss_dict['kld_loss'] = kld_loss
+    
+    beta = beta_scheduler.get_beta() if cfg.model.cvae.beta_annealing else cfg.model.cvae.VAE_beta
+    elbo_loss = recons_loss + beta * kld_loss # KLD weighting dropped for better regularization
 
-    loss_dict['final_loss'] = recons_loss
+    if torch.isnan(elbo_loss).any() or torch.isinf(elbo_loss).any():
+        print(f'min mu: {mu.min().item()}')
+        print(f'max mu: {mu.max().item()}')
+        print(f'min log_var: {log_var.min().item()}')
+        print(f'max log_var: {log_var.max().item()}')
+        raise Exception('elbo_loss is nan or inf')
+
+    loss_dict['elbo_loss'] = elbo_loss
     return loss_dict
 
 def compute_inference_loss(out_dict, targets, loss_fn):
@@ -76,17 +81,17 @@ def compute_inference_loss(out_dict, targets, loss_fn):
     loss_dict = {'recons_loss': recons_loss}
     return loss_dict
 
-def train_loop(model, dataloader, device, optimizer, minibatches, loss_fn, cfg, run, epoch, beta_scheduler=None):
+def train_loop(model, dataloader, device, optimizer, loss_fn, cfg, run, epoch, beta_scheduler=None):
     running_tot_loss = torch.tensor(0.0, device=device)
-    if cfg.model.autodespeckler == 'CVAE':
-        running_recons_loss = torch.tensor(0.0, device=device)
-        running_kld_loss = torch.tensor(0.0, device=device)
+    running_recons_loss = torch.tensor(0.0, device=device)
+    running_kld_loss = torch.tensor(0.0, device=device)
     epoch_gradient_norm = torch.tensor(0.0, device=device)
     batches_logged = 0
+    num_batches = len(dataloader)
 
     # for VAE monitoring
-    all_mu = []
-    all_log_var = []
+    mu_mean_var = RunningMeanVar(unbiased=True).to(device)
+    log_var_mean_var = RunningMeanVar(unbiased=True).to(device)
 
     model.train()
     for batch_i, (X, y) in enumerate(dataloader):
@@ -96,7 +101,7 @@ def train_loop(model, dataloader, device, optimizer, minibatches, loss_fn, cfg, 
 
         # also pass SAR layers for reconstruction loss
         loss_dict = compute_loss(out_dict, y, loss_fn, cfg, beta_scheduler=beta_scheduler)
-        loss = loss_dict['final_loss']
+        loss = loss_dict['elbo_loss']
 
         if torch.isnan(loss).any():
             err_file_name=f"outputs/ad_param_err_train_{cfg.model.autodespeckler}.json"
@@ -117,56 +122,55 @@ def train_loop(model, dataloader, device, optimizer, minibatches, loss_fn, cfg, 
 
         running_tot_loss += loss.detach()
 
-        # for VAE monitoring only
-        if cfg.model.autodespeckler == 'CVAE':
-            # Collect mu and log_var for the whole epoch
-            all_mu.append(out_dict['mu'].detach().cpu())
-            all_log_var.append(out_dict['log_var'].detach().cpu())
-            running_recons_loss += loss_dict['recons_loss'].detach()
-            running_kld_loss += loss_dict['kld_loss'].detach()
-
-        if batch_i >= minibatches:
-            break
+        # for CVAE monitoring only
+        # Collect mu and log_var for the whole epoch
+        mu_mean_var.update(out_dict['mu'])
+        log_var_mean_var.update(out_dict['log_var'])
+        running_recons_loss += loss_dict['recons_loss'].detach()
+        running_kld_loss += loss_dict['kld_loss'].detach()
 
     # calculate metrics
-    epoch_tot_loss = running_tot_loss.item() / minibatches
+    epoch_tot_loss = running_tot_loss.item() / num_batches
     avg_epoch_gradient_norm = epoch_gradient_norm.item() / batches_logged
     log_dict = {"train loss": epoch_tot_loss,
                "train gradient norm": avg_epoch_gradient_norm}
 
     # VAE mu and log_var monitoring
-    if cfg.model.autodespeckler == 'CVAE':
-        # full histogram monitoring
-        beta = beta_scheduler.get_beta() if cfg.model.cvae.beta_annealing else cfg.model.cvae.VAE_beta
-        all_mu = torch.cat(all_mu, dim=0).numpy()
-        all_log_var = torch.cat(all_log_var, dim=0).numpy()
-        ratio = (running_recons_loss.item()
-                 / (beta * running_kld_loss.item())
-                if beta > 0
-                else 400)
-        log_dict.update({"train_mu_mean": all_mu.mean(),
-                    "train_mu_std": all_mu.std(),
-                    "train_log_var_mean": all_log_var.mean(),
-                    "train_log_var_std": all_log_var.std(),
-                    "train_recons_loss": running_recons_loss.item() / minibatches,
-                    "train_kld_loss": running_kld_loss.item() / minibatches,
-                    "train_ratio": ratio,
-                    "beta": beta})
+    # full histogram monitoring
+    beta = beta_scheduler.get_beta() if cfg.model.cvae.beta_annealing else cfg.model.cvae.VAE_beta
+    mu_mean_var_results = mu_mean_var.compute()
+    log_var_mean_var_results = log_var_mean_var.compute()
+    ratio = (running_recons_loss.item()
+                / (beta * running_kld_loss.item())
+            if beta > 0
+            else 400)
+    log_dict.update({
+                "train_mu_mean": mu_mean_var_results['mean'].item(),
+                "train_mu_std": mu_mean_var_results['var'].sqrt().item(),
+                "train_log_var_mean": log_var_mean_var_results['mean'].item(),
+                "train_log_var_std": log_var_mean_var_results['var'].sqrt().item(),
+                "train_recons_loss": running_recons_loss.item() / num_batches,
+                "train_kld_loss": running_kld_loss.item() / num_batches,
+                "train_ratio": ratio,
+                "beta": beta}
+            )
+    mu_mean_var.reset()
+    log_var_mean_var.reset()
+
     run.log(log_dict, step=epoch)
 
     return epoch_tot_loss
 
 def test_loop(model, dataloader, device, loss_fn, cfg, run, epoch, beta_scheduler=None):
     running_tot_vloss = torch.tensor(0.0, device=device)
-    running_tot_vloss_gen = torch.tensor(0.0, device=device)
-    if cfg.model.autodespeckler == 'CVAE':
-        running_recons_loss = torch.tensor(0.0, device=device)
-        running_kld_loss = torch.tensor(0.0, device=device)
+    running_tot_vloss_inf = torch.tensor(0.0, device=device) # recons loss from random sampling z then decoding
+    running_recons_loss = torch.tensor(0.0, device=device)
+    running_kld_loss = torch.tensor(0.0, device=device)
     num_batches = len(dataloader)
 
     # for VAE monitoring
-    all_mu = []
-    all_log_var = []
+    mu_mean_var = RunningMeanVar(unbiased=True).to(device)
+    log_var_mean_var = RunningMeanVar(unbiased=True).to(device)
 
     model.eval()
     with torch.no_grad():
@@ -176,7 +180,7 @@ def test_loop(model, dataloader, device, loss_fn, cfg, run, epoch, beta_schedule
             # evaluate reconstruction
             out_dict = model(X, y)
             loss_dict = compute_loss(out_dict, y, loss_fn, cfg, beta_scheduler=beta_scheduler)
-            loss = loss_dict['final_loss']
+            loss = loss_dict['elbo_loss']
             if torch.isnan(loss).any():
                 err_file_name=f"outputs/ad_param_err_val_{cfg.model.autodespeckler}.json"
                 stats_dict = print_model_params_and_grads(model, file_name=err_file_name)
@@ -184,40 +188,42 @@ def test_loop(model, dataloader, device, loss_fn, cfg, run, epoch, beta_schedule
                                 The input SAR was NaN: {torch.isnan(X).any()}")
             running_tot_vloss += loss.detach()
 
-            if cfg.model.autodespeckler == 'CVAE':
-                # Collect mu and log_var for the whole epoch
-                all_mu.append(out_dict['mu'].detach().cpu())
-                all_log_var.append(out_dict['log_var'].detach().cpu())
-                running_recons_loss += loss_dict['recons_loss']
-                running_kld_loss += loss_dict['kld_loss']
+            # Collect mu and log_var for the whole epoch
+            mu_mean_var.update(out_dict['mu'])
+            log_var_mean_var.update(out_dict['log_var'])
+            running_recons_loss += loss_dict['recons_loss']
+            running_kld_loss += loss_dict['kld_loss']
 
             # evaluate inference / generation
-            out_dict = model.inference(X)
-            loss_dict = compute_inference_loss(out_dict, y, loss_fn)
-            loss = loss_dict['recons_loss'] # for inference we only have reconstruction loss
-            running_tot_vloss_gen += loss.detach()
+            inference_out_dict = model.inference(X)
+            inference_loss_dict = compute_inference_loss(inference_out_dict, y, loss_fn)
+            inference_loss = inference_loss_dict['recons_loss'] # for inference we only have reconstruction loss
+            running_tot_vloss_inf += inference_loss.detach()
 
     epoch_tot_vloss = running_tot_vloss.item() / num_batches
-    epoch_tot_vloss_gen = running_tot_vloss_gen.item() / num_batches
+    epoch_tot_vloss_inf = running_tot_vloss_inf.item() / num_batches
 
     # two different validation losses:
     # encoder-decoder uses full model
     # *inference* uses only decoder, this is what we care about
     log_dict = {'val loss (encoder-decoder)': epoch_tot_vloss,
-                'val_recons_loss (*inference*)': epoch_tot_vloss_gen}
+                'val_recons_loss (*inference*)': epoch_tot_vloss_inf}
 
-    if cfg.model.autodespeckler == 'CVAE':
-        all_mu = torch.cat(all_mu, dim=0).numpy()
-        all_log_var = torch.cat(all_log_var, dim=0).numpy()
-        log_dict.update({"val_mu_mean": all_mu.mean(),
-                    "val_mu_std": all_mu.std(),
-                    "val_log_var_mean": all_log_var.mean(),
-                    "val_log_var_std": all_log_var.std(),
-                    "val_recons_loss (encoder-decoder)": running_recons_loss.item() / num_batches,
-                    "val_kld_loss (encoder-decoder)": running_kld_loss.item() / num_batches})
+    mu_mean_var_results = mu_mean_var.compute()
+    log_var_mean_var_results = log_var_mean_var.compute()
+    log_dict.update({
+                "val_mu_mean": mu_mean_var_results['mean'].item(),
+                "val_mu_std": mu_mean_var_results['var'].sqrt().item(),
+                "val_log_var_mean": log_var_mean_var_results['mean'].item(),
+                "val_log_var_std": log_var_mean_var_results['var'].sqrt().item(),
+                "val_recons_loss (encoder-decoder)": running_recons_loss.item() / num_batches,
+                "val_kld_loss (encoder-decoder)": running_kld_loss.item() / num_batches
+            })
+    mu_mean_var.reset()
+    log_var_mean_var.reset()
 
     run.log(log_dict, step=epoch)
-    return epoch_tot_vloss, epoch_tot_vloss_gen
+    return epoch_tot_vloss, epoch_tot_vloss_inf
 
 def train(model, train_loader, val_loader, test_loader, device, cfg, run):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -232,12 +238,12 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
         Device:          {device}
     ''')
     # log weights and gradients each epoch
-    run.watch(model, log="all", log_freq=10)
+    run.watch(model, log="all", log_freq=cfg.logging.grad_norm_freq)
 
     # optimizer and scheduler for reducing learning rate
     optimizer = get_optimizer(model, cfg)
     scheduler = get_scheduler(optimizer, cfg)
-    if cfg.model.autodespeckler == 'CVAE' and cfg.model.cvae.beta_annealing:
+    if cfg.model.cvae.beta_annealing:
         beta_scheduler = BetaScheduler(beta=cfg.model.cvae.VAE_beta,
                                     period=cfg.model.cvae.beta_period,
                                     n_cycle=cfg.model.cvae.beta_cycles,
@@ -246,39 +252,39 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
         beta_scheduler = None
 
     if cfg.train.early_stopping:
-        if cfg.model.autodespeckler == 'CVAE':
-            early_stopper = ADEarlyStopper(patience=cfg.train.patience, beta_annealing=cfg.model.cvae.beta_annealing,
-                                        period=cfg.model.cvae.beta_period, n_cycle=cfg.model.cvae.beta_cycles,
-                                        count_cycles=False)
-        else:
-            early_stopper = ADEarlyStopper(patience=cfg.train.patience, beta_annealing=False,
-                                        period=None, n_cycle=None, count_cycles=False)
+        early_stopper = ADEarlyStopper(patience=cfg.train.patience, beta_annealing=cfg.model.cvae.beta_annealing,
+                                    period=cfg.model.cvae.beta_period, n_cycle=cfg.model.cvae.beta_cycles,
+                                    count_cycles=False)
 
     run.define_metric("val reconstruction loss", summary="min")
-    minibatches = int(len(train_loader) * cfg.train.subset)
     loss_fn = get_ad_loss(cfg).to(device)
     for epoch in range(cfg.train.epochs):
         try:
             # train loop
             avg_loss = train_loop(model, train_loader, device, optimizer,
-                                  minibatches, loss_fn, cfg, run, epoch,
+                                  loss_fn, cfg, run, epoch,
                                   beta_scheduler=beta_scheduler)
 
             # at the end of each training epoch compute validation
-            avg_vloss, avg_vloss_gen = test_loop(model, val_loader, device, loss_fn, cfg, run,
+            avg_vloss, avg_vloss_inf = test_loop(model, val_loader, device, loss_fn, cfg, run,
                                   epoch, beta_scheduler=beta_scheduler)
         except Exception as err:
             raise RuntimeError(f'Error while training occurred at epoch {epoch}.') from err
 
         if cfg.train.early_stopping:
-            # early stop on inference loss?
-            early_stopper.step(avg_vloss_gen, model, epoch)
+            # early stop on elbo loss (NOT inference loss)
+            early_stopper.step(avg_vloss, model, epoch)
             if early_stopper.is_stopped():
                 break
 
         if scheduler is not None:
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                scheduler.step(avg_vloss_gen)
+                if cfg.model.cvae.beta_annealing:
+                    # only step once beta annealing cycles are complete
+                    if epoch >= cfg.model.cvae.beta_cycles * cfg.model.cvae.beta_period:
+                        scheduler.step(avg_vloss)
+                else:
+                    scheduler.step(avg_vloss)
             else:
                 scheduler.step()
 
@@ -287,7 +293,6 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
 
         run.log({"learning_rate": scheduler.get_last_lr()[0] if scheduler is not None else cfg.train.lr}, step=epoch)
 
-    # NOTE: We are using the inference loss for early stopping and final metrics
     # retrieve best metrics and weights
     fmetrics = Metrics(use_partitions=False)
     model_weights = None
@@ -299,29 +304,71 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
         run.summary[f"best_epoch"] = early_stopper.get_best_epoch()
     else:
         model_weights = model.state_dict()
-        fmetrics.save_metrics('val', loss=avg_vloss_gen)
+        fmetrics.save_metrics('val', loss=avg_vloss)
 
     # for benchmarking purposes
     if cfg.eval.mode == 'test':
-        test_loss, test_loss_gen = test_loop(test_loader, model, device, cfg, logging=False)
-        fmetrics.save_metrics('test', loss=test_loss_gen)
+        test_loss, _ = test_loop(test_loader, model, device, cfg, logging=False)
+        fmetrics.save_metrics('test', loss=test_loss)
 
     run.summary[f"final_{cfg.eval.mode}_loss"] = fmetrics.get_metrics(split=cfg.eval.mode)['loss']
     return model_weights, fmetrics
 
-def calculate_metrics(dataloader, dataset, train_mean, train_std, model, \
-                      device, metrics, cfg, run, sample_size=100):
+def calculate_metrics(dataloader, homogenous_dataloader, train_mean, train_std, model, \
+                      device, metrics, cfg, run):
+    """Calculate SAR despeckling metrics for VV and VH:
+    
+    1. PSNR (peak signal-to-noise ratio)
+    2. SSIM (structural similarity)
+    3. ENL (speckle suppression)
+    4. Variance of Laplacian (edge sharpness)
+
+    No reference metric ENL is calculated on a small sample of homogenous
+    regions picked from the val or test set.
+
+    NOTE: PSNR and SSIM are computed on amplitude scale SAR data normalized to [0, 1].
+
+    Parameters
+    ----------
+    dataloader : torch.utils.data.DataLoader
+        DataLoader for the dataset.
+    homogenous_dataloader : torch.utils.data.DataLoader
+        DataLoader for the homogenous regions.
+    train_mean : torch.Tensor
+        Mean of the training data.
+    train_std : torch.Tensor
+        Standard deviation of the training data.
+    model : torch.nn.Module
+        Model to evaluate.
+    device : torch.device
+        Device to evaluate on.
+    metrics : Metrics
+        Metrics object to save the metrics to.
+    cfg : DictConfig
+        Configuration object.
+    run : wandb.Run
+        WandB run object.
+
+    Returns
+    -------
+    None
+    """
     train_mean = train_mean.to(device)
     train_std = train_std.to(device)
+    psnr_vv = torch.tensor(0.0, device=device, dtype=torch.float32)
+    psnr_vh = torch.tensor(0.0, device=device, dtype=torch.float32)
+    ssim_vv = torch.tensor(0.0, device=device, dtype=torch.float32)
+    ssim_vh = torch.tensor(0.0, device=device, dtype=torch.float32)
+    var_lap_vv = torch.tensor(0.0, device=device, dtype=torch.float32)
+    var_lap_vh = torch.tensor(0.0, device=device, dtype=torch.float32)
+    count = 0
 
-    # TV Loss, Var of Laplacian, SSI
-    tv_loss = torch.tensor(0.0, device=device, dtype=torch.float32)
-    var_lap = torch.tensor(0.0, device=device, dtype=torch.float32)
-    ssi_val = torch.tensor(0.0, device=device, dtype=torch.float32)
     model.eval()
+    # Compute PSNR, SSIM, Var of Laplacian across entire dataset
     for X, y in dataloader:
         X = X.to(device)
         y = y.to(device)
+        B, C, H, W = X.shape
 
         with torch.no_grad():
             out_dict = model.inference(X)
@@ -330,53 +377,71 @@ def calculate_metrics(dataloader, dataset, train_mean, train_std, model, \
             # convert back to dB scale
             # figure out how to denormalize here
             db_sar_filt = denormalize(result, train_mean, train_std)
-            db_sar_noisy = denormalize(X, train_mean, train_std)
-            tv_loss += TV_loss(db_sar_filt, weight=1, per_pixel=False)
-            var_lap += var_laplacian(db_sar_filt, per_pixel=False)
-            ssi_val += ssi(db_sar_noisy, db_sar_filt, per_pixel=False)
+            db_sar_clean = denormalize(y, train_mean, train_std)
 
-    # ENL, Quality M, RIS
-    # subset 100 to pass through inference
-    X, y = get_random_batch(dataset, batch_size=sample_size)
-    X = X.to(device)
-    y = y.to(device)
-    with torch.no_grad():
-        out_dict = model.inference(X)
-        result = out_dict['despeckler_output']
+            # convert dB to amplitude scale and normalize to [0, 1]
+            amplitude_sar_filt_vv = normalize(convert_to_amplitude(db_sar_filt[:, 0]), vmin=amplitude_min_vv, vmax=amplitude_max_vv)
+            amplitude_sar_clean_vv = normalize(convert_to_amplitude(db_sar_clean[:, 0]), vmin=amplitude_min_vv, vmax=amplitude_max_vv)
+            amplitude_sar_filt_vh = normalize(convert_to_amplitude(db_sar_filt[:, 1]), vmin=amplitude_min_vh, vmax=amplitude_max_vh)
+            amplitude_sar_clean_vh = normalize(convert_to_amplitude(db_sar_clean[:, 1]), vmin=amplitude_min_vh, vmax=amplitude_max_vh)
 
-        # convert back to dB scale
-        db_batch_filt = denormalize(result, train_mean, train_std).cpu().numpy()
-        db_batch_noisy = denormalize(X, train_mean, train_std).cpu().numpy()
-        db_batch_true = denormalize(y, train_mean, train_std).cpu().numpy()
+            # PSNR
+            psnr_vv += psnr(amplitude_sar_filt_vv, amplitude_sar_clean_vv).sum()
+            psnr_vh += psnr(amplitude_sar_filt_vh, amplitude_sar_clean_vh).sum()
 
-    tot_enl = 0.0
-    tot_ris = 0.0
-    tot_m = 0.0
+            ### MAKE SURE TO SEND TO GPU FOR FAST SSIM!
+            ssim_vv += ssim(amplitude_sar_filt_vv.unsqueeze(1),
+                            amplitude_sar_clean_vv.unsqueeze(1),
+                            data_range=1, size_average=False).sum()
+            ssim_vh += ssim(amplitude_sar_filt_vh.unsqueeze(1),
+                            amplitude_sar_clean_vh.unsqueeze(1),
+                            data_range=1, size_average=False).sum()
+            
+            # Variance of Laplacian should be computed on dB scale sar data normalized to [0, 1]
+            db_sar_filt_vv = normalize(db_sar_filt[:, 0], vmin=VV_DB_MIN, vmax=VV_DB_MAX)
+            db_sar_filt_vh = normalize(db_sar_filt[:, 1], vmin=VH_DB_MIN, vmax=VH_DB_MAX)
+            db_sar_filt_concat = torch.cat([db_sar_filt_vv.unsqueeze(1), db_sar_filt_vh.unsqueeze(1)], dim=1)
+            batch_var_laplacian = var_laplacian(db_sar_filt_concat)
+            var_lap_vv += batch_var_laplacian[:, 0].sum()
+            var_lap_vh += batch_var_laplacian[:, 1].sum()
 
-    # add some conditional metrics: PSNR, SSIM
-    # psnr_val = 0.0
-    # ssim_val = 0.0
-    for i in range(sample_size):
-        # only calculate for VV
-        db_filt_vv = db_batch_filt[i, 0]
-        db_noisy_vv = db_batch_noisy[i, 0]
-        db_true_vv = db_batch_true[i, 0]
+            count += B
 
-        tot_enl += enl(db_filt_vv, N=10)
-        tot_ris += RIS(db_noisy_vv, db_filt_vv)
-        tot_m += quality_m(db_noisy_vv, db_filt_vv, samples=10)
+    # ENL computed on separate homogenous regions set
+    enl_vv = torch.tensor(0.0, device=device, dtype=torch.float32)
+    enl_vh = torch.tensor(0.0, device=device, dtype=torch.float32)
+    count_homogenous = 0
+    for X, y in homogenous_dataloader:
+        X = X.to(device)
+        y = y.to(device)
+        B, C, H, W = X.shape
 
-        # psnr_val += psnr(db_filt_vv, db_true_vv)
-        # ssim_val += compute_ssim(db_filt_vv, db_true_vv, data_range=1.0)
+        with torch.no_grad():
+            out_dict = model.inference(X)
+            result = out_dict['despeckler_output']
 
-    metrics_dict = {"tv_loss": (tv_loss / len(dataloader)).item(),
-                    "var_lap": (var_lap / len(dataloader)).item(),
-                    "ssi_val": (ssi_val / len(dataloader)).item(),
-                    "avg_enl": tot_enl / sample_size,
-                    "avg_m": tot_m / sample_size,
-                    "avg_ris": tot_ris / sample_size}
-                    # "avg_psnr": psnr_val / sample_size,
-                    # "avg_ssim": ssim_val / sample_size}
+            # convert back to dB scale
+            db_sar_filt = denormalize(result, train_mean, train_std)
+
+            # convert to linear power scale
+            power_sar_filt = torch.float_power(10, db_sar_filt / 10)
+
+            # Calculate ENL here
+            enl_vv += enl(power_sar_filt[:, 0]).sum()
+            enl_vh += enl(power_sar_filt[:, 1]).sum()
+
+            count_homogenous += B
+
+    metrics_dict = {
+        "avg psnr_vv": psnr_vv.item() / count,
+        "avg psnr_vh": psnr_vh.item() / count,
+        "avg ssim_vv": ssim_vv.item() / count,
+        "avg ssim_vh": ssim_vh.item() / count,
+        "avg var_lap_vv": var_lap_vv.item() / count,
+        "avg var_lap_vh": var_lap_vh.item() / count,
+        "avg enl_vv": enl_vv.item() / count_homogenous,
+        "avg enl_vh": enl_vh.item() / count_homogenous,
+    }
     metrics.save_metrics(cfg.eval.mode, **metrics_dict)
 
     # log as wandb summary statistics
@@ -388,7 +453,7 @@ def save_experiment(weights, metrics, cfg, run):
     path.mkdir(parents=True, exist_ok=True)
 
     if weights is not None:
-        torch.save(weights, path / "model.pth")
+        torch.save(weights, path / "CVAE_ad.pth")
 
     # save config
     with open(path / "config.yaml", "w") as f:
@@ -440,17 +505,12 @@ def sample_predictions(model, sample_set, mean, std, cfg, histogram=True, hist_f
     columns = ["id", 'input_vv', 'input_vh', 'despeckled_vv', 'despeckled_vh', 'composite_vv', 'composite_vh']
 
     # some display options
-    if cfg.model.autodespeckler == 'DAE':
-        columns.insert(3, 'noisy_vv')
-        columns.insert(4, 'noisy_vh')
     if histogram:
         columns.extend(['vv_histogram', 'vh_histogram'])
 
     table = wandb.Table(columns=columns)
     vv_map = ScalarMappable(norm=None, cmap='gray')
     vh_map = ScalarMappable(norm=None, cmap='gray')
-    dae_vv_map = ScalarMappable(norm=None, cmap='gray') # tmp
-    dae_vh_map = ScalarMappable(norm=None, cmap='gray') # tmp
 
     model.to('cpu')
     model.eval()
@@ -485,12 +545,6 @@ def sample_predictions(model, sample_set, mean, std, cfg, histogram=True, hist_f
         min_vh = np.min([np.min(vh), np.min(recons_vh), np.min(composite_vh)])
         max_vh = np.max([np.max(vh), np.max(recons_vh), np.max(composite_vh)])
         vh_map.set_norm(Normalize(vmin=min_vh, vmax=max_vh))
-
-        # tmp
-        noisy_vv = despeckler_input[0].numpy()
-        noisy_vh = despeckler_input[1].numpy()
-        dae_vv_map.set_norm(Normalize(vmin=np.min(noisy_vv), vmax=np.max(noisy_vv)))
-        dae_vh_map.set_norm(Normalize(vmin=np.min(noisy_vh), vmax=np.max(noisy_vh)))
 
         # VV input images
         vv = vv_map.to_rgba(vv, bytes=True)
@@ -590,7 +644,18 @@ def sample_examples(model, sample_set, cfg, idxs=[14440, 3639, 7866]):
     return examples
 
 def run_experiment_ad(cfg):
-    """Run a single autodespeckler model experiment given the configuration parameters."""
+    """Run a single S1 SAR autodespeckler model experiment given the configuration parameters.
+
+    Parameters
+    ----------
+    cfg : object
+        Config object for the SAR autodespeckler.
+    
+    Returns
+    -------
+    fmetrics : Metrics
+        Metrics object containing the metrics for the experiment.
+    """
     if not wandb.login():
         raise Exception("Failed to login to wandb.")
 
@@ -612,15 +677,21 @@ def run_experiment_ad(cfg):
     # dataset and transforms
     print(f"Using {device} device")
     model_name = cfg.model.autodespeckler
+    method = cfg.data.method
     size = cfg.data.size
-    samples = cfg.data.samples
-    sample_dir = Path(cfg.paths.preprocess_dir) / 'multi' / f'samples_{size}_{samples}/'
+    sample_param = cfg.data.samples if cfg.data.method == 'random' else cfg.data.stride
+    suffix = getattr(cfg.data, 'suffix', '')
+    if suffix:
+        sample_dir = Path(cfg.paths.preprocess_dir) / 's1_multi' / f'{method}_{size}_{sample_param}_{suffix}/'
+    else:
+        sample_dir = Path(cfg.paths.preprocess_dir) / 's1_multi' / f'{method}_{size}_{sample_param}/'
 
     # load in mean and std
-    with open(sample_dir / f'mean_std_{size}_{samples}.pkl', 'rb') as f:
+    with open(sample_dir / f'mean_std.pkl', 'rb') as f:
         train_mean, train_std = pickle.load(f)
         train_mean = torch.from_numpy(train_mean)
         train_std = torch.from_numpy(train_std)
+
     standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
 
     # datasets
@@ -628,6 +699,10 @@ def run_experiment_ad(cfg):
                                         seed=cfg.seed+1, mmap_mode='r' if cfg.data.mmap else None)
     val_set = ConditionalSARDataset(sample_dir, typ="val", transform=standardize)
     test_set = ConditionalSARDataset(sample_dir, typ="test", transform=standardize) if cfg.eval.mode == 'test' else None
+
+    # for homogenous SAR patch evaluation
+    val_homogenous_set = HomogenousSARDataset(sample_dir, typ="val", transform=standardize)
+    test_homogenous_set = HomogenousSARDataset(sample_dir, typ="test", transform=standardize) if cfg.eval.mode == 'test' else None
 
     # dataloaders
     train_loader = DataLoader(train_set,
@@ -654,6 +729,18 @@ def run_experiment_ad(cfg):
                             shuffle=False,
                             drop_last=False) if cfg.eval.mode == 'test' else None
 
+    val_homogenous_loader = DataLoader(val_homogenous_set,
+                            batch_size=cfg.train.batch_size,
+                            num_workers=0,
+                            shuffle=False,
+                            drop_last=False) if cfg.eval.mode == 'val' else None
+    
+    test_homogenous_loader = DataLoader(test_homogenous_set,
+                            batch_size=cfg.train.batch_size,
+                            num_workers=0,
+                            shuffle=False,
+                            drop_last=False) if cfg.eval.mode == 'test' else None
+
     # initialize wandb run
     total_params, trainable_params, param_size_in_mb = get_model_params(model)
     
@@ -663,7 +750,7 @@ def run_experiment_ad(cfg):
         project=cfg.wandb.project,
         group=cfg.wandb.group,
         config={
-            "dataset": "SAR_Multitemporal",
+            "dataset": "Sentinel1-Multitemporal",
             **config_dict,
             "training_size": len(train_set),
             "validation_size": len(val_set),
@@ -686,7 +773,7 @@ def run_experiment_ad(cfg):
         # train and save results metrics
         weights, fmetrics = train(model, train_loader, val_loader, test_loader, device, cfg, run)
         calculate_metrics(test_loader if cfg.eval.mode == 'test' else val_loader,
-                      test_set if cfg.eval.mode == 'test' else val_set,
+                      test_homogenous_loader if cfg.eval.mode == 'test' else val_homogenous_loader,
                       train_mean, train_std, model, device, fmetrics, cfg, run)
         if cfg.save:
             save_experiment(weights, fmetrics, cfg, run)
@@ -724,6 +811,7 @@ def run_experiment_ad(cfg):
 
 def validate_config(cfg):
     # Add checks
+    assert cfg.model.autodespeckler == 'CVAE', "Model must be CVAE"
     assert cfg.save in [True, False], "Save must be a boolean"
     assert cfg.train.batch_size is not None and cfg.train.batch_size > 0, "Batch size must be defined and positive"
     assert cfg.train.lr > 0, "Learning rate must be positive"
@@ -732,7 +820,6 @@ def validate_config(cfg):
     assert cfg.train.LR_scheduler in SCHEDULER_NAMES, f"LR scheduler must be one of {SCHEDULER_NAMES}"
     assert cfg.train.early_stopping in [True, False], "Early stopping must be a boolean"
     assert not cfg.train.early_stopping or cfg.train.patience is not None, "Patience must be set if early stopping is enabled"
-    assert cfg.model.autodespeckler in AUTODESPECKLER_NAMES, f"Model must be one of {AUTODESPECKLER_NAMES}"
     assert cfg.data.random_flip in [True, False], "Random flip must be a boolean"
     assert cfg.eval.mode in ['val', 'test'], f"Evaluation mode must be one of {['val', 'test']}"
     assert cfg.wandb.project is not None, "Wandb project must be specified"

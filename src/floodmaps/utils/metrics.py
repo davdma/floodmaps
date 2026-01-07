@@ -4,7 +4,6 @@ import numpy as np
 import random
 from torch.utils.data import DataLoader, Subset
 import torch.nn.functional as F
-from skimage.metrics import structural_similarity as ssim
 from torchmetrics.metric import Metric
 from torch import Tensor
 
@@ -460,17 +459,20 @@ def TV_loss(img, weight=1, per_pixel=False):
     num = n_img*c_img*h_img*w_img if per_pixel else n_img
     return weight*(tv_h+tv_w)/(num)
 
-def var_laplacian(img, per_pixel=False):
+def var_laplacian(img):
     """Convolution of Laplace Operator as described in https://ieeexplore.ieee.org/document/7894491.
     The implementation convolves the laplace operator separately over each
-    channel, and then sums their variance (and divides by 2).
+    channel, and then sums variance for each channel.
 
     Parameters
     ----------
-    img : tensor[b, 2, h, w]
-        denormalized in dB sar data with 2 polarization channels.
-    per_pixel : bool
-        If true then accounts for patch size, otherwise averages by patch.
+    img : torch.Tensor (B, C, H, W)
+        denormalized in dB sar data with C channels.
+    
+    Returns
+    -------
+    torch.Tensor (B, C)
+        Variance of Laplacian for each channel.
     """
     n_img, c_img, h_img, w_img = img.shape
     # Positive laplacian kernel for 2 channels
@@ -484,10 +486,9 @@ def var_laplacian(img, per_pixel=False):
     laplacian = F.conv2d(img, all_kernels, padding=1, groups=c_img)
 
     # Compute variance of Laplacian over each image
-    var_laplacian = laplacian.view(n_img, c_img, -1).var(dim=2).sum()
+    var_laplacian = laplacian.view(n_img, c_img, -1).var(dim=2)
 
-    num = n_img*c_img*h_img*w_img if per_pixel else n_img*c_img
-    return var_laplacian / num
+    return var_laplacian
 
 def ssi(noisy, filt, per_pixel=False):
     """Expects denormalized input.
@@ -548,191 +549,60 @@ def convert_to_grayscale(image, levels=64):
     else:
         return (np.round(np.clip((image - imin) / (imax - imin), 0, 1) * (levels-1))).astype(np.uint8)
 
-def enl(img, N=5, window_size=8, levels=4):
-    """ENL calculated for non-overlapping sliding windows of size x over the image.
-    The N windows with the least variance have their ENLs averaged.
-    We select homogenous regions via lowest regions as specified in textural
-    analysis of https://oa.ee.tsinghua.edu.cn/~yangjian/xubin/pdf/manuscript_ENL.pdf
-
-    Parameters
-    ----------
-    img : tensor[h, w]
-        Denormalized in dB sar data of a chosen polarization channel.
-    """
-    # first convert to raw intensity, not dB scale
-    h_img, w_img = img.shape
-    intensity = np.power(10, img / 10)
-
-    # sliding windows over 64 x 64
-    axis_windows = h_img // window_size
-    enls = np.empty(axis_windows**2)
-    entropy = np.empty(axis_windows**2)
-    for i in range(axis_windows):
-        for j in range(axis_windows):
-            window = intensity[i*window_size:(i+1)*window_size, j*window_size:(j+1)*window_size]
-            std = window.std()
-            mean = window.mean()
-            enl_val = np.clip((mean / std)**2, 0, 9999) if std > 0 else 9999
-            enls[j + i * axis_windows] = enl_val
-
-            # calculate window entropy
-            g = convert_to_grayscale(window, levels=levels)
-            glcm = graycomatrix(g, distances=[1], angles=[0, np.pi/2], levels=levels, normed=True, symmetric=True)
-            entropy[j + i * axis_windows] = graycoprops(glcm, 'entropy').sum()
-
-    # avg of lowest std (highest homogeneity) enls
-    sorted_indices = np.argsort(entropy)[:N]  # Select N smallest entropy windows
-    avg_enl = np.mean(enls[sorted_indices])
-    return avg_enl
-
-def RIS(noisy, filt, levels=64):
-    """Implemented as described in https://arxiv.org/pdf/1811.11872
-    They use 4-connected sites, horizontal, and vertical directions.
-
-    Parameters
-    ----------
-    noisy : tensor
-        Noisy SAR image in dB scale
-    filt : tensor
-        Despeckled SAR image in dB scale
-    levels : int
-        Quantization level for ratio image (default: 64).
-    """
-    def ref_h0(glcm):
-        """Homogeneity textual descriptor calculated assuming independence
-        p(i, j) = p(i) * p(j)."""
-        arr = glcm.squeeze(2).sum(axis=2) / 2
-        w, h = arr.shape
-        # calculate marginals
-        p = np.empty(w)
-        for i in range(w):
-            p[i] = arr[i, :].sum()
-        sum = 0
-        for i in range(w):
-            for j in range(h):
-                sum += p[i] * p[j] / ((i - j)**2 + 1)
-        return sum
-
-    in_intensity = np.power(10, noisy / 10)
-    out_intensity = np.power(10, filt / 10)
-    ratio = in_intensity / out_intensity
-
-    # haralick term - https://earlglynn.github.io/RNotes/package/EBImage/Haralick-Textural-Features.html
-    img_O = convert_to_grayscale(ratio, levels=levels)
-    distances = [1]
-    angles = [0, np.pi/2]
-    glcm = graycomatrix(img_O, distances=distances, angles=angles, levels=levels, normed=True, symmetric=True)
-
-    # compute a homogeneity value for each direction and calculate the mean
-    H = np.mean(graycoprops(glcm, 'homogeneity'))
-    H_0 = ref_h0(glcm)
-    ris = 100 * (H - H_0) / H_0
-    return ris
-
-def quality_m(noisy, filt, N=4, window_size=8, samples=10, levels=8):
-    """Metric for filter quality as described in https://arxiv.org/pdf/1704.05952
-
-    The paper uses n=8 automatically detected homogenous areas (500 x 500 sar images).
-    r_enl_mu is usually between 2-11 for filters.
-
-    Parameters
-    ----------
-    noisy : tensor
-        Noisy SAR image in dB scale
-    filt : tensor
-        Despeckled SAR image in dB scale
-    N : int
-        Lowest N ENL diffs chosen as textureless area
-    window_size : int
-        Size of windows to calculate ENL and ratio for the r_enl_mu term.
-    samples : int
-        Number of random permutations of ratio image sampled to estimate
-        homogeneity without structure.
-    levels : int
-        Quantization level for ratio image (default: 64).
-    """
-    in_intensity = np.power(10, noisy / 10)
-    out_intensity = np.power(10, filt / 10)
-    ratio = in_intensity / out_intensity
-    # sliding windows over 64 x 64
-    axis_windows = 64 // window_size
-    enl_diffs = np.empty(axis_windows**2)
-    enl_rel_diffs = np.empty(axis_windows**2)
-    ratio_diffs = np.empty(axis_windows**2)
-    for i in range(axis_windows):
-        for j in range(axis_windows):
-            noisy_window = in_intensity[i*window_size:(i+1)* window_size, j*window_size:(j+1)*window_size]
-            ratio_window = ratio[i*window_size:(i+1)* window_size, j*window_size:(j+1)*window_size]
-
-            noisy_var = noisy_window.var()
-            noisy_mean = noisy_window.mean()
-            enl_noisy = np.clip(noisy_mean**2 / noisy_var, 0, 9999) if noisy_var > 0 else 9999
-
-            ratio_var = ratio_window.var()
-            ratio_mean = ratio_window.mean()
-            enl_ratio = np.clip(ratio_mean**2 / ratio_var, 0, 9999) if ratio_var > 0 else 9999
-
-            # noisy enl, ratio enl, ratio mean
-            tmp = abs(enl_noisy - enl_ratio)
-            enl_diffs[j + i * axis_windows] = tmp
-            enl_rel_diffs[j + i * axis_windows] = np.clip(tmp / enl_noisy, 0, 9999) if enl_noisy > 0 else 9999
-            ratio_diffs[j + i * axis_windows] = abs(1 - ratio_mean)
-
-    # choose lowest N ENL noisy - ratio diffs as textureless areas
-    # empirically the ratio mean is usually ~1 so we do not need to worry but ENL error is not guaranteed
-    sorted_indices = np.argsort(enl_diffs)[:N]
-    r_enl_mu = (enl_rel_diffs[sorted_indices].sum() + ratio_diffs[sorted_indices].sum()) / 2
-
-    # haralick term - https://earlglynn.github.io/RNotes/package/EBImage/Haralick-Textural-Features.html
-    img_O = convert_to_grayscale(ratio, levels=levels)
-    distances = [1, 2, 3] # focus on small scale textures and structure
-    angles = [0, np.pi/4, np.pi/2, 3*np.pi/4]
-    glcm = graycomatrix(img_O, distances=distances, angles=angles, levels=levels, normed=True, symmetric=True)
-    h_O = np.mean(graycoprops(glcm, 'homogeneity'))
-    h_g = np.empty(samples)
-    for i in range(samples):
-        img_g = permute_image(img_O)
-        glcm = graycomatrix(img_g, distances=distances, angles=angles, levels=levels, normed=True, symmetric=True)
-        h_g[i] = np.mean(graycoprops(glcm, 'homogeneity'))
-
-    # may need to tweak scaling term 100
-    h_term = 100 * abs(h_O - h_g.mean()) / h_O if h_O > 0 else 9999
-    return r_enl_mu + h_term
+def convert_to_amplitude(db_sar):
+    """Convert SAR data from dB scale to amplitude scale."""
+    # convert to intensity
+    intensity = torch.float_power(10.0, db_sar / 10)
+    return torch.sqrt(intensity)
 
 def normalize(patch, vmin, vmax):
-    """Normalize a patch to the range [0, 1]. Used for SSIM."""
-    return np.clip((patch - vmin) / (vmax - vmin), 0, 1)
+    """Clip and normalize a patch to the range [0, 1]. Used for SSIM."""
+    return torch.clip((patch - vmin) / (vmax - vmin), 0, 1)
 
-def psnr(noisy, ground_truth):
-    """PSNR metric.
+def psnr(noisy, ground_truth, max_val=1.0):
+    """PSNR metric for torch tensors.
+
+    NOTE: Expects SAR amplitude scale data normalized to [0, 1] or [0, 255] range.
     
     Parameters
     ----------
-    noisy : tensor
-        Noisy SAR image in dB scale
-    ground_truth : tensor
-        Ground truth (multitemporal composite) SAR image in dB scale
+    noisy : torch.Tensor (B, H, W)
+        Noisy SAR image
+    ground_truth : torch.Tensor (B, H, W)
+        Ground truth (multitemporal composite) SAR image
+    max_val : float
+        Maximum possible pixel value (default 1.0 for normalized [0, 1] data)
+    
+    Returns
+    -------
+    torch.Tensor (B,)
+        PSNR value in dB for each image in the batch
     """
-    mse = np.mean((noisy - ground_truth) ** 2)
-    if mse == 0:
-        return float('inf')
-    max_pixel_value = 1.0
-    psnr = 20 * np.log10(max_pixel_value / np.sqrt(mse))
+    noisy = noisy.view(noisy.shape[0], -1)
+    ground_truth = ground_truth.view(ground_truth.shape[0], -1)
+    mse = torch.mean((noisy - ground_truth) ** 2, dim=1)
+    psnr = 10 * torch.log10(max_val ** 2 / mse)
     return psnr
 
-def compute_ssim(noisy, ground_truth, data_range=1.0):
-    """SSIM metric.
-    
+def enl(img):
+    """ENL calculated for homogenous patches. Must be in linear power scale.
+
     Parameters
     ----------
-    noisy : tensor
-        Noisy SAR image in dB scale
-    ground_truth : tensor
-        Ground truth (multitemporal composite) SAR image in dB scale
-    data_range : float
-        Data range of the image
+    img : torch.Tensor (B, H, W)
+        Linear intensity SAR data of a chosen polarization channel.
+    
+    Returns
+    -------
+    torch.Tensor (B,)
+        ENL value for each image in the batch.
     """
-    return ssim(ground_truth, noisy, data_range=data_range)
-
-
-
+    n_img, h_img, w_img = img.shape
+    # compute variance of the image
+    img = img.view(n_img, -1)
+    var = img.var(dim=1)
+    # compute mean of the image
+    mean = img.mean(dim=1)
+    # compute ENL
+    enl = (mean ** 2) / var
+    return enl

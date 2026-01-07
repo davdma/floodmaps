@@ -1139,11 +1139,11 @@ def pipeline_S1(stac_provider, dir_path: Path, save_as, dst_crs, item, bbox, cfg
                 raise ValueError("S1 VH polarization is all zeros - likely failed download")
 
             with rasterio.open(dir_path / f'{save_as}_vv.tif', 'w', driver='Gtiff', count=1, height=out_image_vv.shape[-2], width=out_image_vv.shape[-1], crs=dst_crs, dtype=out_image_vv.dtype, transform=out_transform_vv, nodata=-9999) as dst:
-                db_vv = db_scale(out_image_vv[0])
+                db_vv = db_scale(out_image_vv[0], no_data=-9999)
                 dst.write(db_vv, 1)
 
             with rasterio.open(dir_path / f'{save_as}_vh.tif', 'w', driver='Gtiff', count=1, height=out_image_vh.shape[-2], width=out_image_vh.shape[-1], crs=dst_crs, dtype=out_image_vh.dtype, transform=out_transform_vh, nodata=-9999) as dst:
-                db_vh = db_scale(out_image_vh[0])
+                db_vh = db_scale(out_image_vh[0], no_data=-9999)
                 dst.write(db_vh, 1)
 
             # color maps

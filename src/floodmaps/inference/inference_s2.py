@@ -55,6 +55,7 @@ def generate_prediction_s2(model, device, cfg: DictConfig, standardize, event_pa
         Threshold for the prediction.
     batch_size : int
         Batch size for inference.
+
     Returns
     -------
     label : ndarray
@@ -256,7 +257,15 @@ def generate_prediction_s2(model, device, cfg: DictConfig, standardize, event_pa
     return label
 
 def init_worker(cfg_dict: dict, num_threads: int):
-    """Set up model and necessary variables for worker"""
+    """Set up model and necessary variables for worker process.
+    
+    Parameters
+    ----------
+    cfg_dict : dict
+        Configuration dictionary (serializable).
+    num_threads : int
+        Number of threads for this worker.
+    """
     global model, cfg, standardize
 
     torch.set_num_threads(num_threads)
@@ -329,9 +338,13 @@ def run_inference_s2(cfg: DictConfig):
     NOTE: rasters are expected to have eid defined in file names i.e. rgb_(date)_(eid).tif.
 
     Important cfg.inference parameters:
+    cfg.inference.data_dir: Input directory containing SAR rasters
     cfg.inference.n_workers: number of worker processes
     cfg.inference.threads_per_worker: number of threads per worker
     cfg.inference.batch_size: batch size for inference
+    cfg.inference.threshold: Prediction threshold (default 0.5)
+    cfg.inference.replace: Whether to overwrite existing predictions
+    cfg.inference.format: Output format ("tif" or "npy")
 
     Recommended to pick n_workers and threads_per_worker such that
     n_workers * threads_per_worker = resources_used.ncpus, and so
@@ -380,7 +393,13 @@ def run_inference_s2(cfg: DictConfig):
 
 @hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig):
-    """Main entry point for inference on spatiotemporal data using RGB S2 optical model."""
+    """Main entry point for inference on spatiotemporal data using RGB S2 optical model.
+    
+    Parameters
+    ----------
+    cfg : DictConfig
+        Configuration object containing model and data parameters.
+    """
     run_inference_s2(cfg)
 
 if __name__ == '__main__':

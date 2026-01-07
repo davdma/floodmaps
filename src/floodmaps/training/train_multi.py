@@ -29,10 +29,10 @@ from floodmaps.utils.utils import (flatten_dict, ADEarlyStopper, Metrics, BetaSc
 from floodmaps.utils.metrics import (denormalize, TV_loss, var_laplacian, ssi, get_random_batch,
                     enl, RIS, quality_m, psnr, compute_ssim)
 
-AUTODESPECKLER_NAMES = ['CNN1', 'CNN2', 'DAE', 'VAE']
+AUTODESPECKLER_NAMES = ['unet', 'unet++', 'VAE']
 NOISE_NAMES = ['normal', 'masking', 'log_gamma']
-AD_LOSS_NAMES = ['L1Loss', 'MSELoss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss', 'JSDLoss']
-SCHEDULER_NAMES = ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR'] # 'CosWarmRestarts'
+AD_LOSS_NAMES = ['L1Loss', 'MSELoss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss']
+SCHEDULER_NAMES = ['Constant', 'ReduceLROnPlateau']
 
 def compute_loss(out_dict, targets, loss_fn, cfg, beta_scheduler=None, debug=False):
     recons_loss = loss_fn(out_dict['despeckler_output'], targets)
@@ -587,7 +587,8 @@ def sample_examples(model, sample_set, cfg, idxs=[14440, 3639, 7866]):
     return examples
 
 def run_experiment_ad(cfg):
-    """Run a single autodespeckler model experiment given the configuration parameters."""
+    """Run a single SAR autodespeckler model experiment for deterministic UNet
+    or UNet++. Also works with VAE."""
     if not wandb.login():
         raise Exception("Failed to login to wandb.")
 

@@ -808,7 +808,8 @@ def main(cfg: DictConfig) -> None:
     - s1.sample_dirs: List[str] (list of multitemporal sample directories under cfg.data.imagery_dir)
     - suffix: str (optional suffix to append to preprocessed folder)
     - split_csv: str (path to CSV file with columns "y", "x", "split" for PRISM cell coordinates)
-    - homogenous_csv: str (path to CSV file with columns "y", "x", "i", "j" for PRISM cell coordinates and homogenous patch location)
+    - homogenous_val_csv: str (path to CSV file with columns "y", "x", "i", "j" for validation homogenous patch locations)
+    - homogenous_test_csv: str (path to CSV file with columns "y", "x", "i", "j" for test homogenous patch locations)
     - val_ratio: used for random splitting if no split_csv is provided
     - test_ratio: used for random splitting if no split_csv is provided
     - scratch_dir: str (optional path to the scratch directory for intermediate files and faster streaming)
@@ -841,7 +842,8 @@ def main(cfg: DictConfig) -> None:
         Sample dir(s):   {cfg.preprocess.s1.sample_dirs}
         Suffix:          {getattr(cfg.preprocess, 'suffix', None)}
         Split CSV:       {getattr(cfg.preprocess, 'split_csv', None)}
-        Homogenous CSV:  {getattr(cfg.preprocess, 'homogenous_csv', None)}
+        Homogenous val CSV:  {getattr(cfg.preprocess, 'homogenous_val_csv', None)}
+        Homogenous test CSV: {getattr(cfg.preprocess, 'homogenous_test_csv', None)}
         Val ratio:       {getattr(cfg.preprocess, 'val_ratio', None)}
         Test ratio:      {getattr(cfg.preprocess, 'test_ratio', None)}
         Scratch dir:     {getattr(cfg.preprocess, 'scratch_dir', None)}
@@ -1036,51 +1038,69 @@ def main(cfg: DictConfig) -> None:
     else:
         raise ValueError(f"Unsupported sampling method: {cfg.preprocess.method}")
     
-    # if homogenous patch csv provided, sample homogenous patches
-    homogenous_csv = getattr(cfg.preprocess, 'homogenous_csv', None)
-    if homogenous_csv is not None:
-        logger.info(f'Homogenous patch CSV provided: {homogenous_csv}, '
-                    'sampling homogenous patches for val and test splits...')
-        coord_to_patch = defaultdict(list)
-        with open(homogenous_csv, 'r') as f:
+    # if homogenous patch csvs provided, sample homogenous patches
+    homogenous_val_csv = getattr(cfg.preprocess, 'homogenous_val_csv', None)
+    homogenous_test_csv = getattr(cfg.preprocess, 'homogenous_test_csv', None)
+    
+    if homogenous_val_csv is not None:
+        logger.info(f'Homogenous val CSV provided: {homogenous_val_csv}, '
+                    'sampling homogenous patches for val split...')
+        val_coord_to_patch = defaultdict(list)
+        with open(homogenous_val_csv, 'r') as f:
             reader = csv.DictReader(f)
             for row in reader:
                 coord = (int(row['y']), int(row['x']))
                 patch = (int(row['i']), int(row['j']))
-                coord_to_patch[coord].append(patch)
+                val_coord_to_patch[coord].append(patch)
         
-        logger.info(f'Loaded {sum(len(v) for v in coord_to_patch.values())} homogenous patch locations '
-                    f'across {len(coord_to_patch)} cells from CSV')
+        logger.info(f'Loaded {sum(len(v) for v in val_coord_to_patch.values())} homogenous patch locations '
+                    f'across {len(val_coord_to_patch)} cells from val CSV')
         
-        # Filter tile_infos to only include cells that are in the CSV
-        # This avoids iterating over all 500-1000 tiles when only 50-100 have homogenous patches
-        homogenous_coords = set(coord_to_patch.keys())
-        
+        # Filter val tile_infos to only include cells that are in the CSV
+        val_homogenous_coords = set(val_coord_to_patch.keys())
         val_tile_infos_homogenous = [
             ti for ti in val_tile_infos
-            if (int(ti[0].name.split('_')[0]), int(ti[0].name.split('_')[1])) in homogenous_coords
-        ]
-        test_tile_infos_homogenous = [
-            ti for ti in test_tile_infos
-            if (int(ti[0].name.split('_')[0]), int(ti[0].name.split('_')[1])) in homogenous_coords
+            if (int(ti[0].name.split('_')[0]), int(ti[0].name.split('_')[1])) in val_homogenous_coords
         ]
         
-        logger.info(f'Filtered to {len(val_tile_infos_homogenous)} val tiles and '
-                    f'{len(test_tile_infos_homogenous)} test tiles with homogenous patch locations')
+        logger.info(f'Filtered to {len(val_tile_infos_homogenous)} val tiles with homogenous patch locations')
         
         # Sample val homogenous patches
         val_homogenous = sample_homogenous_patches(
             val_tile_infos_homogenous, cfg.preprocess.size, acquisitions,
-            missing_percent, coord_to_patch
+            missing_percent, val_coord_to_patch
         )
         val_homogenous_file = pre_sample_dir / 'val_homogenous_patches.npy'
         np.save(val_homogenous_file, val_homogenous)
         logger.info(f'Saved {val_homogenous.shape[0]} val homogenous patches to {val_homogenous_file}')
+    
+    if homogenous_test_csv is not None:
+        logger.info(f'Homogenous test CSV provided: {homogenous_test_csv}, '
+                    'sampling homogenous patches for test split...')
+        test_coord_to_patch = defaultdict(list)
+        with open(homogenous_test_csv, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                coord = (int(row['y']), int(row['x']))
+                patch = (int(row['i']), int(row['j']))
+                test_coord_to_patch[coord].append(patch)
+        
+        logger.info(f'Loaded {sum(len(v) for v in test_coord_to_patch.values())} homogenous patch locations '
+                    f'across {len(test_coord_to_patch)} cells from test CSV')
+        
+        # Filter test tile_infos to only include cells that are in the CSV
+        test_homogenous_coords = set(test_coord_to_patch.keys())
+        test_tile_infos_homogenous = [
+            ti for ti in test_tile_infos
+            if (int(ti[0].name.split('_')[0]), int(ti[0].name.split('_')[1])) in test_homogenous_coords
+        ]
+        
+        logger.info(f'Filtered to {len(test_tile_infos_homogenous)} test tiles with homogenous patch locations')
         
         # Sample test homogenous patches
         test_homogenous = sample_homogenous_patches(
             test_tile_infos_homogenous, cfg.preprocess.size, acquisitions,
-            missing_percent, coord_to_patch
+            missing_percent, test_coord_to_patch
         )
         test_homogenous_file = pre_sample_dir / 'test_homogenous_patches.npy'
         np.save(test_homogenous_file, test_homogenous)

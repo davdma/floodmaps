@@ -205,7 +205,7 @@ def test_loop(model, dataloader, device, loss_fn, cfg, run, epoch, beta_schedule
 
     # two different validation losses:
     # encoder-decoder uses full model
-    # *inference* uses only decoder, this is what we care about
+    # *inference* uses only decoder (generation only metric)
     log_dict = {'val loss (encoder-decoder)': epoch_tot_vloss,
                 'val_recons_loss (*inference*)': epoch_tot_vloss_inf}
 
@@ -223,7 +223,74 @@ def test_loop(model, dataloader, device, loss_fn, cfg, run, epoch, beta_schedule
     log_var_mean_var.reset()
 
     run.log(log_dict, step=epoch)
-    return epoch_tot_vloss, epoch_tot_vloss_inf
+
+    metrics_dict = log_dict.copy()
+    return epoch_tot_vloss, epoch_tot_vloss_inf, metrics_dict
+
+def evaluate(model, dataloader, device, loss_fn, cfg, beta_scheduler=None):
+    """Evaluate metrics on test set without logging."""
+    running_tot_vloss = torch.tensor(0.0, device=device)
+    running_tot_vloss_inf = torch.tensor(0.0, device=device) # recons loss from random sampling z then decoding
+    running_recons_loss = torch.tensor(0.0, device=device)
+    running_kld_loss = torch.tensor(0.0, device=device)
+    num_batches = len(dataloader)
+
+    # for VAE monitoring
+    mu_mean_var = RunningMeanVar(unbiased=True).to(device)
+    log_var_mean_var = RunningMeanVar(unbiased=True).to(device)
+
+    model.eval()
+    with torch.no_grad():
+        for batch_i, (X, y) in enumerate(dataloader):
+            X = X.to(device)
+            y = y.to(device)
+            # evaluate reconstruction
+            out_dict = model(X, y)
+            loss_dict = compute_loss(out_dict, y, loss_fn, cfg, beta_scheduler=beta_scheduler)
+            loss = loss_dict['elbo_loss']
+            if torch.isnan(loss).any():
+                err_file_name=f"outputs/ad_param_err_val_{cfg.model.autodespeckler}.json"
+                stats_dict = print_model_params_and_grads(model, file_name=err_file_name)
+                raise ValueError(f"Loss became NaN during validation loop in batch {batch_i}. \
+                                The input SAR was NaN: {torch.isnan(X).any()}")
+            running_tot_vloss += loss.detach()
+
+            # Collect mu and log_var for the whole epoch
+            mu_mean_var.update(out_dict['mu'])
+            log_var_mean_var.update(out_dict['log_var'])
+            running_recons_loss += loss_dict['recons_loss']
+            running_kld_loss += loss_dict['kld_loss']
+
+            # evaluate inference / generation
+            inference_out_dict = model.inference(X)
+            inference_loss_dict = compute_inference_loss(inference_out_dict, y, loss_fn)
+            inference_loss = inference_loss_dict['recons_loss'] # for inference we only have reconstruction loss
+            running_tot_vloss_inf += inference_loss.detach()
+
+    epoch_tot_vloss = running_tot_vloss.item() / num_batches
+    epoch_tot_vloss_inf = running_tot_vloss_inf.item() / num_batches
+
+    # two different validation losses:
+    # encoder-decoder uses full model
+    # *inference* uses only decoder (generation only metric)
+    log_dict = {'test loss (encoder-decoder)': epoch_tot_vloss,
+                'test_recons_loss (*inference*)': epoch_tot_vloss_inf}
+
+    mu_mean_var_results = mu_mean_var.compute()
+    log_var_mean_var_results = log_var_mean_var.compute()
+    log_dict.update({
+                "test_mu_mean": mu_mean_var_results['mean'].item(),
+                "test_mu_std": mu_mean_var_results['var'].sqrt().item(),
+                "test_log_var_mean": log_var_mean_var_results['mean'].item(),
+                "test_log_var_std": log_var_mean_var_results['var'].sqrt().item(),
+                "test_recons_loss (encoder-decoder)": running_recons_loss.item() / num_batches,
+                "test_kld_loss (encoder-decoder)": running_kld_loss.item() / num_batches
+            })
+    mu_mean_var.reset()
+    log_var_mean_var.reset()
+
+    metrics_dict = log_dict.copy()
+    return epoch_tot_vloss, epoch_tot_vloss_inf, metrics_dict
 
 def train(model, train_loader, val_loader, test_loader, device, cfg, run):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -256,7 +323,6 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
                                     period=cfg.model.cvae.beta_period, n_cycle=cfg.model.cvae.beta_cycles,
                                     count_cycles=False)
 
-    run.define_metric("val reconstruction loss", summary="min")
     loss_fn = get_ad_loss(cfg).to(device)
     for epoch in range(cfg.train.epochs):
         try:
@@ -266,14 +332,14 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
                                   beta_scheduler=beta_scheduler)
 
             # at the end of each training epoch compute validation
-            avg_vloss, avg_vloss_inf = test_loop(model, val_loader, device, loss_fn, cfg, run,
+            avg_vloss, avg_vloss_inf, val_metrics_dict = test_loop(model, val_loader, device, loss_fn, cfg, run,
                                   epoch, beta_scheduler=beta_scheduler)
         except Exception as err:
             raise RuntimeError(f'Error while training occurred at epoch {epoch}.') from err
 
         if cfg.train.early_stopping:
             # early stop on elbo loss (NOT inference loss)
-            early_stopper.step(avg_vloss, model, epoch)
+            early_stopper.step(avg_vloss, model, epoch, metrics=val_metrics_dict)
             if early_stopper.is_stopped():
                 break
 
@@ -298,20 +364,27 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
     model_weights = None
     if cfg.train.early_stopping:
         model_weights = early_stopper.get_best_weights()
+        best_val_metrics = early_stopper.get_best_metrics()
         # reset model to checkpoint for later sample prediction
         model.load_state_dict(model_weights)
-        fmetrics.save_metrics('val', loss=early_stopper.get_min_validation_loss())
+        fmetrics.save_metrics('val', loss=early_stopper.get_min_validation_loss(), **best_val_metrics)
         run.summary[f"best_epoch"] = early_stopper.get_best_epoch()
+        run.summary.update({'final model val loss (encoder-decoder)': best_val_metrics['val loss (encoder-decoder)']})
+        run.summary.update({'final model val loss (inference)': best_val_metrics['val_recons_loss (*inference*)']})
     else:
         model_weights = model.state_dict()
-        fmetrics.save_metrics('val', loss=avg_vloss)
+        fmetrics.save_metrics('val', loss=avg_vloss, **val_metrics_dict)
+        run.summary.update({'final model val loss (encoder-decoder)': avg_vloss})
+        run.summary.update({'final model val loss (inference)': avg_vloss_inf})
 
     # for benchmarking purposes
     if cfg.eval.mode == 'test':
-        test_loss, _ = test_loop(test_loader, model, device, cfg, logging=False)
-        fmetrics.save_metrics('test', loss=test_loss)
+        # NOTE: will only use the most recent beta scheduler state for test loss (may be inaccurate)
+        test_loss, _, test_metrics = evaluate(model, test_loader, device, loss_fn, cfg, beta_scheduler=beta_scheduler)
+        fmetrics.save_metrics('test', loss=test_loss, **test_metrics)
+        run.summary.update({'final model test loss (encoder-decoder)': test_metrics['test loss (encoder-decoder)']})
+        run.summary.update({'final model test loss (inference)': test_metrics['test_recons_loss (*inference*)']})
 
-    run.summary[f"final_{cfg.eval.mode}_loss"] = fmetrics.get_metrics(split=cfg.eval.mode)['loss']
     return model_weights, fmetrics
 
 def calculate_metrics(dataloader, homogenous_dataloader, train_mean, train_std, model, \
@@ -433,19 +506,19 @@ def calculate_metrics(dataloader, homogenous_dataloader, train_mean, train_std, 
             count_homogenous += B
 
     metrics_dict = {
-        "avg psnr_vv": psnr_vv.item() / count,
-        "avg psnr_vh": psnr_vh.item() / count,
-        "avg ssim_vv": ssim_vv.item() / count,
-        "avg ssim_vh": ssim_vh.item() / count,
-        "avg var_lap_vv": var_lap_vv.item() / count,
-        "avg var_lap_vh": var_lap_vh.item() / count,
-        "avg enl_vv": enl_vv.item() / count_homogenous,
-        "avg enl_vh": enl_vh.item() / count_homogenous,
+        f"{cfg.eval.mode} avg psnr_vv": psnr_vv.item() / count,
+        f"{cfg.eval.mode} avg psnr_vh": psnr_vh.item() / count,
+        f"{cfg.eval.mode} avg ssim_vv": ssim_vv.item() / count,
+        f"{cfg.eval.mode} avg ssim_vh": ssim_vh.item() / count,
+        f"{cfg.eval.mode} avg var_lap_vv": var_lap_vv.item() / count,
+        f"{cfg.eval.mode} avg var_lap_vh": var_lap_vh.item() / count,
+        f"{cfg.eval.mode} avg enl_vv": enl_vv.item() / count_homogenous,
+        f"{cfg.eval.mode} avg enl_vh": enl_vh.item() / count_homogenous,
     }
     metrics.save_metrics(cfg.eval.mode, **metrics_dict)
 
     # log as wandb summary statistics
-    run.summary.update(metrics_dict)
+    run.summary.update({f'final model {key}': value for key, value in metrics_dict.items()})
 
 def save_experiment(weights, metrics, cfg, run):
     """Save experiment files to directory specified by config save_path."""
@@ -476,19 +549,34 @@ def save_experiment(weights, metrics, cfg, run):
         json.dump(wandb_info, f, indent=4)
 
 
-def create_histogram_plot(input_values, output_values, min=-2, max=2):
+def create_histogram_plot(composite_values, output_values, db_min, db_max, channel_name="SAR"):
     """
-    Creates an overlaid histogram and returns a WandB Image.
+    Creates an overlaid histogram comparing composite (target) and despeckled output in dB scale.
+
+    Parameters
+    ----------
+    composite_values : np.ndarray
+        Flattened composite/target values in dB scale.
+    output_values : np.ndarray
+        Flattened despeckled output values in dB scale.
+    db_min : float
+        Minimum dB value for histogram range (e.g., -30 for VV/VH).
+    db_max : float
+        Maximum dB value for histogram range (e.g., 0 for VV, -5 for VH).
+    channel_name : str
+        Channel name for the title (e.g., "VV" or "VH").
 
     Note: resolution for wandb image is low (except for the matplotlib distribution plots).
     This is for efficiency sake. During final benchmarking, can use matplotlib fig with dpi=300
     for high res WandB image.
     """
     fig, ax = plt.subplots(figsize=(5, 4), dpi=200)
-    ax.hist(input_values, bins=50, alpha=0.5, range=(min, max), label="SAR-in", color="blue")
-    ax.hist(output_values, bins=50, alpha=0.5, range=(min, max), label="SAR-out", color="orange")
+    ax.hist(composite_values, bins=50, alpha=0.5, range=(db_min, db_max), label="Composite", color="blue")
+    ax.hist(output_values, bins=50, alpha=0.5, range=(db_min, db_max), label="Despeckled", color="orange")
     ax.legend()
-    ax.set_title("Overlayed SAR Intensity Distribution")
+    ax.set_xlabel("dB")
+    ax.set_ylabel("Count")
+    ax.set_title(f"{channel_name} dB Distribution")
 
     # Convert the figure to a WandB image
     wandb_image = wandb.Image(fig)
@@ -497,148 +585,203 @@ def create_histogram_plot(input_values, output_values, min=-2, max=2):
     return wandb_image
 
 def sample_predictions(model, sample_set, mean, std, cfg, histogram=True, hist_freq=1, seed=24330):
-    """Generate predictions on a subset of images in the dataset for wandb logging."""
+    """Generate predictions on a subset of images in the dataset for wandb logging.
+    
+    Visualizes SAR VV and VH patches in dB grayscale in [-30, 0] and [-30, -5] for VV and VH respectively.
+    All data is denormalized back to dB scale before visualization.
+    
+    Parameters
+    ----------
+    model : nn.Module
+        The trained model.
+    sample_set : Dataset
+        Dataset to sample predictions from.
+    mean : torch.Tensor
+        Mean used for normalization (shape: [C]).
+    std : torch.Tensor
+        Std used for normalization (shape: [C]).
+    cfg : DictConfig
+        Configuration object.
+    histogram : bool
+        Whether to include histogram plots.
+    hist_freq : int
+        Frequency of histogram logging (1 = every sample).
+    seed : int
+        Random seed for reproducibility.
+    """
     if cfg.wandb.num_sample_predictions <= 0:
         return None
 
-    # enable dem visualization in dataset
     columns = ["id", 'input_vv', 'input_vh', 'despeckled_vv', 'despeckled_vh', 'composite_vv', 'composite_vh']
 
-    # some display options
     if histogram:
         columns.extend(['vv_histogram', 'vh_histogram'])
 
     table = wandb.Table(columns=columns)
-    vv_map = ScalarMappable(norm=None, cmap='gray')
-    vh_map = ScalarMappable(norm=None, cmap='gray')
+    
+    # Set up colormaps with fixed dB ranges
+    vv_map = ScalarMappable(norm=Normalize(vmin=VV_DB_MIN, vmax=VV_DB_MAX), cmap='gray')
+    vh_map = ScalarMappable(norm=Normalize(vmin=VH_DB_MIN, vmax=VH_DB_MAX), cmap='gray')
 
     model.to('cpu')
     model.eval()
     rng = Random(seed)
     samples = rng.sample(range(0, len(sample_set)), cfg.wandb.num_sample_predictions)
+    
     for index, k in enumerate(samples):
-        # get all images to shape (H, W, C) with C = 1 or 3 (1 for grayscale, 3 for RGB)
         X, y = sample_set[k]
 
         with torch.no_grad():
             out_dict = model.inference(X.unsqueeze(0))
             despeckler_output = out_dict['despeckler_output'].squeeze(0)
-            despeckler_input = y
 
-        # Channels are descaled using linear variance scaling
-        X = X.permute(1, 2, 0)
-        y = y.permute(1, 2, 0)
-        # X = std * X + mean - removed as we choose to work with standardized data
+        # Denormalize all tensors back to dB scale
+        # X: (C, H, W) -> denormalize -> (H, W, C) for visualization
+        # y: (C, H, W) -> denormalize -> (H, W, C) for visualization
+        # despeckler_output: (C, H, W) -> denormalize
+        
+        # Denormalize input (noisy SAR)
+        X_db = X * std.view(-1, 1, 1) + mean.view(-1, 1, 1)
+        X_db = X_db.permute(1, 2, 0).numpy()  # (H, W, C)
+        
+        # Denormalize composite/target
+        y_db = y * std.view(-1, 1, 1) + mean.view(-1, 1, 1)
+        y_db = y_db.permute(1, 2, 0).numpy()  # (H, W, C)
+        
+        # Denormalize despeckled output
+        despeckled_db = despeckler_output * std.view(-1, 1, 1) + mean.view(-1, 1, 1)
+        despeckled_db = despeckled_db.numpy()  # (C, H, W)
 
         row = [k]
-        # inputs, outputs and their ranges for converting to grayscale
-        vv = X[:, :, 0].numpy()
-        recons_vv = despeckler_output[0].numpy()
-        composite_vv = y[:, :, 0].numpy()
-        min_vv = np.min([np.min(vv), np.min(recons_vv), np.min(composite_vv)])
-        max_vv = np.max([np.max(vv), np.max(recons_vv), np.max(composite_vv)])
-        vv_map.set_norm(Normalize(vmin=min_vv, vmax=max_vv))
+        
+        # Extract VV and VH channels (all in dB scale now)
+        vv_input = X_db[:, :, 0]
+        vv_despeckled = despeckled_db[0]
+        vv_composite = y_db[:, :, 0]
 
-        vh = X[:, :, 1].numpy()
-        recons_vh = despeckler_output[1].numpy()
-        composite_vh = y[:, :, 1].numpy()
-        min_vh = np.min([np.min(vh), np.min(recons_vh), np.min(composite_vh)])
-        max_vh = np.max([np.max(vh), np.max(recons_vh), np.max(composite_vh)])
-        vh_map.set_norm(Normalize(vmin=min_vh, vmax=max_vh))
+        vh_input = X_db[:, :, 1]
+        vh_despeckled = despeckled_db[1]
+        vh_composite = y_db[:, :, 1]
 
-        # VV input images
-        vv = vv_map.to_rgba(vv, bytes=True)
-        vv_img = Image.fromarray(vv, mode="RGBA")
-        row.append(wandb.Image(vv_img))
+        # VV input image
+        vv_rgba = vv_map.to_rgba(vv_input, bytes=True)
+        row.append(wandb.Image(Image.fromarray(vv_rgba, mode="RGBA")))
 
-        # VH input images
-        vh = vh_map.to_rgba(vh, bytes=True)
-        vh_img = Image.fromarray(vh, mode="RGBA")
-        row.append(wandb.Image(vh_img))
+        # VH input image
+        vh_rgba = vh_map.to_rgba(vh_input, bytes=True)
+        row.append(wandb.Image(Image.fromarray(vh_rgba, mode="RGBA")))
 
-        # reconstruction VV
-        recons_vv = vv_map.to_rgba(recons_vv, bytes=True)
-        recons_vv_img = Image.fromarray(recons_vv, mode="RGBA")
-        row.append(wandb.Image(recons_vv_img))
+        # Despeckled VV
+        vv_despeckled_rgba = vv_map.to_rgba(vv_despeckled, bytes=True)
+        row.append(wandb.Image(Image.fromarray(vv_despeckled_rgba, mode="RGBA")))
 
-        # reconstruction VH
-        recons_vh = vh_map.to_rgba(recons_vh, bytes=True)
-        recons_vh_img = Image.fromarray(recons_vh, mode="RGBA")
-        row.append(wandb.Image(recons_vh_img))
+        # Despeckled VH
+        vh_despeckled_rgba = vh_map.to_rgba(vh_despeckled, bytes=True)
+        row.append(wandb.Image(Image.fromarray(vh_despeckled_rgba, mode="RGBA")))
 
-        # composite VV
-        composite_vv = vv_map.to_rgba(composite_vv, bytes=True)
-        composite_vv_img = Image.fromarray(composite_vv, mode="RGBA")
-        row.append(wandb.Image(composite_vv_img))
+        # Composite VV
+        vv_composite_rgba = vv_map.to_rgba(vv_composite, bytes=True)
+        row.append(wandb.Image(Image.fromarray(vv_composite_rgba, mode="RGBA")))
 
-        # composite VH
-        composite_vh = vh_map.to_rgba(composite_vh, bytes=True)
-        composite_vh_img = Image.fromarray(composite_vh, mode="RGBA")
-        row.append(wandb.Image(composite_vh_img))
+        # Composite VH
+        vh_composite_rgba = vh_map.to_rgba(vh_composite, bytes=True)
+        row.append(wandb.Image(Image.fromarray(vh_composite_rgba, mode="RGBA")))
 
-        # compare intensity distributions
+        # Compare dB distributions (composite vs despeckled output)
         if histogram:
             if index % hist_freq == 0:
-                # log_histograms(sar_in.numpy(), despeckler_output.numpy(), k)
-                clean_values = y[:, :, 0].numpy().flatten()
-                output_values = despeckler_output[0].numpy().flatten()
-                row.append(create_histogram_plot(clean_values, output_values, min=-2, max=2))
-
-                clean_values = y[:, :, 1].numpy().flatten()
-                output_values = despeckler_output[1].numpy().flatten()
-                row.append(create_histogram_plot(clean_values, output_values, min=-2, max=2))
+                # VV histogram in dB scale
+                row.append(create_histogram_plot(
+                    vv_composite.flatten(),
+                    vv_despeckled.flatten(),
+                    db_min=VV_DB_MIN,
+                    db_max=VV_DB_MAX,
+                    channel_name="VV"
+                ))
+                # VH histogram in dB scale
+                row.append(create_histogram_plot(
+                    vh_composite.flatten(),
+                    vh_despeckled.flatten(),
+                    db_min=VH_DB_MIN,
+                    db_max=VH_DB_MAX,
+                    channel_name="VH"
+                ))
             else:
-                # skip so add empty cell
                 row.extend([None, None])
 
         table.add_data(*row)
 
     return table
 
-def sample_examples(model, sample_set, cfg, idxs=[14440, 3639, 7866]):
-    """Generate curated examples for model qualitative analysis. Select example cases via dataset indices."""
-    vv_map = ScalarMappable(norm=None, cmap='gray')
-    vh_map = ScalarMappable(norm=None, cmap='gray')
+def sample_examples(model, sample_set, mean, std, cfg, idxs=[14440, 3639, 7866]):
+    """Generate curated examples for model qualitative analysis. Select example cases via dataset indices.
+    
+    Visualizes SAR VV and VH patches in dB grayscale with fixed ranges:
+    - VV: [-30, 0] dB
+    - VH: [-30, -5] dB
+    
+    Parameters
+    ----------
+    model : nn.Module
+        The trained model.
+    sample_set : Dataset
+        Dataset to sample from.
+    mean : torch.Tensor
+        Mean used for normalization (shape: [C]).
+    std : torch.Tensor
+        Std used for normalization (shape: [C]).
+    cfg : DictConfig
+        Configuration object.
+    idxs : list[int]
+        Dataset indices for curated examples.
+    """
+    # Set up colormaps with fixed dB ranges
+    vv_map = ScalarMappable(norm=Normalize(vmin=VV_DB_MIN, vmax=VV_DB_MAX), cmap='gray')
+    vh_map = ScalarMappable(norm=Normalize(vmin=VH_DB_MIN, vmax=VH_DB_MAX), cmap='gray')
+    
     model.to('cpu')
     model.eval()
     examples = []
+    
     for k in idxs:
-        # get all images to shape (H, W, C) with C = 1 or 3 (1 for grayscale, 3 for RGB)
         X, y = sample_set[k]
 
         with torch.no_grad():
             out_dict = model.inference(X.unsqueeze(0))
             despeckler_output = out_dict['despeckler_output'].squeeze(0)
 
-        # Channels are descaled using linear variance scaling
-        X = X.permute(1, 2, 0)
-        y = y.permute(1, 2, 0)
+        # Denormalize all tensors back to dB scale
+        # X: (C, H, W) -> denormalize
+        X_db = X * std.view(-1, 1, 1) + mean.view(-1, 1, 1)
+        X_db = X_db.permute(1, 2, 0).numpy()  # (H, W, C)
+        
+        # y: (C, H, W) -> denormalize
+        y_db = y * std.view(-1, 1, 1) + mean.view(-1, 1, 1)
+        y_db = y_db.permute(1, 2, 0).numpy()  # (H, W, C)
+        
+        # despeckler_output: (C, H, W) -> denormalize
+        despeckled_db = despeckler_output * std.view(-1, 1, 1) + mean.view(-1, 1, 1)
+        despeckled_db = despeckled_db.numpy()  # (C, H, W)
 
-        # inputs, outputs and their ranges for converting to grayscale
-        vv = X[:, :, 0].numpy()
-        recons_vv = despeckler_output[0].numpy()
-        composite_vv = y[:, :, 0].numpy()
-        min_vv = np.min([np.min(vv), np.min(composite_vv), np.min(recons_vv)])
-        max_vv = np.max([np.max(vv), np.max(composite_vv), np.max(recons_vv)])
-        vv_map.set_norm(Normalize(vmin=min_vv, vmax=max_vv))
+        # Extract VV and VH channels (all in dB scale)
+        vv_input = X_db[:, :, 0]
+        vv_despeckled = despeckled_db[0]
+        vv_composite = y_db[:, :, 0]
 
-        vh = X[:, :, 1].numpy()
-        recons_vh = despeckler_output[1].numpy()
-        composite_vh = y[:, :, 1].numpy()
-        min_vh = np.min([np.min(vh), np.min(composite_vh), np.min(recons_vh)])
-        max_vh = np.max([np.max(vh), np.max(composite_vh), np.max(recons_vh)])
-        vh_map.set_norm(Normalize(vmin=min_vh, vmax=max_vh))
+        vh_input = X_db[:, :, 1]
+        vh_despeckled = despeckled_db[1]
+        vh_composite = y_db[:, :, 1]
 
-        # Stitch the VV and VH images into vertical columns
-        stitched_vv = np.vstack([vv, recons_vv, composite_vv])
-        stitched_vv = vv_map.to_rgba(stitched_vv, bytes=True)
-        vv_img = Image.fromarray(stitched_vv, mode="RGBA")
+        # Stitch VV images into vertical column (Input | Despeckled | Composite)
+        stitched_vv = np.vstack([vv_input, vv_despeckled, vv_composite])
+        stitched_vv_rgba = vv_map.to_rgba(stitched_vv, bytes=True)
+        vv_img = Image.fromarray(stitched_vv_rgba, mode="RGBA")
         examples.append(wandb.Image(vv_img, caption=f"({k}VV) Top: In, Middle: Out, Bottom: Composite"))
 
-        # VH input images
-        stitched_vh = np.vstack([vh, recons_vh, composite_vh])
-        stitched_vh = vh_map.to_rgba(stitched_vh, bytes=True)
-        vh_img = Image.fromarray(stitched_vh, mode="RGBA")
+        # Stitch VH images into vertical column (Input | Despeckled | Composite)
+        stitched_vh = np.vstack([vh_input, vh_despeckled, vh_composite])
+        stitched_vh_rgba = vh_map.to_rgba(stitched_vh, bytes=True)
+        vh_img = Image.fromarray(stitched_vh_rgba, mode="RGBA")
         examples.append(wandb.Image(vh_img, caption=f"({k}VH) Top: In, Middle: Out, Bottom: Composite"))
 
     return examples
@@ -772,15 +915,21 @@ def run_experiment_ad(cfg):
 
         # train and save results metrics
         weights, fmetrics = train(model, train_loader, val_loader, test_loader, device, cfg, run)
-        calculate_metrics(test_loader if cfg.eval.mode == 'test' else val_loader,
-                      test_homogenous_loader if cfg.eval.mode == 'test' else val_homogenous_loader,
-                      train_mean, train_std, model, device, fmetrics, cfg, run)
+
+        # final val despeckling metrics
+        calculate_metrics(val_loader, val_homogenous_loader,
+                        train_mean, train_std, model, device, fmetrics, cfg, run)
+
+        # final test despeckling metrics
+        if cfg.eval.mode == 'test':
+            calculate_metrics(test_loader, test_homogenous_loader,
+                        train_mean, train_std, model, device, fmetrics, cfg, run)
         if cfg.save:
             save_experiment(weights, fmetrics, cfg, run)
 
         # sample train predictions for analysis - for debugging
         train_pred_table = sample_predictions(model, train_set, train_mean, train_std, cfg)
-        train_examples = sample_examples(model, train_set, cfg)
+        train_examples = sample_examples(model, train_set, train_mean, train_std, cfg)
         run.log({"model_train_predictions": train_pred_table, "train_examples": train_examples})
 
         # sample predictions for analysis
@@ -788,7 +937,8 @@ def run_experiment_ad(cfg):
                                         train_mean, train_std, cfg)
 
         # pick 3 full res examples for closer look
-        examples = sample_examples(model, test_set if cfg.eval.mode == 'test' else val_set, cfg)
+        examples = sample_examples(model, test_set if cfg.eval.mode == 'test' else val_set, 
+                                   train_mean, train_std, cfg)
         run.log({f"model_{cfg.eval.mode}_predictions": pred_table, "val_examples": examples})
     except Exception as e:
         print("An exception occurred during training!")

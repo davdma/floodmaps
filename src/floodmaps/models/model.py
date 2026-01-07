@@ -4,14 +4,7 @@ from torch import nn
 from floodmaps.models.unet import UNet
 from floodmaps.models.unet_plus import NestedUNet
 from floodmaps.models.discriminator import Classifier1, Classifier2, Classifier3
-from floodmaps.models.autodespeckler import (
-    ConvAutoencoder1, 
-    ConvAutoencoder2, 
-    DenoiseAutoencoder, 
-    VarAutoencoder, 
-    CVAE,
-    CVAE_no_cond
-)
+from floodmaps.models.autodespeckler import VarAutoencoder, CVAE, CVAE_no_cond
 from floodmaps.utils.utils import load_model_weights
 
 def build_autodespeckler(cfg):
@@ -22,29 +15,13 @@ def build_autodespeckler(cfg):
     cfg : obj
         SAR autodespeckler config instance specified in config.py.
     """
-    if cfg.model.autodespeckler == "CNN1":
-        return ConvAutoencoder1(latent_dim=cfg.model.cnn1.latent_dim,
-                                dropout=cfg.model.cnn1.AD_dropout,
-                                activation_func=cfg.model.cnn1.AD_activation_func)
-    elif cfg.model.autodespeckler == "CNN2":
-        return ConvAutoencoder2(num_layers=cfg.model.cnn2.AD_num_layers,
-                                kernel_size=cfg.model.cnn2.AD_kernel_size,
-                                dropout=cfg.model.cnn2.AD_dropout,
-                                activation_func=cfg.model.cnn2.AD_activation_func)
-    elif cfg.model.autodespeckler == "DAE":
-        # need to modify with new AE architecture parameters
-        return DenoiseAutoencoder(num_layers=cfg.model.dae.AD_num_layers,
-                                  kernel_size=cfg.model.dae.AD_kernel_size,
-                                  dropout=cfg.model.dae.AD_dropout,
-                                  coeff=cfg.model.dae.noise_coeff,
-                                  noise_type=cfg.model.dae.noise_type,
-                                  activation_func=cfg.model.dae.AD_activation_func)
-    elif cfg.model.autodespeckler == "VAE":
+    if cfg.model.autodespeckler == "VAE":
         # need to modify with new AE architecture parameters
         return VarAutoencoder(latent_dim=cfg.model.vae.latent_dim) # more hyperparameters
     elif cfg.model.autodespeckler == "CVAE":
         if cfg.model.cvae.no_cond:
             # TEMP: conditional VAE without conditioning signal in the encoder
+            print("Using CVAE without conditioning signal.")
             return CVAE_no_cond(in_channels=2, out_channels=2, latent_dim=cfg.model.cvae.latent_dim,
                                 unet_features=cfg.model.cvae.features, dropout=cfg.model.cvae.decoder_dropout)
         # conditional VAE

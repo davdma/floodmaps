@@ -651,6 +651,7 @@ class ADEarlyStopper:
         self.counter = 0
         self.best = False
         self.min_validation_loss = float('inf')
+        self.metrics = None
         self.best_model_weights = None
         self.best_epoch = 0 # newly added
 
@@ -668,6 +669,7 @@ class ADEarlyStopper:
             "counter": self.counter,
             "best": self.best,
             "min_validation_loss": self.min_validation_loss,
+            "metrics": self.metrics,
             "best_model_weights": self.best_model_weights,
             "best_epoch": self.best_epoch,
             "beta_annealing": self.beta_annealing,
@@ -682,6 +684,7 @@ class ADEarlyStopper:
         self.counter = state["counter"]
         self.best = state["best"]
         self.min_validation_loss = state["min_validation_loss"]
+        self.metrics = state["metrics"]
         self.best_model_weights = state["best_model_weights"]
         self.best_epoch = state["best_epoch"]
         self.beta_annealing = state["beta_annealing"]
@@ -689,7 +692,7 @@ class ADEarlyStopper:
         self.n_cycle = state["n_cycle"]
         self.count_cycles = state["count_cycles"]
 
-    def step(self, validation_loss, model, epoch):
+    def step(self, validation_loss, model, epoch, metrics=None):
         """
         Note: For beta annealing scheduling at the end of n_cycles,
         we revert to normal early stopping with fixed beta.
@@ -713,6 +716,7 @@ class ADEarlyStopper:
             self.best = True
             self.best_model_weights = copy.deepcopy(model.state_dict())
             self.best_epoch = epoch
+            self.metrics = metrics
         elif validation_loss > (self.min_validation_loss + self.min_delta):
             if self.beta_annealing and not self.count_cycles:
                 if epoch >= self.n_cycle * self.period:
@@ -726,6 +730,10 @@ class ADEarlyStopper:
     def is_stopped(self):
         """Check whether training has stopped."""
         return self.counter >= self.patience
+    
+    def get_best_metrics(self):
+        """Retrieving additional metrics besides loss from best epoch."""
+        return self.metrics
 
     def get_min_validation_loss(self):
         return self.min_validation_loss

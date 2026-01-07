@@ -5,12 +5,131 @@ import numpy as np
 import re
 from glob import glob
 from random import Random
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, IterableDataset, get_worker_info
 from torchvision import transforms
 from pathlib import Path
 
 import ctypes
 import multiprocessing as mp
+
+class ShardedConditionalSARDataset(IterableDataset):
+    """Multitemporal SAR dataset for conditional speckled SAR generation.
+    This implementation yields samples from a list of sharded .npy files.
+    Handles both multiprocessing workers num_workers > 0 and distributed training
+    rank processes. Will partition shards by DDP rank first then samples by worker id.
+
+    NOTE: Shard files must contain the same number of samples, (N, 4, H, W).
+
+    NOTE: Each entire shard is loaded into memory sequentially, with shuffling
+    done in blocks.
+
+    The class assumes 4 channels being:
+    1. Single-slice SAR VV
+    2. Single-slice SAR VH
+    3. Composite SAR VV
+    4. Composite SAR VH
+    
+    Parameters
+    ----------
+    shards : List[Path]
+        List of shard file paths of .npy files.
+    block_size : int
+        Number of samples to load and shuffle.
+    rank : int
+        DDP rank.
+    world_size : int
+        Total number of DDP processes.
+    transform : obj
+        PyTorch transform.
+    random_flip : bool
+        Randomly flip patches (vertically or horizontally) and rotate for augmentation.
+    seed : int
+    """
+    def __init__(self, shards, block_size, rank, world_size, epoch=0, transform=None, random_flip=False, seed=3200, mmap_mode=None):
+        super().__init__()
+        self.shards = shards
+        self.block_size = block_size
+        self.rank = rank
+        self.world_size = world_size
+        self.epoch = epoch
+        self.transform = transform
+        self.random_flip = random_flip
+        self.seed = seed
+        self.mmap_mode = mmap_mode
+
+        # compute shard size
+        arr = np.load(self.shards[0], mmap_mode="r")
+        self.shard_size = arr.shape[0]
+        del arr
+    
+    def __len__(self):
+        return self.shard_size * (len(self.shards) // self.world_size)
+    
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+    def __iter__(self):
+        worker_info = get_worker_info()
+        worker_id = worker_info.id if worker_info is not None else 0
+        num_workers = worker_info.num_workers if worker_info is not None else 1
+
+        rng = Random(self.seed + self.epoch)
+        shuffled_shards = rng.sample(self.shards, len(self.shards))
+
+        # partition shuffled shards among ranks
+        num_shards_per_rank = len(shuffled_shards) // self.world_size
+        rank_shuffled_shards = shuffled_shards[self.rank * num_shards_per_rank:(self.rank + 1) * num_shards_per_rank]
+
+        # partition rank shards among workers
+        # walk through shards in blocks and shuffle blocks in RAM
+        worker_shards = rank_shuffled_shards[worker_id::num_workers]
+        for shard_path in worker_shards:
+            shard_patches = np.load(shard_path, mmap_mode=self.mmap_mode)
+
+            n = shard_patches.shape[0]
+            for i in range(0, n, self.block_size):
+                end = min(i + self.block_size, n)
+                # materialize block in memory
+                block = np.array(shard_patches[i:end], copy=None)
+
+                # shuffle block
+                idx = np.arange(block.shape[0])
+                rng.shuffle(idx)
+                block = block[idx] # (block_size, 4, H, W)
+
+                block_tensor = torch.from_numpy(block)  # (block_size, 4, H, W)
+
+                for j in range(block_tensor.shape[0]):
+                    sar_image = block_tensor[j, :2]
+                    clean_sar_image = block_tensor[j, 2:4]
+
+                    if self.transform:
+                        # for standardization only standardize the non-binary channels!
+                        sar_image = self.transform(sar_image)
+                        clean_sar_image = self.transform(clean_sar_image)
+
+                    if self.random_flip:
+                        sar_image, clean_sar_image = self.hv_random_flip_rotate(rng, sar_image, clean_sar_image)
+                    yield sar_image, clean_sar_image
+    
+    def hv_random_flip_rotate(self, rng, x, y):
+        # Random horizontal flipping
+        if rng.random() > 0.5:
+            x = torch.flip(x, [2])
+            y = torch.flip(y, [2])
+
+        # Random vertical flipping
+        if rng.random() > 0.5:
+            x = torch.flip(x, [1])
+            y = torch.flip(y, [1])
+
+        # Random 90-degree rotations (0, 90, 180, or 270 degrees)
+        k = rng.randint(0, 3)  # number of 90° rotations
+        if k > 0:
+            x = torch.rot90(x, k, [1, 2])
+            y = torch.rot90(y, k, [1, 2])
+
+        return x, y
 
 class ConditionalSARDataset(Dataset):
     """Multitemporal SAR dataset for conditional despeckled SAR generation.
@@ -21,27 +140,26 @@ class ConditionalSARDataset(Dataset):
     3. Composite SAR VV
     4. Composite SAR VH
     
-    The 5th channel is DEM which can be toggled for visualization (NOT IMPLEMENTED YET).
-    
     Parameters
     ----------
     sample_dir : str
         Path to directory containing dataset (in npy file).
     typ : str
         The subset of the dataset to load: train, val, test.
+    random_flip : bool
+        Randomly flip patches (vertically or horizontally) and rotate for augmentation.
     transform : obj
         PyTorch transform.
-    include_dem : bool
-        Whether to include the DEM channel in the output.
     seed : int
         Random seed.
+    mmap_mode : str
+        Mode to use for memory mapping the dataset. (Default: None)
     """
-    def __init__(self, sample_dir, typ="train", random_flip=False, transform=None, include_dem=False, seed=3200, mmap_mode=None):
+    def __init__(self, sample_dir, typ="train", random_flip=False, transform=None, seed=3200, mmap_mode=None):
         self.sample_dir = Path(sample_dir)
         self.typ = typ
         self.random_flip = random_flip
         self.transform = transform
-        self.include_dem = include_dem
         self.seed = seed
         self.mmap_mode = mmap_mode
 
@@ -49,7 +167,6 @@ class ConditionalSARDataset(Dataset):
         self.dataset = np.load(self.sample_dir / f"{typ}_patches.npy", mmap_mode=mmap_mode)
         self.speckled = self.dataset[:, :2, :, :]
         self.composite = self.dataset[:, 2:4, :, :]
-        # self.dem = self.dataset[:, 4:, :, :]
 
         if random_flip:
             self.random = Random(seed)
@@ -65,11 +182,6 @@ class ConditionalSARDataset(Dataset):
             # for standardization only standardize the non-binary channels!
             sar_image = self.transform(sar_image)
             clean_sar_image = self.transform(clean_sar_image)
-
-        # if self.include_dem:
-        #     # add on dem if needed for visual purposes
-        #     dem = torch.from_numpy(self.dem[idx])
-        #     sar_image = torch.cat((sar_image, dem), dim=0)
 
         # add random flips and rotations? Could help prevent learning constant shift...
         if self.random_flip and self.typ == "train":
@@ -97,8 +209,86 @@ class ConditionalSARDataset(Dataset):
 
         return x, y
 
-    def set_include_dem(self, val):
-        self.include_dem = val
+class HomogenousSARDataset(Dataset):
+    """Small set of homogenous patches for evaluating ENL from multitemporal
+    SAR dataset.
+
+    NOTE: Only currently supports type=val or type=test dataset.
+
+    The class assumes 4 channels being:
+    1. Single-slice SAR VV
+    2. Single-slice SAR VH
+    3. Composite SAR VV
+    4. Composite SAR VH
+    
+    Parameters
+    ----------
+    sample_dir : str
+        Path to directory containing dataset (in npy file).
+    typ : str
+        The subset of the dataset to load: val, test.
+    random_flip : bool
+        Randomly flip patches (vertically or horizontally) and rotate for augmentation.
+    transform : obj
+        PyTorch transform.
+    seed : int
+        Random seed.
+    mmap_mode : str
+        Mode to use for memory mapping the dataset. (Default: None)
+    """
+    def __init__(self, sample_dir, typ="val", random_flip=False, transform=None, seed=3200, mmap_mode=None):
+        self.sample_dir = Path(sample_dir)
+        self.typ = typ
+        self.random_flip = random_flip
+        self.transform = transform
+        self.seed = seed
+        self.mmap_mode = mmap_mode
+
+        # first load data in
+        self.dataset = np.load(self.sample_dir / f"{typ}_homogenous_patches.npy", mmap_mode=mmap_mode)
+        self.speckled = self.dataset[:, :2, :, :]
+        self.composite = self.dataset[:, 2:4, :, :]
+
+        if random_flip:
+            self.random = Random(seed)
+
+    def __len__(self):
+        return self.dataset.shape[0]
+
+    def __getitem__(self, idx):
+        sar_image = torch.from_numpy(self.speckled[idx])
+        clean_sar_image = torch.from_numpy(self.composite[idx])
+
+        if self.transform:
+            # for standardization only standardize the non-binary channels!
+            sar_image = self.transform(sar_image)
+            clean_sar_image = self.transform(clean_sar_image)
+
+        # add random flips and rotations? Could help prevent learning constant shift...
+        if self.random_flip and self.typ == "train":
+            # perform the same flip on both the speckled and clean SAR images
+            sar_image, clean_sar_image = self.hv_random_flip_rotate(sar_image, clean_sar_image)
+
+        return sar_image, clean_sar_image
+
+    def hv_random_flip_rotate(self, x, y):
+        # Random horizontal flipping
+        if self.random.random() > 0.5:
+            x = torch.flip(x, [2])
+            y = torch.flip(y, [2])
+
+        # Random vertical flipping
+        if self.random.random() > 0.5:
+            x = torch.flip(x, [1])
+            y = torch.flip(y, [1])
+
+        # Random 90-degree rotations (0, 90, 180, or 270 degrees)
+        k = self.random.randint(0, 3)  # number of 90° rotations
+        if k > 0:
+            x = torch.rot90(x, k, [1, 2])
+            y = torch.rot90(y, k, [1, 2])
+
+        return x, y
 
 class DespecklerSARDataset(Dataset):
     """An abstract class representing the SAR autodespeckler dataset. The entire dataset is

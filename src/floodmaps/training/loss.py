@@ -5,7 +5,7 @@ import torch.nn.functional as F
 ALPHA = 0.3
 BETA = 0.7
 GAMMA = 4/3
-AD_LOSS_NAMES = ['MSELoss', 'L1Loss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss', 'JSDLoss']
+AD_LOSS_NAMES = ['MSELoss', 'L1Loss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss']
 
 class SARLossConfig():
     """Special loss handling object for training SAR flood mapping models. Includes
@@ -213,8 +213,6 @@ def get_ad_loss(cfg):
         return PatchHuberLoss()
     elif cfg.train.loss == 'LogCoshLoss':
         return LogCoshLoss()
-    elif cfg.train.loss == 'JSDLoss':
-        return JSD()
     else:
         raise Exception(f"Loss must be one of: {', '.join(AD_LOSS_NAMES)}")
 
@@ -281,39 +279,6 @@ class LogCoshLoss(nn.Module):
         # Sum over all pixels per patch
         patch_loss = loss.view(loss.size(0), -1).sum(dim=1)
         return patch_loss.mean()
-
-# JSD divergence https://arxiv.org/pdf/1511.01844
-class JSD(nn.Module):
-    """Calculate and sum JSD Divergence across both VV and VH channels.
-    Since it uses KL Divergence, need the input and target to be probability distributions
-    i.e. they sum to one. Thus need to use softmax and also target should be log.
-    Input should also be distribution in log space!"""
-    def __init__(self):
-        super().__init__()
-        self.kl = nn.KLDivLoss(reduction='batchmean', log_target=True)
-
-    def forward(self, p: torch.tensor, q: torch.tensor):
-        # assume that normalized SAR data target and model output is passed in
-        # need to call softmax on both to turn into data distribution!
-        b, c, h, w = p.shape  # (batch, 2, 64, 64)
-
-        # Normalize each SAR channel independently over all pixels (64x64)
-        p = F.softmax(p.view(b, c, -1), dim=2)
-        q = F.softmax(q.view(b, c, -1), dim=2)
-
-        p_vv = p[:, 0, :]
-        p_vh = p[:, 1, :]
-        q_vv = q[:, 0, :]
-        q_vh = q[:, 1, :]
-
-        # Compute the mean distribution
-        m1 = (0.5 * (p_vv + q_vv)).log()
-        m2 = (0.5 * (p_vh + q_vh)).log()
-
-        # Compute Jensen-Shannon Divergence
-        jsd_vv = 0.5 * (self.kl(m1, p_vv.log()) + self.kl(m1, q_vv.log()))
-        jsd_vh = 0.5 * (self.kl(m2, p_vh.log()) + self.kl(m2, q_vh.log()))
-        return jsd_vv + jsd_vh
 
 class BCEDiceLoss(nn.Module):
     def __init__(self, pos_weight=None):

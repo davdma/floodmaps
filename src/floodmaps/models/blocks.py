@@ -1,6 +1,5 @@
 import torch
 from torch import nn
-from torch.distributions import Gamma
     
 class DoubleConv2d(nn.Module):
     """Convolution layer followed by batch normalization and ReLU, done twice."""
@@ -59,53 +58,3 @@ class DiscriminatorBlock2(nn.Module):
 
     def forward(self, x):
         return self.layers(x)
-
-# For DAE
-class GaussianNoiseLayer(nn.Module):
-    def __init__(self, mean=0.0, std=1.0):
-        super().__init__()
-        self.mean = mean
-        self.std = std
-
-    def forward(self, x):
-        if self.training:
-            # noise = torch.normal(self.mean, self.std, x.shape, device=x.device).clip(0, 1)
-            noise = torch.normal(self.mean, self.std, x.shape, device=x.device)
-            return x + noise
-        else:
-            return x
-
-class LogGammaNoiseLayer(nn.Module):
-    # original min_gamma_value=1e-10
-    def __init__(self, looks=5, coeff=0.5, min_gamma_value=torch.finfo(torch.float32).tiny):
-        super().__init__()
-        self.looks = looks
-        self.coeff = coeff
-        self.min_gamma_value = min_gamma_value
-
-    def forward(self, x):
-        if self.training:
-            gamma = Gamma(concentration=torch.ones(x.shape, device=x.device) * self.looks, 
-                          rate=torch.ones(x.shape, device=x.device) * (1/self.looks)).sample()
-            # ensure not zero before taking log!
-            gamma = torch.clamp(gamma, min=self.min_gamma_value)
-            log_gamma = 10 * torch.log10(gamma)
-            # normalize
-            mean = log_gamma.mean()
-            std = log_gamma.std()
-            normalized_log_gamma = (log_gamma - mean) / std
-            return x + self.coeff * normalized_log_gamma
-        else:
-            return x
-
-class MaskingNoiseLayer(nn.Module):
-    def __init__(self, coeff=0.2):
-        super().__init__()
-        self.coeff = coeff
-
-    def forward(self, x):
-        if self.training:
-            m = (1 - self.coeff) * torch.ones(x.shape, device=x.device)
-            return x * torch.bernoulli(m)
-        else:
-            return x

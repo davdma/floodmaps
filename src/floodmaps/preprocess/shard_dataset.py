@@ -42,7 +42,7 @@ def main(cfg: DictConfig) -> None:
     
     cfg.preprocess Parameters
     - preprocess_dir: str (path to the preprocessed dataset containing train_patches.npy)
-    - shard_mem_size: int (memory size of each shard in GiB, using binary convention 1024^3 bytes)
+    - num_shards: int (number of shards to create)
     - drop_last: bool (whether to drop patches to ensure shards are of equal size)
     - delete_original: bool (whether to delete the original train_patches.npy upon completion)
     - scratch_dir: str (optional, path to scratch directory for intermediate files)
@@ -60,7 +60,7 @@ def main(cfg: DictConfig) -> None:
 
     # Parse config
     preprocess_dir = Path(cfg.preprocess.preprocess_dir)
-    shard_mem_size = cfg.preprocess.shard_mem_size
+    num_shards = cfg.preprocess.num_shards
     drop_last = cfg.preprocess.drop_last
     delete_original = cfg.preprocess.delete_original
     scratch_dir = Path(cfg.preprocess.scratch_dir) if getattr(cfg.preprocess, 'scratch_dir', None) else None
@@ -78,7 +78,7 @@ def main(cfg: DictConfig) -> None:
 
     logger.info(f'''Starting dataset sharding:
         Preprocess dir:  {preprocess_dir}
-        Shard mem size:  {shard_mem_size} GiB
+        Num shards:      {num_shards}
         Drop last:       {drop_last}
         Delete original: {delete_original}
         Scratch dir:     {scratch_dir}
@@ -92,31 +92,29 @@ def main(cfg: DictConfig) -> None:
     
     logger.info(f'Loaded train_patches.npy: shape={arr.shape}, dtype={dtype}')
 
-    # Calculate memory per patch
-    bytes_per_patch = C * H * W * dtype.itemsize
-    logger.info(f'Bytes per patch: {bytes_per_patch:,} bytes ({C} x {H} x {W} x {dtype.itemsize} bytes)')
-
-    # Calculate patches per shard based on target GiB size
-    shard_bytes = shard_mem_size * BYTES_PER_GIB
-    patches_per_shard = shard_bytes // bytes_per_patch
+    # Validate num_shards
+    if num_shards <= 0:
+        logger.error(f'num_shards must be positive, got {num_shards}')
+        raise ValueError(f'num_shards must be positive, got {num_shards}')
     
-    if patches_per_shard == 0:
-        logger.error(f'Shard size {shard_mem_size} GiB is too small for patches of size {bytes_per_patch:,} bytes')
-        raise ValueError(f'Shard size too small: need at least {bytes_per_patch / BYTES_PER_GIB:.6f} GiB per patch')
+    if num_shards > N:
+        logger.error(f'num_shards ({num_shards}) cannot exceed total patches ({N:,})')
+        raise ValueError(f'num_shards ({num_shards}) cannot exceed total patches ({N:,})')
 
-    # Calculate number of shards and remainder
-    num_shards = N // patches_per_shard
-    remainder = N % patches_per_shard
+    # Calculate patches per shard and remainder
+    patches_per_shard = N // num_shards
+    remainder = N % num_shards
+
+    # Calculate memory per patch and shard size for reporting
+    bytes_per_patch = C * H * W * dtype.itemsize
+    shard_size_gib = (patches_per_shard * bytes_per_patch) / BYTES_PER_GIB
 
     logger.info(f'Sharding calculation:')
     logger.info(f'  Total patches (N):      {N:,}')
-    logger.info(f'  Patches per shard (B):  {patches_per_shard:,}')
     logger.info(f'  Number of shards (k):   {num_shards}')
+    logger.info(f'  Patches per shard (B):  {patches_per_shard:,}')
     logger.info(f'  Remainder (r):          {remainder:,}')
-
-    if num_shards == 0:
-        logger.error(f'Not enough patches ({N:,}) to create even one shard of {patches_per_shard:,} patches')
-        raise ValueError(f'Not enough patches to create a shard')
+    logger.info(f'  Shard size:             {shard_size_gib:.4f} GiB ({patches_per_shard * bytes_per_patch:,} bytes)')
 
     # Build shard assignments based on drop_last setting
     shard_assignments = []  # List of (start_idx, end_idx, shard_idx)

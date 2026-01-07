@@ -31,7 +31,7 @@ from floodmaps.utils.metrics import (denormalize, TV_loss, var_laplacian, ssi, g
 
 AUTODESPECKLER_NAMES = ['CNN1', 'CNN2', 'DAE', 'VAE']
 NOISE_NAMES = ['normal', 'masking', 'log_gamma']
-AD_LOSS_NAMES = ['L1Loss', 'MSELoss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss', 'JSDLoss']
+AD_LOSS_NAMES = ['L1Loss', 'MSELoss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss']
 SCHEDULER_NAMES = ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR'] # 'CosWarmRestarts'
 
 def compute_loss(out_dict, targets, loss_fn, cfg, beta_scheduler=None, debug=False):

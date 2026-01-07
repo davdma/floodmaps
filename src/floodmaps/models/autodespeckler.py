@@ -480,3 +480,63 @@ class CVAE_no_cond(nn.Module):
     def inference(self, x):
         z = torch.randn(x.shape[0], self.latent_dim).to(x.device)
         return {'despeckler_output': self.decode(z, x), 'despeckler_input': x}
+
+
+class ResidualDespeckler(nn.Module):
+    """Residual learning wrapper for U-Net/U-Net++ despeckling.
+    
+    Predicts residual rhat and outputs yhat = x - rhat.
+    This is a deterministic model (no VAE components) that learns
+    to predict the speckle noise pattern to be subtracted from the input.
+    
+    Parameters
+    ----------
+    backbone : nn.Module
+        The backbone network (U-Net or U-Net++) that predicts the residual.
+        Should accept input of shape [B, C, H, W] and output [B, C, H, W].
+    
+    Returns
+    -------
+    dict
+        Dictionary containing:
+        - 'despeckler_output': The despeckled image (x - residual)
+        - 'despeckler_input': The original speckled input x
+        - 'residual': The predicted residual/noise pattern
+    """
+    def __init__(self, backbone):
+        super().__init__()
+        self.backbone = backbone
+    
+    def forward(self, x, y=None):
+        """Forward pass for residual despeckling.
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            Speckled input image [B, C, H, W]
+        y : torch.Tensor, optional
+            Target clean image (ignored, for interface compatibility with CVAE)
+        
+        Returns
+        -------
+        dict
+            Output dictionary with despeckler_output, despeckler_input, and residual
+        """
+        residual = self.backbone(x)
+        despeckled = x - residual
+        return {'despeckler_output': despeckled, 'despeckler_input': x, 'residual': residual}
+    
+    def inference(self, x):
+        """Inference mode (identical to forward for deterministic model).
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            Speckled input image [B, C, H, W]
+        
+        Returns
+        -------
+        dict
+            Output dictionary with despeckler_output, despeckler_input, and residual
+        """
+        return self.forward(x)

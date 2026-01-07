@@ -5,7 +5,7 @@ import torch.nn.functional as F
 ALPHA = 0.3
 BETA = 0.7
 GAMMA = 4/3
-AD_LOSS_NAMES = ['MSELoss', 'L1Loss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss']
+AD_LOSS_NAMES = ['MSELoss', 'L1Loss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss', 'CharbonnierLoss']
 
 class SARLossConfig():
     """Special loss handling object for training SAR flood mapping models. Includes
@@ -213,6 +213,8 @@ def get_ad_loss(cfg):
         return PatchHuberLoss()
     elif cfg.train.loss == 'LogCoshLoss':
         return LogCoshLoss()
+    elif cfg.train.loss == 'CharbonnierLoss':
+        return CharbonnierLoss(eps=1e-6)
     else:
         raise Exception(f"Loss must be one of: {', '.join(AD_LOSS_NAMES)}")
 
@@ -277,6 +279,32 @@ class LogCoshLoss(nn.Module):
         loss = torch.log(torch.cosh(inputs - targets + 1e-12))  # Compute element-wise log-cosh loss
 
         # Sum over all pixels per patch
+        patch_loss = loss.view(loss.size(0), -1).sum(dim=1)
+        return patch_loss.mean()
+
+# loss for AD - differentiable approximation of L1 loss
+class CharbonnierLoss(nn.Module):
+    """Charbonnier loss (differentiable variant of L1).
+    
+    Defined as: sqrt((x - y)^2 + eps^2)
+    
+    More robust to outliers than MSE while being differentiable everywhere
+    unlike L1 loss. Commonly used in image restoration tasks.
+    
+    Parameters
+    ----------
+    eps : float
+        Small constant for numerical stability. Default is 1e-6.
+    """
+    def __init__(self, eps=1e-6):
+        super().__init__()
+        self.register_buffer('eps', torch.tensor(eps))
+
+    def forward(self, inputs, targets):
+        diff = inputs - targets
+        loss = torch.sqrt(diff ** 2 + self.eps ** 2)
+
+        # Per patch loss
         patch_loss = loss.view(loss.size(0), -1).sum(dim=1)
         return patch_loss.mean()
 

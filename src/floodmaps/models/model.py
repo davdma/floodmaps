@@ -4,7 +4,7 @@ from torch import nn
 from floodmaps.models.unet import UNet
 from floodmaps.models.unet_plus import NestedUNet
 from floodmaps.models.discriminator import Classifier1, Classifier2, Classifier3
-from floodmaps.models.autodespeckler import VarAutoencoder, CVAE, CVAE_no_cond
+from floodmaps.models.autodespeckler import VarAutoencoder, CVAE, CVAE_no_cond, ResidualDespeckler
 from floodmaps.utils.utils import load_model_weights
 
 def build_autodespeckler(cfg):
@@ -14,6 +14,12 @@ def build_autodespeckler(cfg):
     ----------
     cfg : obj
         SAR autodespeckler config instance specified in config.py.
+        
+    Supported autodespeckler types:
+        - 'VAE': Variational Autoencoder
+        - 'CVAE': Conditional Variational Autoencoder
+        - 'unet': Residual U-Net for deterministic despeckling
+        - 'unet++': Residual U-Net++ (NestedUNet) for deterministic despeckling
     """
     if cfg.model.autodespeckler == "VAE":
         # need to modify with new AE architecture parameters
@@ -27,6 +33,16 @@ def build_autodespeckler(cfg):
         # conditional VAE
         return CVAE(in_channels=2, out_channels=2, latent_dim=cfg.model.cvae.latent_dim,
                     unet_features=cfg.model.cvae.features, dropout=cfg.model.cvae.decoder_dropout)
+    elif cfg.model.autodespeckler == "unet":
+        # Residual U-Net for deterministic despeckling
+        # Input: 2 channels (VV, VH), Output: 2 channels (residual)
+        backbone = UNet(n_channels=2, num_classes=2, dropout=cfg.model.unet.dropout)
+        return ResidualDespeckler(backbone)
+    elif cfg.model.autodespeckler == "unet++":
+        # Residual U-Net++ (NestedUNet) for deterministic despeckling
+        backbone = NestedUNet(n_channels=2, num_classes=2, dropout=cfg.model.unetpp.dropout,
+                              deep_supervision=cfg.model.unetpp.deep_supervision)
+        return ResidualDespeckler(backbone)
     else:
         raise Exception('Invalid autodespeckler config.')
 

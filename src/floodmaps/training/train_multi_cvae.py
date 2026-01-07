@@ -33,10 +33,10 @@ AD_LOSS_NAMES = ['L1Loss', 'MSELoss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLo
 SCHEDULER_NAMES = ['Constant', 'ReduceLROnPlateau']
 VV_DB_MIN, VV_DB_MAX = -30, 0
 VH_DB_MIN, VH_DB_MAX = -30, -5
-amplitude_min_vv = torch.sqrt(torch.float_power(10, VV_DB_MIN / 10))
-amplitude_max_vv = torch.sqrt(torch.float_power(10, VV_DB_MAX / 10))
-amplitude_min_vh = torch.sqrt(torch.float_power(10, VH_DB_MIN / 10))
-amplitude_max_vh = torch.sqrt(torch.float_power(10, VH_DB_MAX / 10))
+amplitude_min_vv = 10.0 ** (VV_DB_MIN / 20.0)
+amplitude_max_vv = 10.0 ** (VV_DB_MAX / 20.0)
+amplitude_min_vh = 10.0 ** (VH_DB_MIN / 20.0)
+amplitude_max_vh = 10.0 ** (VH_DB_MAX / 20.0)
 
 ### Script for training CVAE with conditioning input:
 ### Separate from train_multi.py as it allows for two different validation losses
@@ -713,7 +713,7 @@ def sample_predictions(model, sample_set, mean, std, cfg, histogram=True, hist_f
 
     return table
 
-def sample_examples(model, sample_set, mean, std, cfg, idxs=[14440, 3639, 7866]):
+def sample_examples(model, sample_set, mean, std, cfg, idxs=[100, 200, 300]):
     """Generate curated examples for model qualitative analysis. Select example cases via dataset indices.
     
     Visualizes SAR VV and VH patches in dB grayscale with fixed ranges:
@@ -929,7 +929,7 @@ def run_experiment_ad(cfg):
 
         # sample train predictions for analysis - for debugging
         train_pred_table = sample_predictions(model, train_set, train_mean, train_std, cfg)
-        train_examples = sample_examples(model, train_set, train_mean, train_std, cfg)
+        train_examples = sample_examples(model, train_set, train_mean, train_std, cfg, idxs=[100, 200, 300])
         run.log({"model_train_predictions": train_pred_table, "train_examples": train_examples})
 
         # sample predictions for analysis
@@ -938,7 +938,7 @@ def run_experiment_ad(cfg):
 
         # pick 3 full res examples for closer look
         examples = sample_examples(model, test_set if cfg.eval.mode == 'test' else val_set, 
-                                   train_mean, train_std, cfg)
+                                   train_mean, train_std, cfg, idxs=[100, 200, 300])
         run.log({f"model_{cfg.eval.mode}_predictions": pred_table, "val_examples": examples})
     except Exception as e:
         print("An exception occurred during training!")

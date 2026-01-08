@@ -145,8 +145,8 @@ def permutation_importance(cfg, ad_cfg=None, dir_path=None):
     # load weights
     if cfg.model.weights is not None:
         model.load_classifier_weights(cfg.model.weights, device)
-    if cfg.model.autodespeckler.ad_weights is not None:
-        model.load_autodespeckler_weights(cfg.model.autodespeckler.ad_weights, device)
+    if ad_cfg is not None and ad_cfg.model.weights is not None:
+        model.load_autodespeckler_weights(ad_cfg.model.weights, device)
     model.eval()
 
     # dataset and transforms

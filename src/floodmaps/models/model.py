@@ -220,8 +220,8 @@ class SARWaterDetector(nn.Module):
         # load weights
         if cfg.model.weights is not None:
             self.load_classifier_weights(cfg.model.weights)
-        if ad_cfg is not None and cfg.model.autodespeckler.ad_weights is not None:
-            self.load_autodespeckler_weights(cfg.model.autodespeckler.ad_weights)
+        if ad_cfg is not None and ad_cfg.model.weights is not None:
+            self.load_autodespeckler_weights(ad_cfg.model.weights)
 
     def get_classifier(self):
         return self.classifier

@@ -276,7 +276,12 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run, cache_
             else:
                 scheduler.step()
 
-        if cfg.train.checkpoint.save_chkpt and epoch % cfg.train.checkpoint.save_chkpt_interval == 0:
+        # Save checkpoint on interval OR when validation improves (best epoch)
+        should_save_chkpt = cfg.train.checkpoint.save_chkpt and (
+            epoch % cfg.train.checkpoint.save_chkpt_interval == 0 or
+            (cfg.train.early_stopping and early_stopper.best)
+        )
+        if should_save_chkpt:
             save_checkpoint(cfg.train.checkpoint.save_chkpt_path, model, optimizer, epoch, scheduler=scheduler, early_stopper=early_stopper)
             
         run.log({"learning_rate": scheduler.get_last_lr()[0] if scheduler is not None else cfg.train.lr}, step=epoch)

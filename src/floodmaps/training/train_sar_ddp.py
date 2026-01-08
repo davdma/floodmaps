@@ -31,7 +31,7 @@ from floodmaps.models.model import SARWaterDetector
 from floodmaps.utils.utils import (flatten_dict, Metrics, EarlyStopper,
                          SARChannelIndexer, get_model_params, nlcd_to_rgb,
                          get_samples_with_wet_percentage, scl_to_rgb, compute_pos_weight,
-                         align_patches_with_shifts)
+                         align_patches_with_shifts, find_free_port)
 from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
 from floodmaps.utils.metrics import (PerClassConfusionMatrix, compute_confmat_dict,
                         NLCD_CLASSES, NLCD_GROUPS, SCL_CLASSES, SCL_GROUPS, RunningMeanVar)
@@ -601,7 +601,12 @@ def train(rank, world_size, model, train_loader, val_loader, test_loader, device
                 scheduler.step()
         
         if rank == 0:
-            if cfg.train.checkpoint.save_chkpt and epoch % cfg.train.checkpoint.save_chkpt_interval == 0:
+            # Save checkpoint on interval OR when validation improves (best epoch)
+            should_save_chkpt = cfg.train.checkpoint.save_chkpt and (
+                epoch % cfg.train.checkpoint.save_chkpt_interval == 0 or
+                (cfg.train.early_stopping and early_stopper.best)
+            )
+            if should_save_chkpt:
                 # Save model.module so checkpoint is portable (no 'module.' prefix in keys)
                 save_checkpoint(cfg.train.checkpoint.save_chkpt_path, model.module, optimizer, epoch, scheduler=scheduler, early_stopper=early_stopper)
 
@@ -1097,13 +1102,6 @@ def validate_config(cfg):
     assert cfg.eval.mode in ['val', 'test'], f"Evaluation mode must be one of {['val', 'test']}"
     assert cfg.wandb.project is not None, "Wandb project must be specified"
     assert validate_channels(cfg.data.channels), "Channels must be a binary string of length 8"
-
-def find_free_port():
-    """Returns free master port for DDP"""
-    import socket
-    with socket.socket() as sock:
-        sock.bind(('', 0))
-        return sock.getsockname()[1]
 
 @hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig):

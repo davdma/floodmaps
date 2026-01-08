@@ -27,6 +27,7 @@ from floodmaps.training.scheduler import get_scheduler
 from floodmaps.training.loss import get_ad_loss
 from floodmaps.utils.utils import (flatten_dict, ADEarlyStopper, Metrics, BetaScheduler, get_gradient_norm,
                    get_model_params, print_model_params_and_grads)
+from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
 from floodmaps.utils.metrics import (denormalize, normalize, convert_to_amplitude, var_laplacian, enl, psnr, RunningMeanVar)
 
 AD_LOSS_NAMES = ['L1Loss', 'MSELoss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss']
@@ -322,9 +323,23 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
         early_stopper = ADEarlyStopper(patience=cfg.train.patience, beta_annealing=cfg.model.cvae.beta_annealing,
                                     period=cfg.model.cvae.beta_period, n_cycle=cfg.model.cvae.beta_cycles,
                                     count_cycles=False)
+    else:
+        early_stopper = None
+
+    # load checkpoint if it exists
+    if cfg.train.checkpoint.load_chkpt:
+        chkpt = load_checkpoint(cfg.train.checkpoint.load_chkpt_path, model, 
+                               optimizer=optimizer, scheduler=scheduler, 
+                               early_stopper=early_stopper,
+                               beta_scheduler=beta_scheduler)
+        start_epoch = chkpt['epoch'] + 1
+        if cfg.train.epochs < start_epoch:
+            raise ValueError(f"Epochs specified in config ({cfg.train.epochs}) is less than the epoch at which the checkpoint was saved ({start_epoch}).")
+    else:
+        start_epoch = 0
 
     loss_fn = get_ad_loss(cfg).to(device)
-    for epoch in range(cfg.train.epochs):
+    for epoch in range(start_epoch, cfg.train.epochs):
         try:
             # train loop
             avg_loss = train_loop(model, train_loader, device, optimizer,
@@ -356,6 +371,16 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
 
         if beta_scheduler is not None:
             beta_scheduler.step()
+
+        # Save checkpoint on interval OR when validation improves (best epoch)
+        should_save_chkpt = cfg.train.checkpoint.save_chkpt and (
+            epoch % cfg.train.checkpoint.save_chkpt_interval == 0 or
+            (cfg.train.early_stopping and early_stopper.best)
+        )
+        if should_save_chkpt:
+            save_checkpoint(cfg.train.checkpoint.save_chkpt_path, model, optimizer, epoch,
+                           scheduler=scheduler, early_stopper=early_stopper,
+                           beta_scheduler=beta_scheduler)
 
         run.log({"learning_rate": scheduler.get_last_lr()[0] if scheduler is not None else cfg.train.lr}, step=epoch)
 

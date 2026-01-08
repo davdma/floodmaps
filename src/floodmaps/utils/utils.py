@@ -413,6 +413,26 @@ class BetaScheduler:
     def get_beta(self):
         return self.cur_beta
 
+    def state_dict(self):
+        """For saving the state of the beta scheduler."""
+        return {
+            "beta": self.beta,
+            "period": self.period,
+            "n_cycle": self.n_cycle,
+            "ratio": self.ratio,
+            "epoch": self.epoch,
+            "cur_beta": self.cur_beta
+        }
+
+    def load_state_dict(self, state):
+        """For loading the state of the beta scheduler."""
+        self.beta = state["beta"]
+        self.period = state["period"]
+        self.n_cycle = state["n_cycle"]
+        self.ratio = state["ratio"]
+        self.epoch = state["epoch"]
+        self.cur_beta = state["cur_beta"]
+
 ### Model and gradient tracking helpers
 def get_gradient_norm(model):
     """Calculate global gradient norm during training."""
@@ -1143,3 +1163,11 @@ def align_patches_with_shifts(patches, row_shifts, col_shifts, window_h, window_
     if not has_channel_dim:
         aligned = aligned.squeeze(1)
     return aligned
+
+
+def find_free_port():
+    """Returns free master port for DDP"""
+    import socket
+    with socket.socket() as sock:
+        sock.bind(('', 0))
+        return sock.getsockname()[1]

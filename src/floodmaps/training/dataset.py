@@ -90,7 +90,9 @@ class ShardedConditionalSARDataset(IterableDataset):
             for i in range(0, n, self.block_size):
                 end = min(i + self.block_size, n)
                 # materialize block in memory
-                block = np.array(shard_patches[i:end], copy=None)
+                block = shard_patches[i:end]
+                if isinstance(block, np.memmap):
+                    block = np.array(block)
 
                 # shuffle block
                 idx = np.arange(block.shape[0])

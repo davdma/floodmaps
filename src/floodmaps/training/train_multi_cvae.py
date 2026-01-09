@@ -28,7 +28,7 @@ from floodmaps.training.loss import get_ad_loss
 from floodmaps.utils.utils import (flatten_dict, ADEarlyStopper, Metrics, BetaScheduler, get_gradient_norm,
                    get_model_params, print_model_params_and_grads)
 from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
-from floodmaps.utils.metrics import (denormalize, normalize, convert_to_amplitude, var_laplacian, enl, psnr, RunningMeanVar)
+from floodmaps.utils.metrics import (denormalize, normalize, convert_to_amplitude, var_laplacian, enl, psnr, ActiveUnitsTracker)
 
 AD_LOSS_NAMES = ['L1Loss', 'MSELoss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss']
 SCHEDULER_NAMES = ['Constant', 'ReduceLROnPlateau']
@@ -87,6 +87,14 @@ def compute_inference_loss(out_dict, targets, loss_fn):
     return loss_dict
 
 def train_loop(model, dataloader, device, optimizer, loss_fn, cfg, run, epoch, beta_scheduler=None):
+    """Training loop for CVAE with posterior collapse monitoring.
+    
+    Posterior collapse metrics (see README.md for interpretation):
+    - AU_strict^/AU_lenient^: Active units at thresholds 1e-2/1e-3
+    - median_KL^: Median per-sample KL divergence
+    - frac_KL_small^: Fraction of samples with KL < 1e-3
+    - log_var_min/max: Raw log variance extrema
+    """
     running_tot_loss = torch.tensor(0.0, device=device)
     running_recons_loss = torch.tensor(0.0, device=device)
     running_kld_loss = torch.tensor(0.0, device=device)
@@ -94,9 +102,12 @@ def train_loop(model, dataloader, device, optimizer, loss_fn, cfg, run, epoch, b
     batches_logged = 0
     num_batches = len(dataloader)
 
-    # for VAE monitoring
-    mu_mean_var = RunningMeanVar(unbiased=True).to(device)
-    log_var_mean_var = RunningMeanVar(unbiased=True).to(device)
+    # Posterior collapse monitoring
+    latent_dim = cfg.model.cvae.latent_dim
+    au_tracker = ActiveUnitsTracker(latent_dim=latent_dim).to(device)
+    kl_per_sample_list = []
+    log_var_min = float('inf')
+    log_var_max = float('-inf')
 
     # AMP setup - use bfloat16 for training speedup
     use_amp = getattr(cfg.train, 'use_amp', False)
@@ -130,56 +141,83 @@ def train_loop(model, dataloader, device, optimizer, loss_fn, cfg, run, epoch, b
         optimizer.step()
 
         running_tot_loss += loss.detach()
-
-        # for CVAE monitoring only
-        # Collect mu and log_var for the whole epoch
-        mu_mean_var.update(out_dict['mu'])
-        log_var_mean_var.update(out_dict['log_var'])
         running_recons_loss += loss_dict['recons_loss'].detach()
         running_kld_loss += loss_dict['kld_loss'].detach()
 
+        # Posterior collapse monitoring
+        mu = out_dict['mu'].detach()
+        raw_log_var = out_dict['log_var'].detach()
+        log_var = torch.clamp(raw_log_var, min=-6, max=6)
+        
+        log_var_min = min(log_var_min, raw_log_var.min().item())
+        log_var_max = max(log_var_max, raw_log_var.max().item())
+        au_tracker.update(mu)
+        
+        # Per-sample KL
+        kl_per_sample = 0.5 * (mu.pow(2) + log_var.exp() - 1 - log_var).sum(dim=1)
+        kl_per_sample_list.append(kl_per_sample)
+
     # calculate metrics
     epoch_tot_loss = running_tot_loss.item() / num_batches
-    avg_epoch_gradient_norm = epoch_gradient_norm.item() / batches_logged
+    avg_epoch_gradient_norm = epoch_gradient_norm.item() / batches_logged if batches_logged > 0 else 0.0
     log_dict = {"train loss": epoch_tot_loss,
                "train gradient norm": avg_epoch_gradient_norm}
 
-    # VAE mu and log_var monitoring
-    # full histogram monitoring
     beta = beta_scheduler.get_beta() if cfg.model.cvae.beta_annealing else cfg.model.cvae.VAE_beta
-    mu_mean_var_results = mu_mean_var.compute()
-    log_var_mean_var_results = log_var_mean_var.compute()
     ratio = (running_recons_loss.item()
                 / (beta * running_kld_loss.item())
             if beta > 0
             else 400)
     log_dict.update({
-                "train_mu_mean": mu_mean_var_results['mean'].item(),
-                "train_mu_std": mu_mean_var_results['var'].sqrt().item(),
-                "train_log_var_mean": log_var_mean_var_results['mean'].item(),
-                "train_log_var_std": log_var_mean_var_results['var'].sqrt().item(),
                 "train_recons_loss": running_recons_loss.item() / num_batches,
                 "train_kld_loss": running_kld_loss.item() / num_batches,
                 "train_ratio": ratio,
                 "beta": beta}
             )
-    mu_mean_var.reset()
-    log_var_mean_var.reset()
+
+    # Compute posterior collapse metrics
+    au_results = au_tracker.compute()
+    all_kl = torch.cat(kl_per_sample_list)
+    median_kl = torch.median(all_kl).item()
+    frac_kl_small = (all_kl < 1e-3).float().mean().item()
+    
+    log_dict.update({
+        "train_AU_strict^": au_results['AU_strict'],
+        "train_AU_lenient^": au_results['AU_lenient'],
+        "train_median_KL^": median_kl,
+        "train_frac_KL_small^": frac_kl_small,
+        "train_log_var_min": log_var_min,
+        "train_log_var_max": log_var_max,
+    })
+    au_tracker.reset()
 
     run.log(log_dict, step=epoch)
 
     return epoch_tot_loss
 
 def test_loop(model, dataloader, device, loss_fn, cfg, run, epoch, beta_scheduler=None):
+    """Validation loop with posterior collapse monitoring and ablation diagnostic.
+    
+    Posterior collapse metrics (see README.md for interpretation):
+    - AU_strict^/AU_lenient^: Active units at thresholds 1e-2/1e-3
+    - median_KL^: Median per-sample KL divergence
+    - frac_KL_small^: Fraction of samples with KL < 1e-3
+    - log_var_min/max: Raw log variance extrema
+    - ablation_delta^: L(z=0) - L(z=mu), tests if decoder ignores z
+    """
     running_tot_vloss = torch.tensor(0.0, device=device)
     running_tot_vloss_inf = torch.tensor(0.0, device=device) # recons loss from random sampling z then decoding
     running_recons_loss = torch.tensor(0.0, device=device)
     running_kld_loss = torch.tensor(0.0, device=device)
     num_batches = len(dataloader)
 
-    # for VAE monitoring
-    mu_mean_var = RunningMeanVar(unbiased=True).to(device)
-    log_var_mean_var = RunningMeanVar(unbiased=True).to(device)
+    # Posterior collapse monitoring
+    latent_dim = cfg.model.cvae.latent_dim
+    au_tracker = ActiveUnitsTracker(latent_dim=latent_dim).to(device)
+    kl_per_sample_list = []
+    log_var_min = float('inf')
+    log_var_max = float('-inf')
+    ablation_delta = 0.0
 
     model.eval()
     with torch.no_grad():
@@ -196,12 +234,29 @@ def test_loop(model, dataloader, device, loss_fn, cfg, run, epoch, beta_schedule
                 raise ValueError(f"Loss became NaN during validation loop in batch {batch_i}. \
                                 The input SAR was NaN: {torch.isnan(X).any()}")
             running_tot_vloss += loss.detach()
+            running_recons_loss += loss_dict['recons_loss'].detach()
+            running_kld_loss += loss_dict['kld_loss'].detach()
 
-            # Collect mu and log_var for the whole epoch
-            mu_mean_var.update(out_dict['mu'])
-            log_var_mean_var.update(out_dict['log_var'])
-            running_recons_loss += loss_dict['recons_loss']
-            running_kld_loss += loss_dict['kld_loss']
+            # Posterior collapse monitoring
+            mu = out_dict['mu'].detach()
+            raw_log_var = out_dict['log_var'].detach()
+            log_var = torch.clamp(raw_log_var, min=-6, max=6)
+            
+            log_var_min = min(log_var_min, raw_log_var.min().item())
+            log_var_max = max(log_var_max, raw_log_var.max().item())
+            au_tracker.update(mu)
+            
+            kl_per_sample = 0.5 * (mu.pow(2) + log_var.exp() - 1 - log_var).sum(dim=1)
+            kl_per_sample_list.append(kl_per_sample)
+
+            # Ablation diagnostic on first batch only
+            if batch_i == 0:
+                out_mu = model.decode(mu, X)
+                loss_mu = loss_fn(out_mu, y)
+                z_zero = torch.zeros_like(mu)
+                out_zero = model.decode(z_zero, X)
+                loss_zero = loss_fn(out_zero, y)
+                ablation_delta = (loss_zero - loss_mu).item()
 
             # evaluate inference / generation
             inference_out_dict = model.inference(X)
@@ -218,18 +273,27 @@ def test_loop(model, dataloader, device, loss_fn, cfg, run, epoch, beta_schedule
     log_dict = {'val loss (encoder-decoder)': epoch_tot_vloss,
                 'val_recons_loss (*inference*)': epoch_tot_vloss_inf}
 
-    mu_mean_var_results = mu_mean_var.compute()
-    log_var_mean_var_results = log_var_mean_var.compute()
     log_dict.update({
-                "val_mu_mean": mu_mean_var_results['mean'].item(),
-                "val_mu_std": mu_mean_var_results['var'].sqrt().item(),
-                "val_log_var_mean": log_var_mean_var_results['mean'].item(),
-                "val_log_var_std": log_var_mean_var_results['var'].sqrt().item(),
                 "val_recons_loss (encoder-decoder)": running_recons_loss.item() / num_batches,
                 "val_kld_loss (encoder-decoder)": running_kld_loss.item() / num_batches
             })
-    mu_mean_var.reset()
-    log_var_mean_var.reset()
+
+    # Compute posterior collapse metrics
+    au_results = au_tracker.compute()
+    all_kl = torch.cat(kl_per_sample_list)
+    median_kl = torch.median(all_kl).item()
+    frac_kl_small = (all_kl < 1e-3).float().mean().item()
+    
+    log_dict.update({
+        "val_AU_strict^": au_results['AU_strict'],
+        "val_AU_lenient^": au_results['AU_lenient'],
+        "val_median_KL^": median_kl,
+        "val_frac_KL_small^": frac_kl_small,
+        "val_log_var_min": log_var_min,
+        "val_log_var_max": log_var_max,
+        "val_ablation_delta^": ablation_delta,
+    })
+    au_tracker.reset()
 
     run.log(log_dict, step=epoch)
 
@@ -237,16 +301,28 @@ def test_loop(model, dataloader, device, loss_fn, cfg, run, epoch, beta_schedule
     return epoch_tot_vloss, epoch_tot_vloss_inf, metrics_dict
 
 def evaluate(model, dataloader, device, loss_fn, cfg, beta_scheduler=None):
-    """Evaluate metrics on test set without logging."""
+    """Evaluate metrics on test set with posterior collapse monitoring.
+    
+    Posterior collapse metrics (see README.md for interpretation):
+    - AU_strict^/AU_lenient^: Active units at thresholds 1e-2/1e-3
+    - median_KL^: Median per-sample KL divergence
+    - frac_KL_small^: Fraction of samples with KL < 1e-3
+    - log_var_min/max: Raw log variance extrema
+    - ablation_delta^: L(z=0) - L(z=mu), tests if decoder ignores z
+    """
     running_tot_vloss = torch.tensor(0.0, device=device)
     running_tot_vloss_inf = torch.tensor(0.0, device=device) # recons loss from random sampling z then decoding
     running_recons_loss = torch.tensor(0.0, device=device)
     running_kld_loss = torch.tensor(0.0, device=device)
     num_batches = len(dataloader)
 
-    # for VAE monitoring
-    mu_mean_var = RunningMeanVar(unbiased=True).to(device)
-    log_var_mean_var = RunningMeanVar(unbiased=True).to(device)
+    # Posterior collapse monitoring
+    latent_dim = cfg.model.cvae.latent_dim
+    au_tracker = ActiveUnitsTracker(latent_dim=latent_dim).to(device)
+    kl_per_sample_list = []
+    log_var_min = float('inf')
+    log_var_max = float('-inf')
+    ablation_delta = 0.0
 
     model.eval()
     with torch.no_grad():
@@ -263,12 +339,29 @@ def evaluate(model, dataloader, device, loss_fn, cfg, beta_scheduler=None):
                 raise ValueError(f"Loss became NaN during validation loop in batch {batch_i}. \
                                 The input SAR was NaN: {torch.isnan(X).any()}")
             running_tot_vloss += loss.detach()
+            running_recons_loss += loss_dict['recons_loss'].detach()
+            running_kld_loss += loss_dict['kld_loss'].detach()
 
-            # Collect mu and log_var for the whole epoch
-            mu_mean_var.update(out_dict['mu'])
-            log_var_mean_var.update(out_dict['log_var'])
-            running_recons_loss += loss_dict['recons_loss']
-            running_kld_loss += loss_dict['kld_loss']
+            # Posterior collapse monitoring
+            mu = out_dict['mu'].detach()
+            raw_log_var = out_dict['log_var'].detach()
+            log_var = torch.clamp(raw_log_var, min=-6, max=6)
+            
+            log_var_min = min(log_var_min, raw_log_var.min().item())
+            log_var_max = max(log_var_max, raw_log_var.max().item())
+            au_tracker.update(mu)
+            
+            kl_per_sample = 0.5 * (mu.pow(2) + log_var.exp() - 1 - log_var).sum(dim=1)
+            kl_per_sample_list.append(kl_per_sample)
+
+            # Ablation diagnostic on first batch only
+            if batch_i == 0:
+                out_mu = model.decode(mu, X)
+                loss_mu = loss_fn(out_mu, y)
+                z_zero = torch.zeros_like(mu)
+                out_zero = model.decode(z_zero, X)
+                loss_zero = loss_fn(out_zero, y)
+                ablation_delta = (loss_zero - loss_mu).item()
 
             # evaluate inference / generation
             inference_out_dict = model.inference(X)
@@ -285,18 +378,27 @@ def evaluate(model, dataloader, device, loss_fn, cfg, beta_scheduler=None):
     log_dict = {'test loss (encoder-decoder)': epoch_tot_vloss,
                 'test_recons_loss (*inference*)': epoch_tot_vloss_inf}
 
-    mu_mean_var_results = mu_mean_var.compute()
-    log_var_mean_var_results = log_var_mean_var.compute()
     log_dict.update({
-                "test_mu_mean": mu_mean_var_results['mean'].item(),
-                "test_mu_std": mu_mean_var_results['var'].sqrt().item(),
-                "test_log_var_mean": log_var_mean_var_results['mean'].item(),
-                "test_log_var_std": log_var_mean_var_results['var'].sqrt().item(),
                 "test_recons_loss (encoder-decoder)": running_recons_loss.item() / num_batches,
                 "test_kld_loss (encoder-decoder)": running_kld_loss.item() / num_batches
             })
-    mu_mean_var.reset()
-    log_var_mean_var.reset()
+
+    # Compute posterior collapse metrics
+    au_results = au_tracker.compute()
+    all_kl = torch.cat(kl_per_sample_list)
+    median_kl = torch.median(all_kl).item()
+    frac_kl_small = (all_kl < 1e-3).float().mean().item()
+    
+    log_dict.update({
+        "test_AU_strict^": au_results['AU_strict'],
+        "test_AU_lenient^": au_results['AU_lenient'],
+        "test_median_KL^": median_kl,
+        "test_frac_KL_small^": frac_kl_small,
+        "test_log_var_min": log_var_min,
+        "test_log_var_max": log_var_max,
+        "test_ablation_delta^": ablation_delta,
+    })
+    au_tracker.reset()
 
     metrics_dict = log_dict.copy()
     return epoch_tot_vloss, epoch_tot_vloss_inf, metrics_dict

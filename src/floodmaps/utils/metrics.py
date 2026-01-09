@@ -140,6 +140,129 @@ class RunningMeanVar(Metric):
 
         return {"mean": total_mean, "var": var.clamp_min(0.0)}
 
+class ActiveUnitsTracker(Metric):
+    """Track active latent dimensions via Var_x[E[z|x]] per dimension using Welford's algorithm.
+    
+    A latent dimension is considered 'active' if its variance of the posterior mean
+    across different input samples exceeds a threshold. Low active units indicates
+    posterior collapse - the decoder is ignoring the latent variable z.
+    
+    This metric streams the variance per dimension efficiently without storing all samples.
+    For DDP, the Welford accumulators (count, mean, M2) are all-reduced before computing.
+    
+    Parameters
+    ----------
+    latent_dim : int
+        Dimension of the latent space.
+    
+    Returns (from compute)
+    -------
+    dict with keys:
+        - 'AU_strict': Active units count with threshold 1e-2
+        - 'AU_lenient': Active units count with threshold 1e-3
+        - 'var_per_dim': Variance per dimension tensor
+    """
+    full_state_update = False
+
+    def __init__(self, latent_dim: int, **kwargs):
+        super().__init__(**kwargs)
+        self.latent_dim = latent_dim
+        
+        # Welford accumulators per dimension - use dist_reduce_fx=None for manual DDP merge
+        self.add_state("count", default=torch.tensor(0.0), dist_reduce_fx=None)
+        self.add_state("mean_per_dim", default=torch.zeros(latent_dim), dist_reduce_fx=None)
+        self.add_state("M2_per_dim", default=torch.zeros(latent_dim), dist_reduce_fx=None)
+
+    @torch.no_grad()
+    def update(self, mu: torch.Tensor):
+        """Update Welford accumulators with a batch of posterior means.
+        
+        Parameters
+        ----------
+        mu : torch.Tensor (B, latent_dim)
+            Batch of posterior mean vectors from the encoder.
+        """
+        mu = mu.detach().float()
+        if mu.numel() == 0:
+            return
+        
+        B = mu.shape[0]
+        b_count = torch.tensor(float(B), device=mu.device)
+        b_mean = mu.mean(dim=0)  # (latent_dim,)
+        b_M2 = ((mu - b_mean.unsqueeze(0)) ** 2).sum(dim=0)  # (latent_dim,)
+        
+        if self.count == 0:
+            self.count = b_count
+            self.mean_per_dim = b_mean
+            self.M2_per_dim = b_M2
+            return
+        
+        # Parallel Welford merge
+        delta = b_mean - self.mean_per_dim
+        new_count = self.count + b_count
+        self.mean_per_dim = self.mean_per_dim + delta * (b_count / new_count)
+        self.M2_per_dim = self.M2_per_dim + b_M2 + delta ** 2 * (self.count * b_count / new_count)
+        self.count = new_count
+
+    def compute(self):
+        """Compute active units after merging accumulators from all ranks (if DDP).
+        
+        Returns
+        -------
+        dict
+            - 'AU_strict': Count of dims with Var[mu] > 1e-2
+            - 'AU_lenient': Count of dims with Var[mu] > 1e-3
+            - 'var_per_dim': Variance per dimension
+        """
+        count = self.count
+        mean_per_dim = self.mean_per_dim
+        M2_per_dim = self.M2_per_dim
+        
+        # Handle DDP case where states may be stacked across ranks
+        if count.ndim > 0:
+            # Fold-merge across ranks
+            total_count = torch.tensor(0.0, device=count.device)
+            total_mean = torch.zeros(self.latent_dim, device=count.device)
+            total_M2 = torch.zeros(self.latent_dim, device=count.device)
+            
+            for c, m, s in zip(count, mean_per_dim, M2_per_dim):
+                if c == 0:
+                    continue
+                if total_count == 0:
+                    total_count, total_mean, total_M2 = c, m, s
+                    continue
+                delta = m - total_mean
+                new_count = total_count + c
+                total_mean = total_mean + delta * (c / new_count)
+                total_M2 = total_M2 + s + delta ** 2 * (total_count * c / new_count)
+                total_count = new_count
+        else:
+            total_count = count
+            total_mean = mean_per_dim
+            total_M2 = M2_per_dim
+        
+        if total_count <= 1:
+            return {
+                'AU_strict': 0,
+                'AU_lenient': 0,
+                'var_per_dim': torch.zeros(self.latent_dim, device=self.count.device)
+            }
+        
+        # Compute variance per dimension (unbiased)
+        var_per_dim = total_M2 / (total_count - 1.0)
+        var_per_dim = var_per_dim.clamp_min(0.0)
+        
+        # Count active units at different thresholds
+        AU_strict = (var_per_dim > 1e-2).sum().item()
+        AU_lenient = (var_per_dim > 1e-3).sum().item()
+        
+        return {
+            'AU_strict': AU_strict,
+            'AU_lenient': AU_lenient,
+            'var_per_dim': var_per_dim
+        }
+
+
 def fast_binary_confusion_matrix(preds, targets):
     """Simplifies the implementation of pytorch lightning binary confusion matrix logic."""
     unique_mapping = (targets * 2 + preds).to(torch.long)

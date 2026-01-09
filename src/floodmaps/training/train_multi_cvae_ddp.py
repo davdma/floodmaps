@@ -33,7 +33,7 @@ from floodmaps.training.loss import get_ad_loss
 from floodmaps.utils.utils import (flatten_dict, ADEarlyStopper, Metrics, BetaScheduler, get_gradient_norm,
                    get_model_params, print_model_params_and_grads, find_free_port)
 from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
-from floodmaps.utils.metrics import (denormalize, normalize, convert_to_amplitude, var_laplacian, enl, psnr, RunningMeanVar)
+from floodmaps.utils.metrics import (denormalize, normalize, convert_to_amplitude, var_laplacian, enl, psnr, ActiveUnitsTracker)
 
 AD_LOSS_NAMES = ['L1Loss', 'MSELoss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss']
 SCHEDULER_NAMES = ['Constant', 'ReduceLROnPlateau']
@@ -51,6 +51,13 @@ torch.backends.cudnn.allow_tf32 = True
 ### Script for training CVAE with conditioning input:
 ### Separate from train_multi.py as it allows for two different validation losses
 ### One for reconstruction (using encoder z) and one for inference (using gaussian z in decoder)
+
+### Monitor for posterior collapse by making sure:
+# KL loss is not zero
+# Median KL_i is not zero
+# Frac(KL < 1e-3) is not zero
+# Ablation delta is not zero
+# Variance of mu across dims is not near zero (use Active Units)
 
 def compute_loss(out_dict, targets, loss_fn, cfg, beta_scheduler=None, debug=False):
     recons_loss = loss_fn(out_dict['despeckler_output'], targets)
@@ -92,9 +99,18 @@ def compute_inference_loss(out_dict, targets, loss_fn):
     return loss_dict
 
 def train_loop(rank, world_size, model, dataloader, device, optimizer, loss_fn, cfg, run, epoch, beta_scheduler=None):
-    """NOTE: The training loss is not used besides weight updates, therefore
+    """Training loop for CVAE with posterior collapse monitoring.
+    
+    NOTE: The training loss is not used besides weight updates, therefore
     it is not all reduced across ranks. The returned loss is only the average
-    of the losses on the local rank."""
+    of the losses on the local rank.
+    
+    Posterior collapse metrics (see README.md for interpretation):
+    - AU_strict^/AU_lenient^: Active units at thresholds 1e-2/1e-3
+    - median_KL^: Median per-sample KL (rank-local, not gathered)
+    - frac_KL_small^: Fraction of samples with KL < 1e-3 (all-reduced)
+    - log_var_min/max: Raw log variance extrema (all-reduced)
+    """
     running_tot_loss = torch.tensor(0.0, device=device)
     running_recons_loss = torch.tensor(0.0, device=device)
     running_kld_loss = torch.tensor(0.0, device=device)
@@ -102,9 +118,14 @@ def train_loop(rank, world_size, model, dataloader, device, optimizer, loss_fn, 
     batches_logged = 0
     num_batches = len(dataloader)
 
-    # for VAE monitoring
-    mu_mean_var = RunningMeanVar(unbiased=True).to(device)
-    log_var_mean_var = RunningMeanVar(unbiased=True).to(device)
+    # Posterior collapse monitoring
+    latent_dim = cfg.model.cvae.latent_dim
+    au_tracker = ActiveUnitsTracker(latent_dim=latent_dim).to(device)
+    kl_per_sample_list = []  # Accumulate per-sample KL for median (rank-local)
+    kl_small_count = torch.tensor(0, device=device, dtype=torch.long)  # Count of samples with KL < 1e-3
+    total_samples = torch.tensor(0, device=device, dtype=torch.long)
+    log_var_min = torch.tensor(float('inf'), device=device)
+    log_var_max = torch.tensor(float('-inf'), device=device)
 
     # AMP setup - use bfloat16 for better numerical stability
     use_amp = getattr(cfg.train, 'use_amp', False)
@@ -139,13 +160,28 @@ def train_loop(rank, world_size, model, dataloader, device, optimizer, loss_fn, 
         optimizer.step()
 
         running_tot_loss += loss.detach()
-
-        # for CVAE monitoring only
-        # Collect mu and log_var for the whole epoch
-        mu_mean_var.update(out_dict['mu'])
-        log_var_mean_var.update(out_dict['log_var'])
         running_recons_loss += loss_dict['recons_loss'].detach()
         running_kld_loss += loss_dict['kld_loss'].detach()
+
+        # Posterior collapse monitoring
+        mu = out_dict['mu'].detach()
+        raw_log_var = out_dict['log_var'].detach()  # Before clamping
+        log_var = torch.clamp(raw_log_var, min=-6, max=6)
+        
+        # Track log_var extrema (before clamping)
+        log_var_min = torch.min(log_var_min, raw_log_var.min())
+        log_var_max = torch.max(log_var_max, raw_log_var.max())
+        
+        # Active Units tracking (streaming Welford)
+        au_tracker.update(mu)
+        
+        # Per-sample KL: KL_i = 0.5 * sum_d(mu_d^2 + exp(log_var_d) - 1 - log_var_d)
+        kl_per_sample = 0.5 * (mu.pow(2) + log_var.exp() - 1 - log_var).sum(dim=1)  # (B,)
+        kl_per_sample_list.append(kl_per_sample)
+        
+        # Count samples with KL < 1e-3
+        kl_small_count += (kl_per_sample < 1e-3).sum()
+        total_samples += kl_per_sample.shape[0]
 
     # calculate metrics
     epoch_tot_loss = running_tot_loss.item() / num_batches
@@ -153,27 +189,47 @@ def train_loop(rank, world_size, model, dataloader, device, optimizer, loss_fn, 
     log_dict = {"train loss": epoch_tot_loss,
                "train gradient norm": avg_epoch_gradient_norm}
 
-    # VAE mu and log_var monitoring
-    # full histogram monitoring
     beta = beta_scheduler.get_beta() if cfg.model.cvae.beta_annealing else cfg.model.cvae.VAE_beta
-    mu_mean_var_results = mu_mean_var.compute()
-    log_var_mean_var_results = log_var_mean_var.compute()
     ratio = (running_recons_loss.item()
                 / (beta * running_kld_loss.item())
             if beta > 0
             else 400)
     log_dict.update({
-                "train_mu_mean": mu_mean_var_results['mean'].item(),
-                "train_mu_std": mu_mean_var_results['var'].sqrt().item(),
-                "train_log_var_mean": log_var_mean_var_results['mean'].item(),
-                "train_log_var_std": log_var_mean_var_results['var'].sqrt().item(),
                 "train_recons_loss": running_recons_loss.item() / num_batches,
                 "train_kld_loss": running_kld_loss.item() / num_batches,
                 "train_ratio": ratio,
                 "beta": beta}
             )
-    mu_mean_var.reset()
-    log_var_mean_var.reset()
+
+    # All-reduce AU Welford accumulators and compute
+    dist.all_reduce(au_tracker.count, op=dist.ReduceOp.SUM)
+    dist.all_reduce(au_tracker.mean_per_dim, op=dist.ReduceOp.SUM)
+    au_tracker.mean_per_dim /= world_size  # Average the means
+    dist.all_reduce(au_tracker.M2_per_dim, op=dist.ReduceOp.SUM)
+    au_results = au_tracker.compute()
+    
+    # All-reduce frac(KL < 1e-3)
+    dist.all_reduce(kl_small_count, op=dist.ReduceOp.SUM)
+    dist.all_reduce(total_samples, op=dist.ReduceOp.SUM)
+    frac_kl_small = kl_small_count.float() / total_samples.float()
+    
+    # All-reduce log_var min/max
+    dist.all_reduce(log_var_min, op=dist.ReduceOp.MIN)
+    dist.all_reduce(log_var_max, op=dist.ReduceOp.MAX)
+    
+    # Median KL computed only on rank 0's samples (no gather for efficiency)
+    all_kl = torch.cat(kl_per_sample_list)
+    median_kl = torch.median(all_kl).item()
+    
+    log_dict.update({
+        "train_AU_strict^": au_results['AU_strict'],
+        "train_AU_lenient^": au_results['AU_lenient'],
+        "train_median_KL^": median_kl,
+        "train_frac_KL_small^": frac_kl_small.item(),
+        "train_log_var_min": log_var_min.item(),
+        "train_log_var_max": log_var_max.item(),
+    })
+    au_tracker.reset()
 
     if rank == 0:
         run.log(log_dict, step=epoch)
@@ -181,16 +237,32 @@ def train_loop(rank, world_size, model, dataloader, device, optimizer, loss_fn, 
     return epoch_tot_loss
 
 def test_loop(rank, world_size, model, dataloader, device, loss_fn, cfg, run, epoch, beta_scheduler=None):
-    """Validation losses are all reduced across ranks."""
+    """Validation loop with posterior collapse monitoring and ablation diagnostic.
+    
+    Validation losses are all reduced across ranks.
+    
+    Posterior collapse metrics (see README.md for interpretation):
+    - AU_strict^/AU_lenient^: Active units at thresholds 1e-2/1e-3
+    - median_KL^: Median per-sample KL (rank-local, not gathered)
+    - frac_KL_small^: Fraction of samples with KL < 1e-3 (all-reduced)
+    - log_var_min/max: Raw log variance extrema (all-reduced)
+    - ablation_delta^: L(z=0) - L(z=mu), tests if decoder ignores z
+    """
     running_tot_vloss = torch.tensor(0.0, device=device)
     running_tot_vloss_inf = torch.tensor(0.0, device=device) # recons loss from random sampling z then decoding
     running_recons_loss = torch.tensor(0.0, device=device)
     running_kld_loss = torch.tensor(0.0, device=device)
     num_batches = len(dataloader)
 
-    # for VAE monitoring
-    mu_mean_var = RunningMeanVar(unbiased=True).to(device)
-    log_var_mean_var = RunningMeanVar(unbiased=True).to(device)
+    # Posterior collapse monitoring
+    latent_dim = cfg.model.cvae.latent_dim
+    au_tracker = ActiveUnitsTracker(latent_dim=latent_dim).to(device)
+    kl_per_sample_list = []  # Accumulate per-sample KL for median (rank-local)
+    kl_small_count = torch.tensor(0, device=device, dtype=torch.long)
+    total_samples = torch.tensor(0, device=device, dtype=torch.long)
+    log_var_min = torch.tensor(float('inf'), device=device)
+    log_var_max = torch.tensor(float('-inf'), device=device)
+    ablation_delta = torch.tensor(0.0, device=device)  # For first batch ablation
 
     model.eval()
     with torch.no_grad():
@@ -208,12 +280,33 @@ def test_loop(rank, world_size, model, dataloader, device, loss_fn, cfg, run, ep
                 raise ValueError(f"Loss became NaN during validation loop in batch {batch_i}. \
                                 The input SAR was NaN: {torch.isnan(X).any()}")
             running_tot_vloss += loss.detach()
-
-            # Collect mu and log_var for the whole epoch
-            mu_mean_var.update(out_dict['mu'])
-            log_var_mean_var.update(out_dict['log_var'])
             running_recons_loss += loss_dict['recons_loss'].detach()
             running_kld_loss += loss_dict['kld_loss'].detach()
+
+            # Posterior collapse monitoring
+            mu = out_dict['mu'].detach()
+            raw_log_var = out_dict['log_var'].detach()
+            log_var = torch.clamp(raw_log_var, min=-6, max=6)
+            
+            log_var_min = torch.min(log_var_min, raw_log_var.min())
+            log_var_max = torch.max(log_var_max, raw_log_var.max())
+            au_tracker.update(mu)
+            
+            kl_per_sample = 0.5 * (mu.pow(2) + log_var.exp() - 1 - log_var).sum(dim=1)
+            kl_per_sample_list.append(kl_per_sample)
+            kl_small_count += (kl_per_sample < 1e-3).sum()
+            total_samples += kl_per_sample.shape[0]
+
+            # Ablation diagnostic on first batch only
+            if batch_i == 0:
+                # z=mu path (deterministic, no sampling)
+                out_mu = model.module.decode(mu, X)
+                loss_mu = loss_fn(out_mu, y)
+                # z=0 path (ablated latent)
+                z_zero = torch.zeros_like(mu)
+                out_zero = model.module.decode(z_zero, X)
+                loss_zero = loss_fn(out_zero, y)
+                ablation_delta = loss_zero - loss_mu
 
             # evaluate inference / generation
             inference_out_dict = model.module.inference(X)
@@ -240,18 +333,45 @@ def test_loop(rank, world_size, model, dataloader, device, loss_fn, cfg, run, ep
     log_dict = {'val loss (encoder-decoder)': epoch_tot_vloss,
                 'val_recons_loss (*inference*)': epoch_tot_vloss_inf}
 
-    mu_mean_var_results = mu_mean_var.compute()
-    log_var_mean_var_results = log_var_mean_var.compute()
     log_dict.update({
-                "val_mu_mean": mu_mean_var_results['mean'].item(),
-                "val_mu_std": mu_mean_var_results['var'].sqrt().item(),
-                "val_log_var_mean": log_var_mean_var_results['mean'].item(),
-                "val_log_var_std": log_var_mean_var_results['var'].sqrt().item(),
                 "val_recons_loss (encoder-decoder)": running_recons_loss.item() / num_batches,
                 "val_kld_loss (encoder-decoder)": running_kld_loss.item() / num_batches
             })
-    mu_mean_var.reset()
-    log_var_mean_var.reset()
+
+    # All-reduce AU Welford accumulators and compute
+    dist.all_reduce(au_tracker.count, op=dist.ReduceOp.SUM)
+    dist.all_reduce(au_tracker.mean_per_dim, op=dist.ReduceOp.SUM)
+    au_tracker.mean_per_dim /= world_size
+    dist.all_reduce(au_tracker.M2_per_dim, op=dist.ReduceOp.SUM)
+    au_results = au_tracker.compute()
+    
+    # All-reduce frac(KL < 1e-3)
+    dist.all_reduce(kl_small_count, op=dist.ReduceOp.SUM)
+    dist.all_reduce(total_samples, op=dist.ReduceOp.SUM)
+    frac_kl_small = kl_small_count.float() / total_samples.float()
+    
+    # All-reduce log_var min/max
+    dist.all_reduce(log_var_min, op=dist.ReduceOp.MIN)
+    dist.all_reduce(log_var_max, op=dist.ReduceOp.MAX)
+    
+    # Average ablation delta across ranks
+    dist.all_reduce(ablation_delta, op=dist.ReduceOp.SUM)
+    ablation_delta /= world_size
+    
+    # Median KL computed only on rank 0's samples (no gather for efficiency)
+    all_kl = torch.cat(kl_per_sample_list)
+    median_kl = torch.median(all_kl).item()
+    
+    log_dict.update({
+        "val_AU_strict^": au_results['AU_strict'],
+        "val_AU_lenient^": au_results['AU_lenient'],
+        "val_median_KL^": median_kl,
+        "val_frac_KL_small^": frac_kl_small.item(),
+        "val_log_var_min": log_var_min.item(),
+        "val_log_var_max": log_var_max.item(),
+        "val_ablation_delta^": ablation_delta.item(),
+    })
+    au_tracker.reset()
 
     if rank == 0:
         run.log(log_dict, step=epoch)
@@ -260,16 +380,32 @@ def test_loop(rank, world_size, model, dataloader, device, loss_fn, cfg, run, ep
     return epoch_tot_vloss, epoch_tot_vloss_inf, metrics_dict
 
 def evaluate(rank, world_size, model, dataloader, device, loss_fn, cfg, beta_scheduler=None):
-    """Evaluate metrics on test set without logging. All ranks compute on their data shard."""
+    """Evaluate metrics on test set with posterior collapse monitoring.
+    
+    All ranks compute on their data shard. Results are all-reduced.
+    
+    Posterior collapse metrics (see README.md for interpretation):
+    - AU_strict^/AU_lenient^: Active units at thresholds 1e-2/1e-3
+    - median_KL^: Median per-sample KL (rank-local, not gathered)
+    - frac_KL_small^: Fraction of samples with KL < 1e-3 (all-reduced)
+    - log_var_min/max: Raw log variance extrema (all-reduced)
+    - ablation_delta^: L(z=0) - L(z=mu), tests if decoder ignores z
+    """
     running_tot_vloss = torch.tensor(0.0, device=device)
     running_tot_vloss_inf = torch.tensor(0.0, device=device) # recons loss from random sampling z then decoding
     running_recons_loss = torch.tensor(0.0, device=device)
     running_kld_loss = torch.tensor(0.0, device=device)
     num_batches = len(dataloader)
 
-    # for VAE monitoring
-    mu_mean_var = RunningMeanVar(unbiased=True).to(device)
-    log_var_mean_var = RunningMeanVar(unbiased=True).to(device)
+    # Posterior collapse monitoring
+    latent_dim = cfg.model.cvae.latent_dim
+    au_tracker = ActiveUnitsTracker(latent_dim=latent_dim).to(device)
+    kl_per_sample_list = []
+    kl_small_count = torch.tensor(0, device=device, dtype=torch.long)
+    total_samples = torch.tensor(0, device=device, dtype=torch.long)
+    log_var_min = torch.tensor(float('inf'), device=device)
+    log_var_max = torch.tensor(float('-inf'), device=device)
+    ablation_delta = torch.tensor(0.0, device=device)
 
     model.eval()
     with torch.no_grad():
@@ -286,12 +422,31 @@ def evaluate(rank, world_size, model, dataloader, device, loss_fn, cfg, beta_sch
                 raise ValueError(f"Loss became NaN during validation loop in batch {batch_i}. \
                                 The input SAR was NaN: {torch.isnan(X).any()}")
             running_tot_vloss += loss.detach()
-
-            # Collect mu and log_var for the whole epoch
-            mu_mean_var.update(out_dict['mu'])
-            log_var_mean_var.update(out_dict['log_var'])
             running_recons_loss += loss_dict['recons_loss'].detach()
             running_kld_loss += loss_dict['kld_loss'].detach()
+
+            # Posterior collapse monitoring
+            mu = out_dict['mu'].detach()
+            raw_log_var = out_dict['log_var'].detach()
+            log_var = torch.clamp(raw_log_var, min=-6, max=6)
+            
+            log_var_min = torch.min(log_var_min, raw_log_var.min())
+            log_var_max = torch.max(log_var_max, raw_log_var.max())
+            au_tracker.update(mu)
+            
+            kl_per_sample = 0.5 * (mu.pow(2) + log_var.exp() - 1 - log_var).sum(dim=1)
+            kl_per_sample_list.append(kl_per_sample)
+            kl_small_count += (kl_per_sample < 1e-3).sum()
+            total_samples += kl_per_sample.shape[0]
+
+            # Ablation diagnostic on first batch only
+            if batch_i == 0:
+                out_mu = model.module.decode(mu, X)
+                loss_mu = loss_fn(out_mu, y)
+                z_zero = torch.zeros_like(mu)
+                out_zero = model.module.decode(z_zero, X)
+                loss_zero = loss_fn(out_zero, y)
+                ablation_delta = loss_zero - loss_mu
 
             # evaluate inference / generation
             inference_out_dict = model.module.inference(X)
@@ -318,18 +473,45 @@ def evaluate(rank, world_size, model, dataloader, device, loss_fn, cfg, beta_sch
     log_dict = {'test loss (encoder-decoder)': epoch_tot_vloss,
                 'test_recons_loss (*inference*)': epoch_tot_vloss_inf}
 
-    mu_mean_var_results = mu_mean_var.compute()
-    log_var_mean_var_results = log_var_mean_var.compute()
     log_dict.update({
-                "test_mu_mean": mu_mean_var_results['mean'].item(),
-                "test_mu_std": mu_mean_var_results['var'].sqrt().item(),
-                "test_log_var_mean": log_var_mean_var_results['mean'].item(),
-                "test_log_var_std": log_var_mean_var_results['var'].sqrt().item(),
                 "test_recons_loss (encoder-decoder)": running_recons_loss.item() / num_batches,
                 "test_kld_loss (encoder-decoder)": running_kld_loss.item() / num_batches
             })
-    mu_mean_var.reset()
-    log_var_mean_var.reset()
+
+    # All-reduce AU Welford accumulators and compute
+    dist.all_reduce(au_tracker.count, op=dist.ReduceOp.SUM)
+    dist.all_reduce(au_tracker.mean_per_dim, op=dist.ReduceOp.SUM)
+    au_tracker.mean_per_dim /= world_size
+    dist.all_reduce(au_tracker.M2_per_dim, op=dist.ReduceOp.SUM)
+    au_results = au_tracker.compute()
+    
+    # All-reduce frac(KL < 1e-3)
+    dist.all_reduce(kl_small_count, op=dist.ReduceOp.SUM)
+    dist.all_reduce(total_samples, op=dist.ReduceOp.SUM)
+    frac_kl_small = kl_small_count.float() / total_samples.float()
+    
+    # All-reduce log_var min/max
+    dist.all_reduce(log_var_min, op=dist.ReduceOp.MIN)
+    dist.all_reduce(log_var_max, op=dist.ReduceOp.MAX)
+    
+    # Average ablation delta across ranks
+    dist.all_reduce(ablation_delta, op=dist.ReduceOp.SUM)
+    ablation_delta /= world_size
+    
+    # Median KL computed only on rank 0's samples (no gather for efficiency)
+    all_kl = torch.cat(kl_per_sample_list)
+    median_kl = torch.median(all_kl).item()
+    
+    log_dict.update({
+        "test_AU_strict^": au_results['AU_strict'],
+        "test_AU_lenient^": au_results['AU_lenient'],
+        "test_median_KL^": median_kl,
+        "test_frac_KL_small^": frac_kl_small.item(),
+        "test_log_var_min": log_var_min.item(),
+        "test_log_var_max": log_var_max.item(),
+        "test_ablation_delta^": ablation_delta.item(),
+    })
+    au_tracker.reset()
 
     metrics_dict = log_dict.copy()
     return epoch_tot_vloss, epoch_tot_vloss_inf, metrics_dict

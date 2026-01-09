@@ -132,8 +132,7 @@ def train_loop(rank, world_size, model, dataloader, device, optimizer, loss_fn, 
         loss.backward()
         # Compute gradient norm, scaled by batch size
         if batch_i % cfg.logging.grad_norm_freq == 0:
-            scaled_grad_norm = get_gradient_norm(model) / cfg.train.batch_size
-            epoch_gradient_norm += scaled_grad_norm
+            epoch_gradient_norm += get_gradient_norm(model)
             batches_logged += 1
 
         nn.utils.clip_grad_norm_(model.parameters(), cfg.train.clip)

@@ -39,6 +39,10 @@ amplitude_max_vv = 10.0 ** (VV_DB_MAX / 20.0)
 amplitude_min_vh = 10.0 ** (VH_DB_MIN / 20.0)
 amplitude_max_vh = 10.0 ** (VH_DB_MAX / 20.0)
 
+# Use TF32 Tensor Cores for better performance
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
 ### Script for training CVAE with conditioning input:
 ### Separate from train_multi.py as it allows for two different validation losses
 ### One for reconstruction (using encoder z) and one for inference (using gaussian z in decoder)
@@ -94,11 +98,16 @@ def train_loop(model, dataloader, device, optimizer, loss_fn, cfg, run, epoch, b
     mu_mean_var = RunningMeanVar(unbiased=True).to(device)
     log_var_mean_var = RunningMeanVar(unbiased=True).to(device)
 
+    # AMP setup - use bfloat16 for training speedup
+    use_amp = getattr(cfg.train, 'use_amp', False)
+    amp_dtype = torch.bfloat16
+
     model.train()
     for batch_i, (X, y) in enumerate(dataloader):
         X = X.to(device)
         y = y.to(device)
-        out_dict = model(X, y)
+        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+            out_dict = model(X, y)
 
         # also pass SAR layers for reconstruction loss
         loss_dict = compute_loss(out_dict, y, loss_fn, cfg, beta_scheduler=beta_scheduler)

@@ -14,19 +14,24 @@ import json
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from pytorch_msssim import ssim
+import torch.multiprocessing as mp
+import os
 
 import torch
+import torch.distributed as dist
 from torch import nn
 from torch.utils.data import DataLoader
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
 
 from floodmaps.models.model import build_autodespeckler
-from floodmaps.training.dataset import ConditionalSARDataset, HomogenousSARDataset
+from floodmaps.training.dataset import ShardedConditionalSARDataset, ConditionalSARDataset, HomogenousSARDataset
 from floodmaps.training.optim import get_optimizer
 from floodmaps.training.scheduler import get_scheduler
 from floodmaps.training.loss import get_ad_loss
 from floodmaps.utils.utils import (flatten_dict, ADEarlyStopper, Metrics, BetaScheduler, get_gradient_norm,
-                   get_model_params, print_model_params_and_grads)
+                   get_model_params, print_model_params_and_grads, find_free_port)
 from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
 from floodmaps.utils.metrics import (denormalize, normalize, convert_to_amplitude, var_laplacian, enl, psnr, RunningMeanVar)
 
@@ -43,8 +48,9 @@ amplitude_max_vh = 10.0 ** (VH_DB_MAX / 20.0)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-### Script for training VAE:
-### VAE encodes input X and reconstructs to predict clean target y
+### Script for training CVAE with conditioning input:
+### Separate from train_multi.py as it allows for two different validation losses
+### One for reconstruction (using encoder z) and one for inference (using gaussian z in decoder)
 
 def compute_loss(out_dict, targets, loss_fn, cfg, beta_scheduler=None, debug=False):
     recons_loss = loss_fn(out_dict['despeckler_output'], targets)
@@ -67,7 +73,7 @@ def compute_loss(out_dict, targets, loss_fn, cfg, beta_scheduler=None, debug=Fal
     loss_dict['recons_loss'] = recons_loss
     loss_dict['kld_loss'] = kld_loss
     
-    beta = beta_scheduler.get_beta() if cfg.model.vae.beta_annealing else cfg.model.vae.VAE_beta
+    beta = beta_scheduler.get_beta() if cfg.model.cvae.beta_annealing else cfg.model.cvae.VAE_beta
     elbo_loss = recons_loss + beta * kld_loss # KLD weighting dropped for better regularization
 
     if torch.isnan(elbo_loss).any() or torch.isinf(elbo_loss).any():
@@ -80,7 +86,15 @@ def compute_loss(out_dict, targets, loss_fn, cfg, beta_scheduler=None, debug=Fal
     loss_dict['elbo_loss'] = elbo_loss
     return loss_dict
 
-def train_loop(model, dataloader, device, optimizer, loss_fn, cfg, run, epoch, beta_scheduler=None):
+def compute_inference_loss(out_dict, targets, loss_fn):
+    recons_loss = loss_fn(out_dict['despeckler_output'], targets)
+    loss_dict = {'recons_loss': recons_loss}
+    return loss_dict
+
+def train_loop(rank, world_size, model, dataloader, device, optimizer, loss_fn, cfg, run, epoch, beta_scheduler=None):
+    """NOTE: The training loss is not used besides weight updates, therefore
+    it is not all reduced across ranks. The returned loss is only the average
+    of the losses on the local rank."""
     running_tot_loss = torch.tensor(0.0, device=device)
     running_recons_loss = torch.tensor(0.0, device=device)
     running_kld_loss = torch.tensor(0.0, device=device)
@@ -92,7 +106,7 @@ def train_loop(model, dataloader, device, optimizer, loss_fn, cfg, run, epoch, b
     mu_mean_var = RunningMeanVar(unbiased=True).to(device)
     log_var_mean_var = RunningMeanVar(unbiased=True).to(device)
 
-    # AMP setup - use bfloat16 for training speedup
+    # AMP setup - use bfloat16 for better numerical stability
     use_amp = getattr(cfg.train, 'use_amp', False)
     amp_dtype = torch.bfloat16
 
@@ -100,8 +114,9 @@ def train_loop(model, dataloader, device, optimizer, loss_fn, cfg, run, epoch, b
     for batch_i, (X, y) in enumerate(dataloader):
         X = X.to(device)
         y = y.to(device)
+
         with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
-            out_dict = model(X)
+            out_dict = model(X, y)
 
         # also pass SAR layers for reconstruction loss
         loss_dict = compute_loss(out_dict, y, loss_fn, cfg, beta_scheduler=beta_scheduler)
@@ -126,7 +141,7 @@ def train_loop(model, dataloader, device, optimizer, loss_fn, cfg, run, epoch, b
 
         running_tot_loss += loss.detach()
 
-        # for VAE monitoring only
+        # for CVAE monitoring only
         # Collect mu and log_var for the whole epoch
         mu_mean_var.update(out_dict['mu'])
         log_var_mean_var.update(out_dict['log_var'])
@@ -135,13 +150,13 @@ def train_loop(model, dataloader, device, optimizer, loss_fn, cfg, run, epoch, b
 
     # calculate metrics
     epoch_tot_loss = running_tot_loss.item() / num_batches
-    avg_epoch_gradient_norm = epoch_gradient_norm.item() / batches_logged
+    avg_epoch_gradient_norm = epoch_gradient_norm.item() / batches_logged if batches_logged > 0 else 0.0
     log_dict = {"train loss": epoch_tot_loss,
                "train gradient norm": avg_epoch_gradient_norm}
 
     # VAE mu and log_var monitoring
     # full histogram monitoring
-    beta = beta_scheduler.get_beta() if cfg.model.vae.beta_annealing else cfg.model.vae.VAE_beta
+    beta = beta_scheduler.get_beta() if cfg.model.cvae.beta_annealing else cfg.model.cvae.VAE_beta
     mu_mean_var_results = mu_mean_var.compute()
     log_var_mean_var_results = log_var_mean_var.compute()
     ratio = (running_recons_loss.item()
@@ -161,12 +176,15 @@ def train_loop(model, dataloader, device, optimizer, loss_fn, cfg, run, epoch, b
     mu_mean_var.reset()
     log_var_mean_var.reset()
 
-    run.log(log_dict, step=epoch)
+    if rank == 0:
+        run.log(log_dict, step=epoch)
 
     return epoch_tot_loss
 
-def test_loop(model, dataloader, device, loss_fn, cfg, run, epoch, beta_scheduler=None):
+def test_loop(rank, world_size, model, dataloader, device, loss_fn, cfg, run, epoch, beta_scheduler=None):
+    """Validation losses are all reduced across ranks."""
     running_tot_vloss = torch.tensor(0.0, device=device)
+    running_tot_vloss_inf = torch.tensor(0.0, device=device) # recons loss from random sampling z then decoding
     running_recons_loss = torch.tensor(0.0, device=device)
     running_kld_loss = torch.tensor(0.0, device=device)
     num_batches = len(dataloader)
@@ -181,7 +199,8 @@ def test_loop(model, dataloader, device, loss_fn, cfg, run, epoch, beta_schedule
             X = X.to(device)
             y = y.to(device)
             # evaluate reconstruction
-            out_dict = model(X)
+            out_dict = model(X, y)
+
             loss_dict = compute_loss(out_dict, y, loss_fn, cfg, beta_scheduler=beta_scheduler)
             loss = loss_dict['elbo_loss']
             if torch.isnan(loss).any():
@@ -194,12 +213,33 @@ def test_loop(model, dataloader, device, loss_fn, cfg, run, epoch, beta_schedule
             # Collect mu and log_var for the whole epoch
             mu_mean_var.update(out_dict['mu'])
             log_var_mean_var.update(out_dict['log_var'])
-            running_recons_loss += loss_dict['recons_loss']
-            running_kld_loss += loss_dict['kld_loss']
+            running_recons_loss += loss_dict['recons_loss'].detach()
+            running_kld_loss += loss_dict['kld_loss'].detach()
+
+            # evaluate inference / generation
+            inference_out_dict = model.module.inference(X)
+            inference_loss_dict = compute_inference_loss(inference_out_dict, y, loss_fn)
+            inference_loss = inference_loss_dict['recons_loss'] # for inference we only have reconstruction loss
+            running_tot_vloss_inf += inference_loss.detach()
+
+    # synchronize all validation losses across ranks
+    dist.all_reduce(running_tot_vloss, op=dist.ReduceOp.SUM)
+    dist.all_reduce(running_tot_vloss_inf, op=dist.ReduceOp.SUM)
+    dist.all_reduce(running_recons_loss, op=dist.ReduceOp.SUM)
+    dist.all_reduce(running_kld_loss, op=dist.ReduceOp.SUM)
+    running_tot_vloss /= world_size
+    running_tot_vloss_inf /= world_size
+    running_recons_loss /= world_size
+    running_kld_loss /= world_size
 
     epoch_tot_vloss = running_tot_vloss.item() / num_batches
+    epoch_tot_vloss_inf = running_tot_vloss_inf.item() / num_batches
 
-    log_dict = {'val loss': epoch_tot_vloss}
+    # two different validation losses:
+    # encoder-decoder uses full model
+    # *inference* uses only decoder (generation only metric)
+    log_dict = {'val loss (encoder-decoder)': epoch_tot_vloss,
+                'val_recons_loss (*inference*)': epoch_tot_vloss_inf}
 
     mu_mean_var_results = mu_mean_var.compute()
     log_var_mean_var_results = log_var_mean_var.compute()
@@ -208,20 +248,22 @@ def test_loop(model, dataloader, device, loss_fn, cfg, run, epoch, beta_schedule
                 "val_mu_std": mu_mean_var_results['var'].sqrt().item(),
                 "val_log_var_mean": log_var_mean_var_results['mean'].item(),
                 "val_log_var_std": log_var_mean_var_results['var'].sqrt().item(),
-                "val_recons_loss": running_recons_loss.item() / num_batches,
-                "val_kld_loss": running_kld_loss.item() / num_batches
+                "val_recons_loss (encoder-decoder)": running_recons_loss.item() / num_batches,
+                "val_kld_loss (encoder-decoder)": running_kld_loss.item() / num_batches
             })
     mu_mean_var.reset()
     log_var_mean_var.reset()
 
-    run.log(log_dict, step=epoch)
+    if rank == 0:
+        run.log(log_dict, step=epoch)
 
     metrics_dict = log_dict.copy()
-    return epoch_tot_vloss, metrics_dict
+    return epoch_tot_vloss, epoch_tot_vloss_inf, metrics_dict
 
-def evaluate(model, dataloader, device, loss_fn, cfg, beta_scheduler=None):
-    """Evaluate metrics on test set without logging."""
+def evaluate(rank, world_size, model, dataloader, device, loss_fn, cfg, beta_scheduler=None):
+    """Evaluate metrics on test set without logging. All ranks compute on their data shard."""
     running_tot_vloss = torch.tensor(0.0, device=device)
+    running_tot_vloss_inf = torch.tensor(0.0, device=device) # recons loss from random sampling z then decoding
     running_recons_loss = torch.tensor(0.0, device=device)
     running_kld_loss = torch.tensor(0.0, device=device)
     num_batches = len(dataloader)
@@ -236,25 +278,46 @@ def evaluate(model, dataloader, device, loss_fn, cfg, beta_scheduler=None):
             X = X.to(device)
             y = y.to(device)
             # evaluate reconstruction
-            out_dict = model(X)
+            out_dict = model(X, y)
             loss_dict = compute_loss(out_dict, y, loss_fn, cfg, beta_scheduler=beta_scheduler)
             loss = loss_dict['elbo_loss']
             if torch.isnan(loss).any():
-                err_file_name=f"outputs/ad_param_err_test_{cfg.model.autodespeckler}.json"
+                err_file_name=f"outputs/ad_param_err_val_{cfg.model.autodespeckler}.json"
                 stats_dict = print_model_params_and_grads(model, file_name=err_file_name)
-                raise ValueError(f"Loss became NaN during test loop in batch {batch_i}. \
+                raise ValueError(f"Loss became NaN during validation loop in batch {batch_i}. \
                                 The input SAR was NaN: {torch.isnan(X).any()}")
             running_tot_vloss += loss.detach()
 
             # Collect mu and log_var for the whole epoch
             mu_mean_var.update(out_dict['mu'])
             log_var_mean_var.update(out_dict['log_var'])
-            running_recons_loss += loss_dict['recons_loss']
-            running_kld_loss += loss_dict['kld_loss']
+            running_recons_loss += loss_dict['recons_loss'].detach()
+            running_kld_loss += loss_dict['kld_loss'].detach()
+
+            # evaluate inference / generation
+            inference_out_dict = model.module.inference(X)
+            inference_loss_dict = compute_inference_loss(inference_out_dict, y, loss_fn)
+            inference_loss = inference_loss_dict['recons_loss'] # for inference we only have reconstruction loss
+            running_tot_vloss_inf += inference_loss.detach()
+
+    # synchronize all test losses across ranks
+    dist.all_reduce(running_tot_vloss, op=dist.ReduceOp.SUM)
+    dist.all_reduce(running_tot_vloss_inf, op=dist.ReduceOp.SUM)
+    dist.all_reduce(running_recons_loss, op=dist.ReduceOp.SUM)
+    dist.all_reduce(running_kld_loss, op=dist.ReduceOp.SUM)
+    running_tot_vloss /= world_size
+    running_tot_vloss_inf /= world_size
+    running_recons_loss /= world_size
+    running_kld_loss /= world_size
 
     epoch_tot_vloss = running_tot_vloss.item() / num_batches
+    epoch_tot_vloss_inf = running_tot_vloss_inf.item() / num_batches
 
-    log_dict = {'test loss': epoch_tot_vloss}
+    # two different validation losses:
+    # encoder-decoder uses full model
+    # *inference* uses only decoder (generation only metric)
+    log_dict = {'test loss (encoder-decoder)': epoch_tot_vloss,
+                'test_recons_loss (*inference*)': epoch_tot_vloss_inf}
 
     mu_mean_var_results = mu_mean_var.compute()
     log_var_mean_var_results = log_var_mean_var.compute()
@@ -263,51 +326,53 @@ def evaluate(model, dataloader, device, loss_fn, cfg, beta_scheduler=None):
                 "test_mu_std": mu_mean_var_results['var'].sqrt().item(),
                 "test_log_var_mean": log_var_mean_var_results['mean'].item(),
                 "test_log_var_std": log_var_mean_var_results['var'].sqrt().item(),
-                "test_recons_loss": running_recons_loss.item() / num_batches,
-                "test_kld_loss": running_kld_loss.item() / num_batches
+                "test_recons_loss (encoder-decoder)": running_recons_loss.item() / num_batches,
+                "test_kld_loss (encoder-decoder)": running_kld_loss.item() / num_batches
             })
     mu_mean_var.reset()
     log_var_mean_var.reset()
 
     metrics_dict = log_dict.copy()
-    return epoch_tot_vloss, metrics_dict
+    return epoch_tot_vloss, epoch_tot_vloss_inf, metrics_dict
 
-def train(model, train_loader, val_loader, test_loader, device, cfg, run):
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    logging.info(f'''Starting training:
-        Date:            {timestamp}
-        Epochs:          {cfg.train.epochs}
-        Batch size:      {cfg.train.batch_size}
-        Learning rate:   {cfg.train.lr}
-        Training size:   {len(train_loader.dataset)}
-        Validation size: {len(val_loader.dataset)}
-        Test size:       {len(test_loader.dataset) if test_loader is not None else 'NA'}
-        Device:          {device}
-    ''')
+def train(rank, world_size, model, train_loader, val_loader, test_loader, device, cfg, run):
     # log weights and gradients each epoch
-    run.watch(model, log="all", log_freq=cfg.logging.grad_norm_freq)
+    if rank == 0:
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        logging.info(f'''Starting training:
+            Date:            {timestamp}
+            Epochs:          {cfg.train.epochs}
+            Batch size:      {cfg.train.batch_size}
+            Learning rate:   {cfg.train.lr}
+            Training size:   {len(train_loader.dataset)}
+            Validation size: {len(val_loader.dataset)}
+            Test size:       {len(test_loader.dataset) if test_loader is not None else 'NA'}
+            Device:          {device}
+        ''')
+        run.watch(model.module, log="all", log_freq=cfg.logging.grad_norm_freq)
 
     # optimizer and scheduler for reducing learning rate
     optimizer = get_optimizer(model, cfg)
     scheduler = get_scheduler(optimizer, cfg)
-    if cfg.model.vae.beta_annealing:
-        beta_scheduler = BetaScheduler(beta=cfg.model.vae.VAE_beta,
-                                    period=cfg.model.vae.beta_period,
-                                    n_cycle=cfg.model.vae.beta_cycles,
-                                    ratio=cfg.model.vae.beta_proportion)
+    if cfg.model.cvae.beta_annealing:
+        beta_scheduler = BetaScheduler(beta=cfg.model.cvae.VAE_beta,
+                                    period=cfg.model.cvae.beta_period,
+                                    n_cycle=cfg.model.cvae.beta_cycles,
+                                    ratio=cfg.model.cvae.beta_proportion)
     else:
         beta_scheduler = None
 
     if cfg.train.early_stopping:
-        early_stopper = ADEarlyStopper(patience=cfg.train.patience, beta_annealing=cfg.model.vae.beta_annealing,
-                                    period=cfg.model.vae.beta_period, n_cycle=cfg.model.vae.beta_cycles,
+        early_stopper = ADEarlyStopper(patience=cfg.train.patience, beta_annealing=cfg.model.cvae.beta_annealing,
+                                    period=cfg.model.cvae.beta_period, n_cycle=cfg.model.cvae.beta_cycles,
                                     count_cycles=False)
     else:
         early_stopper = None
 
     # load checkpoint if it exists
+    # Load into model.module so checkpoints are portable (compatible with non-DDP checkpoints)
     if cfg.train.checkpoint.load_chkpt:
-        chkpt = load_checkpoint(cfg.train.checkpoint.load_chkpt_path, model, 
+        chkpt = load_checkpoint(cfg.train.checkpoint.load_chkpt_path, model.module, 
                                optimizer=optimizer, scheduler=scheduler, 
                                early_stopper=early_stopper,
                                beta_scheduler=beta_scheduler)
@@ -319,29 +384,36 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
 
     loss_fn = get_ad_loss(cfg).to(device)
     for epoch in range(start_epoch, cfg.train.epochs):
+        # Set epoch for ShardedConditionalSARDataset to shuffle shards each epoch
+        train_loader.dataset.set_epoch(epoch)
         try:
             # train loop
-            avg_loss = train_loop(model, train_loader, device, optimizer,
+            avg_loss = train_loop(rank, world_size, model, train_loader, device, optimizer,
                                   loss_fn, cfg, run, epoch,
                                   beta_scheduler=beta_scheduler)
 
             # at the end of each training epoch compute validation
-            avg_vloss, val_metrics_dict = test_loop(model, val_loader, device, loss_fn, cfg, run,
+            avg_vloss, avg_vloss_inf, val_metrics_dict = test_loop(rank, world_size, model, val_loader, device, loss_fn, cfg, run,
                                   epoch, beta_scheduler=beta_scheduler)
         except Exception as err:
             raise RuntimeError(f'Error while training occurred at epoch {epoch}.') from err
 
         if cfg.train.early_stopping:
-            # early stop on elbo loss
-            early_stopper.step(avg_vloss, model, epoch, metrics=val_metrics_dict)
-            if early_stopper.is_stopped():
+            # early stop on elbo loss (NOT inference loss)
+            # Pass model.module so weights are saved without 'module.' prefix
+            early_stopper.step(avg_vloss, model.module, epoch, metrics=val_metrics_dict)
+
+            # Synchronize early stopping decision across all ranks
+            should_stop = torch.tensor([1 if early_stopper.is_stopped() else 0], dtype=torch.int, device=device)
+            dist.all_reduce(should_stop, op=dist.ReduceOp.MAX)
+            if should_stop.item() == 1:
                 break
 
         if scheduler is not None:
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                if cfg.model.vae.beta_annealing:
+                if cfg.model.cvae.beta_annealing:
                     # only step once beta annealing cycles are complete
-                    if epoch >= cfg.model.vae.beta_cycles * cfg.model.vae.beta_period:
+                    if epoch >= cfg.model.cvae.beta_cycles * cfg.model.cvae.beta_period:
                         scheduler.step(avg_vloss)
                 else:
                     scheduler.step(avg_vloss)
@@ -350,45 +422,56 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run):
 
         if beta_scheduler is not None:
             beta_scheduler.step()
+        
+        if rank == 0:
+            # Save checkpoint on interval OR when validation improves (best epoch)
+            should_save_chkpt = cfg.train.checkpoint.save_chkpt and (
+                epoch % cfg.train.checkpoint.save_chkpt_interval == 0 or
+                (cfg.train.early_stopping and early_stopper.best)
+            )
+            if should_save_chkpt:
+                # Save model.module so checkpoint is portable (no 'module.' prefix in keys)
+                save_checkpoint(cfg.train.checkpoint.save_chkpt_path, model.module, optimizer, epoch,
+                               scheduler=scheduler, early_stopper=early_stopper,
+                               beta_scheduler=beta_scheduler)
 
-        # Save checkpoint on interval OR when validation improves (best epoch)
-        should_save_chkpt = cfg.train.checkpoint.save_chkpt and (
-            epoch % cfg.train.checkpoint.save_chkpt_interval == 0 or
-            (cfg.train.early_stopping and early_stopper.best)
-        )
-        if should_save_chkpt:
-            save_checkpoint(cfg.train.checkpoint.save_chkpt_path, model, optimizer, epoch,
-                           scheduler=scheduler, early_stopper=early_stopper,
-                           beta_scheduler=beta_scheduler)
-
-        run.log({"learning_rate": scheduler.get_last_lr()[0] if scheduler is not None else cfg.train.lr}, step=epoch)
+            run.log({"learning_rate": scheduler.get_last_lr()[0] if scheduler is not None else cfg.train.lr}, step=epoch)
 
     # retrieve best metrics and weights
-    fmetrics = Metrics(use_partitions=False)
+    # All ranks must load best weights for consistent distributed evaluation
+    fmetrics = None
     model_weights = None
     if cfg.train.early_stopping:
         model_weights = early_stopper.get_best_weights()
-        best_val_metrics = early_stopper.get_best_metrics()
-        # reset model to checkpoint for later sample prediction
-        model.load_state_dict(model_weights)
-        fmetrics.save_metrics('val', loss=early_stopper.get_min_validation_loss(), **best_val_metrics)
-        run.summary[f"best_epoch"] = early_stopper.get_best_epoch()
-        run.summary.update({'final model val loss': best_val_metrics['val loss']})
-    else:
-        model_weights = model.state_dict()
-        fmetrics.save_metrics('val', loss=avg_vloss, **val_metrics_dict)
-        run.summary.update({'final model val loss': avg_vloss})
+        # All ranks load best weights so evaluate() and calculate_metrics() use consistent models
+        model.module.load_state_dict(model_weights)
 
-    # for benchmarking purposes
+    if rank == 0:
+        fmetrics = Metrics(use_partitions=False)
+        if cfg.train.early_stopping:
+            best_val_metrics = early_stopper.get_best_metrics()
+            fmetrics.save_metrics('val', loss=early_stopper.get_min_validation_loss(), **best_val_metrics)
+            run.summary[f"best_epoch"] = early_stopper.get_best_epoch()
+            run.summary.update({'final model val loss (encoder-decoder)': best_val_metrics['val loss (encoder-decoder)']})
+            run.summary.update({'final model val loss (inference)': best_val_metrics['val_recons_loss (*inference*)']})
+        else:
+            model_weights = model.module.state_dict()
+            fmetrics.save_metrics('val', loss=avg_vloss, **val_metrics_dict)
+            run.summary.update({'final model val loss (encoder-decoder)': avg_vloss})
+            run.summary.update({'final model val loss (inference)': avg_vloss_inf})
+
+    # for benchmarking purposes - all ranks participate in evaluate
     if cfg.eval.mode == 'test':
         # NOTE: will only use the most recent beta scheduler state for test loss (may be inaccurate)
-        test_loss, test_metrics = evaluate(model, test_loader, device, loss_fn, cfg, beta_scheduler=beta_scheduler)
-        fmetrics.save_metrics('test', loss=test_loss, **test_metrics)
-        run.summary.update({'final model test loss': test_metrics['test loss']})
+        test_loss, _, test_metrics = evaluate(rank, world_size, model, test_loader, device, loss_fn, cfg, beta_scheduler=beta_scheduler)
+        if rank == 0:
+            fmetrics.save_metrics('test', loss=test_loss, **test_metrics)
+            run.summary.update({'final model test loss (encoder-decoder)': test_metrics['test loss (encoder-decoder)']})
+            run.summary.update({'final model test loss (inference)': test_metrics['test_recons_loss (*inference*)']})
 
     return model_weights, fmetrics
 
-def calculate_metrics(dataloader, homogenous_dataloader, train_mean, train_std, model, \
+def calculate_metrics(rank, world_size, dataloader, homogenous_dataloader, train_mean, train_std, model, \
                       device, metrics, cfg, run):
     """Calculate SAR despeckling metrics for VV and VH:
     
@@ -404,6 +487,10 @@ def calculate_metrics(dataloader, homogenous_dataloader, train_mean, train_std, 
 
     Parameters
     ----------
+    rank : int
+        The rank of the current process.
+    world_size : int
+        The total number of processes.
     dataloader : torch.utils.data.DataLoader
         DataLoader for the dataset.
     homogenous_dataloader : torch.utils.data.DataLoader
@@ -435,7 +522,7 @@ def calculate_metrics(dataloader, homogenous_dataloader, train_mean, train_std, 
     ssim_vh = torch.tensor(0.0, device=device, dtype=torch.float32)
     var_lap_vv = torch.tensor(0.0, device=device, dtype=torch.float32)
     var_lap_vh = torch.tensor(0.0, device=device, dtype=torch.float32)
-    count = 0
+    count = torch.tensor(0, device=device, dtype=torch.int64)
 
     model.eval()
     # Compute PSNR, SSIM, Var of Laplacian across entire dataset
@@ -445,10 +532,11 @@ def calculate_metrics(dataloader, homogenous_dataloader, train_mean, train_std, 
         B, C, H, W = X.shape
 
         with torch.no_grad():
-            out_dict = model(X)
+            out_dict = model.module.inference(X)
             result = out_dict['despeckler_output']
 
             # convert back to dB scale
+            # figure out how to denormalize here
             db_sar_filt = denormalize(result, train_mean, train_std)
             db_sar_clean = denormalize(y, train_mean, train_std)
 
@@ -483,14 +571,14 @@ def calculate_metrics(dataloader, homogenous_dataloader, train_mean, train_std, 
     # ENL computed on separate homogenous regions set
     enl_vv = torch.tensor(0.0, device=device, dtype=torch.float32)
     enl_vh = torch.tensor(0.0, device=device, dtype=torch.float32)
-    count_homogenous = 0
+    count_homogenous = torch.tensor(0, device=device, dtype=torch.int64)
     for X, y in homogenous_dataloader:
         X = X.to(device)
         y = y.to(device)
         B, C, H, W = X.shape
 
         with torch.no_grad():
-            out_dict = model(X)
+            out_dict = model.module.inference(X)
             result = out_dict['despeckler_output']
 
             # convert back to dB scale
@@ -505,20 +593,36 @@ def calculate_metrics(dataloader, homogenous_dataloader, train_mean, train_std, 
 
             count_homogenous += B
 
-    metrics_dict = {
-        f"{cfg.eval.mode} avg psnr_vv": psnr_vv.item() / count,
-        f"{cfg.eval.mode} avg psnr_vh": psnr_vh.item() / count,
-        f"{cfg.eval.mode} avg ssim_vv": ssim_vv.item() / count,
-        f"{cfg.eval.mode} avg ssim_vh": ssim_vh.item() / count,
-        f"{cfg.eval.mode} avg var_lap_vv": var_lap_vv.item() / count,
-        f"{cfg.eval.mode} avg var_lap_vh": var_lap_vh.item() / count,
-        f"{cfg.eval.mode} avg enl_vv": enl_vv.item() / count_homogenous,
-        f"{cfg.eval.mode} avg enl_vh": enl_vh.item() / count_homogenous,
-    }
-    metrics.save_metrics(cfg.eval.mode, **metrics_dict)
+    # synchronize all metrics across ranks
+    dist.all_reduce(psnr_vv, op=dist.ReduceOp.SUM)
+    dist.all_reduce(psnr_vh, op=dist.ReduceOp.SUM)
+    dist.all_reduce(ssim_vv, op=dist.ReduceOp.SUM)
+    dist.all_reduce(ssim_vh, op=dist.ReduceOp.SUM)
+    dist.all_reduce(var_lap_vv, op=dist.ReduceOp.SUM)
+    dist.all_reduce(var_lap_vh, op=dist.ReduceOp.SUM)
+    dist.all_reduce(count, op=dist.ReduceOp.SUM)
+    dist.all_reduce(enl_vv, op=dist.ReduceOp.SUM)
+    dist.all_reduce(enl_vh, op=dist.ReduceOp.SUM)
+    dist.all_reduce(count_homogenous, op=dist.ReduceOp.SUM)
 
-    # log as wandb summary statistics
-    run.summary.update({f'final model {key}': value for key, value in metrics_dict.items()})
+    # Only rank 0 saves metrics and logs to wandb
+    if rank == 0:
+        count_val = count.item()
+        count_homogenous_val = count_homogenous.item()
+        metrics_dict = {
+            f"{cfg.eval.mode} avg psnr_vv": psnr_vv.item() / count_val,
+            f"{cfg.eval.mode} avg psnr_vh": psnr_vh.item() / count_val,
+            f"{cfg.eval.mode} avg ssim_vv": ssim_vv.item() / count_val,
+            f"{cfg.eval.mode} avg ssim_vh": ssim_vh.item() / count_val,
+            f"{cfg.eval.mode} avg var_lap_vv": var_lap_vv.item() / count_val,
+            f"{cfg.eval.mode} avg var_lap_vh": var_lap_vh.item() / count_val,
+            f"{cfg.eval.mode} avg enl_vv": enl_vv.item() / count_homogenous_val,
+            f"{cfg.eval.mode} avg enl_vh": enl_vh.item() / count_homogenous_val,
+        }
+        metrics.save_metrics(cfg.eval.mode, **metrics_dict)
+
+        # log as wandb summary statistics
+        run.summary.update({f'final model {key}': value for key, value in metrics_dict.items()})
 
 def save_experiment(weights, metrics, cfg, run):
     """Save experiment files to directory specified by config save_path."""
@@ -526,7 +630,7 @@ def save_experiment(weights, metrics, cfg, run):
     path.mkdir(parents=True, exist_ok=True)
 
     if weights is not None:
-        torch.save(weights, path / "VAE_ad.pth")
+        torch.save(weights, path / "CVAE_ad.pth")
 
     # save config
     with open(path / "config.yaml", "w") as f:
@@ -632,7 +736,7 @@ def sample_predictions(model, sample_set, mean, std, cfg, histogram=True, hist_f
         X, y = sample_set[k]
 
         with torch.no_grad():
-            out_dict = model(X.unsqueeze(0))
+            out_dict = model.module.inference(X.unsqueeze(0))
             despeckler_output = out_dict['despeckler_output'].squeeze(0)
 
         # Denormalize all tensors back to dB scale
@@ -747,7 +851,7 @@ def sample_examples(model, sample_set, mean, std, cfg, idxs=[100, 200, 300]):
         X, y = sample_set[k]
 
         with torch.no_grad():
-            out_dict = model(X.unsqueeze(0))
+            out_dict = model.module.inference(X.unsqueeze(0))
             despeckler_output = out_dict['despeckler_output'].squeeze(0)
 
         # Denormalize all tensors back to dB scale
@@ -786,11 +890,26 @@ def sample_examples(model, sample_set, mean, std, cfg, idxs=[100, 200, 300]):
 
     return examples
 
-def run_experiment_ad(cfg):
-    """Run a single S1 SAR autodespeckler model experiment given the configuration parameters.
+def init_distributed(rank, world_size, free_port):
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = str(free_port)
+    torch.cuda.set_device(rank)
+    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+
+def run_experiment_ad(rank, world_size, free_port, cfg):
+    """Run a DDP S1 SAR autodespeckler model experiment given the configuration parameters.
+
+    NOTE: For OmegaConf objects, pass in OmegaConf.to_container(cfg, resolve=True)
+    for the cfg parameter.
 
     Parameters
     ----------
+    rank : int
+        The rank of the current process
+    world_size : int
+        The total number of processes
+    free_port : int
+        The free port for the DDP process
     cfg : object
         Config object for the SAR autodespeckler.
     
@@ -799,23 +918,28 @@ def run_experiment_ad(cfg):
     fmetrics : Metrics
         Metrics object containing the metrics for the experiment.
     """
-    if not wandb.login():
+    torch.set_num_threads(int(torch.get_num_threads() / world_size))
+    cfg = OmegaConf.create(cfg)
+
+    init_distributed(rank, world_size, free_port)
+
+    if rank == 0 and not wandb.login():
         raise Exception("Failed to login to wandb.")
 
-    # seeding
-    np.random.seed(cfg.seed)
-    random.seed(cfg.seed)
-    torch.manual_seed(cfg.seed)
+    # seeding with rank offset
+    rank_seed = cfg.seed + rank
+    np.random.seed(rank_seed)
+    random.seed(rank_seed)
+    torch.manual_seed(rank_seed)
 
     # device and model
-    device = (
-        "cuda"
-        if torch.cuda.is_available()
-        else "mps"
-        if torch.backends.mps.is_available()
-        else "cpu"
-    )
-    model = build_autodespeckler(cfg).to(device)
+    if torch.cuda.is_available():
+        device = torch.device("cuda", rank)
+    else:
+        raise ValueError("CUDA is required for distributed training")
+
+    # setup model with DDP
+    model = DDP(build_autodespeckler(cfg).to(device), device_ids=[rank])
 
     # dataset and transforms
     print(f"Using {device} device")
@@ -837,131 +961,149 @@ def run_experiment_ad(cfg):
 
     standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
 
-    # datasets
-    train_set = ConditionalSARDataset(sample_dir, typ="train", transform=standardize, random_flip=cfg.data.random_flip,
-                                        seed=cfg.seed+1, mmap_mode='r' if cfg.data.mmap else None)
+    # training set is large so must be sharded - partitioned by rank internally
+    shards = sorted(sample_dir.glob("train_patches_[0-9]*.npy"))
+    train_set = ShardedConditionalSARDataset(shards, cfg.data.block_size, rank, world_size,
+                                        epoch=0, transform=standardize,
+                                        random_flip=cfg.data.random_flip, seed=cfg.seed+1,
+                                        mmap_mode='r' if cfg.data.mmap else None)
+    # validation and test set are smaller, use DistributedSampler
     val_set = ConditionalSARDataset(sample_dir, typ="val", transform=standardize)
     test_set = ConditionalSARDataset(sample_dir, typ="test", transform=standardize) if cfg.eval.mode == 'test' else None
 
-    # for homogenous SAR patch evaluation
+    # for homogenous SAR patch evaluation - also need DistributedSampler for distributed calculate_metrics
     val_homogenous_set = HomogenousSARDataset(sample_dir, typ="val", transform=standardize)
     test_homogenous_set = HomogenousSARDataset(sample_dir, typ="test", transform=standardize) if cfg.eval.mode == 'test' else None
 
     # dataloaders
+    # Training set: ShardedConditionalSARDataset handles partitioning internally - no DistributedSampler needed
     train_loader = DataLoader(train_set,
                              batch_size=cfg.train.batch_size,
                              num_workers=cfg.train.num_workers,
                              persistent_workers=cfg.train.num_workers>0,
                              pin_memory=True,
-                             shuffle=True,
+                             multiprocessing_context='fork',
                              drop_last=False)
 
+    # Val/test loaders use DistributedSampler with fork context to share data in memory
     val_loader = DataLoader(val_set,
                             batch_size=cfg.train.batch_size,
                             num_workers=cfg.train.num_workers,
                             persistent_workers=cfg.train.num_workers>0,
                             pin_memory=True,
-                            shuffle=False,
-                            drop_last=False)
+                            sampler=DistributedSampler(val_set, shuffle=False, drop_last=False),
+                            multiprocessing_context='fork',
+                            shuffle=False)
 
     test_loader = DataLoader(test_set,
                             batch_size=cfg.train.batch_size,
                             num_workers=cfg.train.num_workers,
                             persistent_workers=cfg.train.num_workers>0,
                             pin_memory=True,
-                            shuffle=False,
-                            drop_last=False) if cfg.eval.mode == 'test' else None
+                            sampler=DistributedSampler(test_set, shuffle=False, drop_last=False),
+                            multiprocessing_context='fork',
+                            shuffle=False) if cfg.eval.mode == 'test' else None
 
+    # Homogenous loaders also use DistributedSampler for distributed calculate_metrics
     val_homogenous_loader = DataLoader(val_homogenous_set,
                             batch_size=cfg.train.batch_size,
                             num_workers=0,
+                            sampler=DistributedSampler(val_homogenous_set, shuffle=False, drop_last=False),
                             shuffle=False,
-                            drop_last=False) if cfg.eval.mode == 'val' else None
+                            drop_last=False)
     
     test_homogenous_loader = DataLoader(test_homogenous_set,
                             batch_size=cfg.train.batch_size,
                             num_workers=0,
+                            sampler=DistributedSampler(test_homogenous_set, shuffle=False, drop_last=False),
                             shuffle=False,
                             drop_last=False) if cfg.eval.mode == 'test' else None
 
-    # initialize wandb run
-    total_params, trainable_params, param_size_in_mb = get_model_params(model)
-    
-    # convert config to flat dict for logging
-    config_dict = flatten_dict(OmegaConf.to_container(cfg, resolve=True))
-    run = wandb.init(
-        project=cfg.wandb.project,
-        group=cfg.wandb.group,
-        config={
-            "dataset": "Sentinel1-Multitemporal",
-            **config_dict,
-            "training_size": len(train_set),
-            "validation_size": len(val_set),
-            "test_size": len(test_set) if cfg.eval.mode == 'test' else None,
-            "val_percent": len(val_set) / (len(train_set) + len(val_set)),
-            "total_parameters": total_params,
-            "trainable_parameters": trainable_params,
-            "parameter_size_mb": param_size_in_mb
-        }
-    )
+    # initialize wandb run - only rank 0
+    if rank == 0:
+        total_params, trainable_params, param_size_in_mb = get_model_params(model)
+        
+        # convert config to flat dict for logging
+        config_dict = flatten_dict(OmegaConf.to_container(cfg, resolve=True))
+        run = wandb.init(
+            project=cfg.wandb.project,
+            group=cfg.wandb.group,
+            config={
+                "dataset": "Sentinel1-Multitemporal",
+                **config_dict,
+                "training_size": len(train_set),
+                "validation_size": len(val_set),
+                "test_size": len(test_set) if cfg.eval.mode == 'test' else None,
+                "val_percent": len(val_set) / (len(train_set) + len(val_set)),
+                "total_parameters": total_params,
+                "trainable_parameters": trainable_params,
+                "parameter_size_mb": param_size_in_mb
+            }
+        )
+    else:
+        run = None
 
     try:
-        # setup save path
-        if cfg.save:
+        # setup save path - only rank 0
+        if rank == 0 and cfg.save:
             if cfg.save_path is None:
                 cfg.save_path = str(Path(cfg.paths.experiment_dir) / f"{datetime.today().strftime('%Y-%m-%d')}_{cfg.model.autodespeckler}_{run.id}/")
                 run.config.update({"save_path": cfg.save_path}, allow_val_change=True)
             print(f'Save path set to: {cfg.save_path}')
+        
+        # synchronize ranks
+        dist.barrier()
 
-        # train and save results metrics
-        weights, fmetrics = train(model, train_loader, val_loader, test_loader, device, cfg, run)
+        # train and save results metrics - all ranks participate
+        weights, fmetrics = train(rank, world_size, model, train_loader, val_loader, test_loader, device, cfg, run)
 
-        # final val despeckling metrics
-        calculate_metrics(val_loader, val_homogenous_loader,
+        # final val despeckling metrics - all ranks participate
+        calculate_metrics(rank, world_size, val_loader, val_homogenous_loader,
                         train_mean, train_std, model, device, fmetrics, cfg, run)
 
-        # final test despeckling metrics
+        # final test despeckling metrics - all ranks participate
         if cfg.eval.mode == 'test':
-            calculate_metrics(test_loader, test_homogenous_loader,
+            calculate_metrics(rank, world_size, test_loader, test_homogenous_loader,
                         train_mean, train_std, model, device, fmetrics, cfg, run)
-        if cfg.save:
-            save_experiment(weights, fmetrics, cfg, run)
 
-        # sample train predictions for analysis - for debugging
-        train_pred_table = sample_predictions(model, train_set, train_mean, train_std, cfg)
-        train_examples = sample_examples(model, train_set, train_mean, train_std, cfg, idxs=[100, 200, 300])
-        run.log({"model_train_predictions": train_pred_table, "train_examples": train_examples})
+        # Only rank 0: save experiment and sample predictions
+        if rank == 0:
+            if cfg.save:
+                save_experiment(weights, fmetrics, cfg, run)
 
-        # sample predictions for analysis
-        pred_table = sample_predictions(model, test_set if cfg.eval.mode == 'test' else val_set,
-                                        train_mean, train_std, cfg)
+            # NOTE: no random sampling examples for train set as it is an iterable dataset
+            # sample predictions for analysis
+            pred_table = sample_predictions(model, test_set if cfg.eval.mode == 'test' else val_set,
+                                            train_mean, train_std, cfg)
 
-        # pick 3 full res examples for closer look
-        examples = sample_examples(model, test_set if cfg.eval.mode == 'test' else val_set, 
-                                   train_mean, train_std, cfg, idxs=[100, 200, 300])
-        run.log({f"model_{cfg.eval.mode}_predictions": pred_table, "val_examples": examples})
+            # pick 3 full res examples for closer look
+            examples = sample_examples(model, test_set if cfg.eval.mode == 'test' else val_set, 
+                                       train_mean, train_std, cfg, idxs=[100, 200, 300])
+            run.log({f"model_{cfg.eval.mode}_predictions": pred_table, "val_examples": examples})
     except Exception as e:
         print("An exception occurred during training!")
 
-        # Send an alert in the W&B UI
-        run.alert(
-            title="Training crashed",
-            text=f"Run failed due to: {e}"
-        )
+        # Send an alert in the W&B UI - only rank 0
+        if rank == 0:
+            run.alert(
+                title="Training crashed 🚨",
+                text=f"Run failed due to: {e}"
+            )
 
-        # Log to wandb summary
-        run.summary["error"] = str(e)
+            # Log to wandb summary
+            run.summary["error"] = str(e)
 
-        # remove save directory if needed
         raise e
     finally:
-        run.finish()
+        if rank == 0:
+            run.finish()
+        dist.destroy_process_group()
 
     return fmetrics
 
 def validate_config(cfg):
     # Add checks
-    assert cfg.model.autodespeckler == 'VAE', "Model must be VAE"
+    assert cfg.model.autodespeckler == 'CVAE', "Model must be CVAE"
     assert cfg.save in [True, False], "Save must be a boolean"
     assert cfg.train.batch_size is not None and cfg.train.batch_size > 0, "Batch size must be defined and positive"
     assert cfg.train.lr > 0, "Learning rate must be positive"
@@ -977,7 +1119,14 @@ def validate_config(cfg):
 @hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig):
     validate_config(cfg)
-    run_experiment_ad(cfg)
+    # resolve cfgs before pickling
+    resolved_cfg = OmegaConf.to_container(cfg, resolve=True)
+
+    world_size = torch.cuda.device_count()
+    free_port = find_free_port()
+    print(f"world_size = {world_size}")
+    print(f"Found free port: {free_port}")
+    mp.spawn(run_experiment_ad, args=(world_size, free_port, resolved_cfg), nprocs=world_size)
 
 if __name__ == '__main__':
     main()

@@ -277,8 +277,9 @@ def train(model, train_loader, val_loader, test_loader, device, cfg, run, cache_
                 scheduler.step()
 
         # Save checkpoint on interval OR when validation improves (best epoch)
+        # Use (epoch + 1) so interval=20 saves after epoch 19, 39, ... (i.e., every 20 epochs)
         should_save_chkpt = cfg.train.checkpoint.save_chkpt and (
-            epoch % cfg.train.checkpoint.save_chkpt_interval == 0 or
+            (epoch + 1) % cfg.train.checkpoint.save_chkpt_interval == 0 or
             (cfg.train.early_stopping and early_stopper.best)
         )
         if should_save_chkpt:

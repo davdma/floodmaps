@@ -208,7 +208,9 @@ def get_ad_loss(cfg):
         return PatchL1Loss()
     elif cfg.train.loss == 'PseudoHuberLoss':
          # pseudo huber - https://arxiv.org/pdf/2310.14189
-        return PseudoHuberLoss(c=0.03)
+         # use default c=0.3 instead of 0.03 due to mean 0 std 1 scale
+        phuber_c = getattr(cfg.train, 'pseudo_huber_c', 0.3)
+        return PseudoHuberLoss(c=phuber_c)
     elif cfg.train.loss == 'HuberLoss':
         return PatchHuberLoss()
     elif cfg.train.loss == 'LogCoshLoss':

@@ -900,10 +900,14 @@ def sample_predictions(model, sample_set, mean, std, cfg, histogram=True, hist_f
     if cfg.wandb.num_sample_predictions <= 0:
         return None
 
-    columns = ["id", 'input_vv', 'input_vh', 'despeckled_vv', 'despeckled_vh', 'composite_vv', 'composite_vh']
+    columns = ["id", 'input_vv', 'input_vh', 
+               'despeckled_vv (z~N[0,1])', 'despeckled_vh (z~N[0,1])',
+               'despeckled_vv (z=0)', 'despeckled_vh (z=0)',
+               'composite_vv', 'composite_vh']
 
     if histogram:
-        columns.extend(['vv_histogram', 'vh_histogram'])
+        columns.extend(['histogram_vv (z~N[0,1])', 'histogram_vh (z~N[0,1])',
+                        'histogram_vv (z=0)', 'histogram_vh (z=0)'])
 
     table = wandb.Table(columns=columns)
     
@@ -920,8 +924,13 @@ def sample_predictions(model, sample_set, mean, std, cfg, histogram=True, hist_f
         X, y = sample_set[k]
 
         with torch.no_grad():
-            out_dict = model.module.inference(X.unsqueeze(0))
-            despeckler_output = out_dict['despeckler_output'].squeeze(0)
+            # Stochastic inference (z ~ N[0,1])
+            out_dict_stoch = model.module.inference(X.unsqueeze(0), deterministic=False)
+            despeckler_output_stoch = out_dict_stoch['despeckler_output'].squeeze(0)
+            
+            # Deterministic inference (z = 0)
+            out_dict_det = model.module.inference(X.unsqueeze(0), deterministic=True)
+            despeckler_output_det = out_dict_det['despeckler_output'].squeeze(0)
 
         # Denormalize all tensors back to dB scale
         # X: (C, H, W) -> denormalize -> (H, W, C) for visualization
@@ -936,19 +945,25 @@ def sample_predictions(model, sample_set, mean, std, cfg, histogram=True, hist_f
         y_db = y * std.view(-1, 1, 1) + mean.view(-1, 1, 1)
         y_db = y_db.permute(1, 2, 0).numpy()  # (H, W, C)
         
-        # Denormalize despeckled output
-        despeckled_db = despeckler_output * std.view(-1, 1, 1) + mean.view(-1, 1, 1)
-        despeckled_db = despeckled_db.numpy()  # (C, H, W)
+        # Denormalize stochastic despeckled output
+        despeckled_stoch_db = despeckler_output_stoch * std.view(-1, 1, 1) + mean.view(-1, 1, 1)
+        despeckled_stoch_db = despeckled_stoch_db.numpy()  # (C, H, W)
+        
+        # Denormalize deterministic despeckled output
+        despeckled_det_db = despeckler_output_det * std.view(-1, 1, 1) + mean.view(-1, 1, 1)
+        despeckled_det_db = despeckled_det_db.numpy()  # (C, H, W)
 
         row = [k]
         
         # Extract VV and VH channels (all in dB scale now)
         vv_input = X_db[:, :, 0]
-        vv_despeckled = despeckled_db[0]
+        vv_despeckled_stoch = despeckled_stoch_db[0]
+        vv_despeckled_det = despeckled_det_db[0]
         vv_composite = y_db[:, :, 0]
 
         vh_input = X_db[:, :, 1]
-        vh_despeckled = despeckled_db[1]
+        vh_despeckled_stoch = despeckled_stoch_db[1]
+        vh_despeckled_det = despeckled_det_db[1]
         vh_composite = y_db[:, :, 1]
 
         # VV input image
@@ -959,13 +974,21 @@ def sample_predictions(model, sample_set, mean, std, cfg, histogram=True, hist_f
         vh_rgba = vh_map.to_rgba(vh_input, bytes=True)
         row.append(wandb.Image(Image.fromarray(vh_rgba, mode="RGBA")))
 
-        # Despeckled VV
-        vv_despeckled_rgba = vv_map.to_rgba(vv_despeckled, bytes=True)
-        row.append(wandb.Image(Image.fromarray(vv_despeckled_rgba, mode="RGBA")))
+        # Despeckled VV (stochastic)
+        vv_despeckled_stoch_rgba = vv_map.to_rgba(vv_despeckled_stoch, bytes=True)
+        row.append(wandb.Image(Image.fromarray(vv_despeckled_stoch_rgba, mode="RGBA")))
 
-        # Despeckled VH
-        vh_despeckled_rgba = vh_map.to_rgba(vh_despeckled, bytes=True)
-        row.append(wandb.Image(Image.fromarray(vh_despeckled_rgba, mode="RGBA")))
+        # Despeckled VH (stochastic)
+        vh_despeckled_stoch_rgba = vh_map.to_rgba(vh_despeckled_stoch, bytes=True)
+        row.append(wandb.Image(Image.fromarray(vh_despeckled_stoch_rgba, mode="RGBA")))
+
+        # Despeckled VV (deterministic)
+        vv_despeckled_det_rgba = vv_map.to_rgba(vv_despeckled_det, bytes=True)
+        row.append(wandb.Image(Image.fromarray(vv_despeckled_det_rgba, mode="RGBA")))
+
+        # Despeckled VH (deterministic)
+        vh_despeckled_det_rgba = vh_map.to_rgba(vh_despeckled_det, bytes=True)
+        row.append(wandb.Image(Image.fromarray(vh_despeckled_det_rgba, mode="RGBA")))
 
         # Composite VV
         vv_composite_rgba = vv_map.to_rgba(vv_composite, bytes=True)
@@ -978,24 +1001,38 @@ def sample_predictions(model, sample_set, mean, std, cfg, histogram=True, hist_f
         # Compare dB distributions (composite vs despeckled output)
         if histogram:
             if index % hist_freq == 0:
-                # VV histogram in dB scale
+                # Stochastic histograms
                 row.append(create_histogram_plot(
                     vv_composite.flatten(),
-                    vv_despeckled.flatten(),
+                    vv_despeckled_stoch.flatten(),
                     db_min=VV_DB_MIN,
                     db_max=VV_DB_MAX,
-                    channel_name="VV"
+                    channel_name="VV (z~N[0,1])"
                 ))
-                # VH histogram in dB scale
                 row.append(create_histogram_plot(
                     vh_composite.flatten(),
-                    vh_despeckled.flatten(),
+                    vh_despeckled_stoch.flatten(),
                     db_min=VH_DB_MIN,
                     db_max=VH_DB_MAX,
-                    channel_name="VH"
+                    channel_name="VH (z~N[0,1])"
+                ))
+                # Deterministic histograms
+                row.append(create_histogram_plot(
+                    vv_composite.flatten(),
+                    vv_despeckled_det.flatten(),
+                    db_min=VV_DB_MIN,
+                    db_max=VV_DB_MAX,
+                    channel_name="VV (z=0)"
+                ))
+                row.append(create_histogram_plot(
+                    vh_composite.flatten(),
+                    vh_despeckled_det.flatten(),
+                    db_min=VH_DB_MIN,
+                    db_max=VH_DB_MAX,
+                    channel_name="VH (z=0)"
                 ))
             else:
-                row.extend([None, None])
+                row.extend([None, None, None, None])
 
         table.add_data(*row)
 
@@ -1007,6 +1044,12 @@ def sample_examples(model, sample_set, mean, std, cfg, idxs=[100, 200, 300]):
     Visualizes SAR VV and VH patches in dB grayscale with fixed ranges:
     - VV: [-30, 0] dB
     - VH: [-30, -5] dB
+    
+    Layout is a 2x2 grid:
+    - Top left: Input (noisy)
+    - Top right: Composite (clean ground truth)
+    - Bottom left: Despeckled (z~N[0,1]) - stochastic
+    - Bottom right: Despeckled (z=0) - deterministic
     
     Parameters
     ----------
@@ -1035,8 +1078,13 @@ def sample_examples(model, sample_set, mean, std, cfg, idxs=[100, 200, 300]):
         X, y = sample_set[k]
 
         with torch.no_grad():
-            out_dict = model.module.inference(X.unsqueeze(0))
-            despeckler_output = out_dict['despeckler_output'].squeeze(0)
+            # Stochastic inference (z ~ N[0,1])
+            out_dict_stoch = model.module.inference(X.unsqueeze(0), deterministic=False)
+            despeckler_output_stoch = out_dict_stoch['despeckler_output'].squeeze(0)
+            
+            # Deterministic inference (z = 0)
+            out_dict_det = model.module.inference(X.unsqueeze(0), deterministic=True)
+            despeckler_output_det = out_dict_det['despeckler_output'].squeeze(0)
 
         # Denormalize all tensors back to dB scale
         # X: (C, H, W) -> denormalize
@@ -1047,30 +1095,40 @@ def sample_examples(model, sample_set, mean, std, cfg, idxs=[100, 200, 300]):
         y_db = y * std.view(-1, 1, 1) + mean.view(-1, 1, 1)
         y_db = y_db.permute(1, 2, 0).numpy()  # (H, W, C)
         
-        # despeckler_output: (C, H, W) -> denormalize
-        despeckled_db = despeckler_output * std.view(-1, 1, 1) + mean.view(-1, 1, 1)
-        despeckled_db = despeckled_db.numpy()  # (C, H, W)
+        # Denormalize stochastic despeckled output
+        despeckled_stoch_db = despeckler_output_stoch * std.view(-1, 1, 1) + mean.view(-1, 1, 1)
+        despeckled_stoch_db = despeckled_stoch_db.numpy()  # (C, H, W)
+        
+        # Denormalize deterministic despeckled output
+        despeckled_det_db = despeckler_output_det * std.view(-1, 1, 1) + mean.view(-1, 1, 1)
+        despeckled_det_db = despeckled_det_db.numpy()  # (C, H, W)
 
         # Extract VV and VH channels (all in dB scale)
         vv_input = X_db[:, :, 0]
-        vv_despeckled = despeckled_db[0]
+        vv_despeckled_stoch = despeckled_stoch_db[0]
+        vv_despeckled_det = despeckled_det_db[0]
         vv_composite = y_db[:, :, 0]
 
         vh_input = X_db[:, :, 1]
-        vh_despeckled = despeckled_db[1]
+        vh_despeckled_stoch = despeckled_stoch_db[1]
+        vh_despeckled_det = despeckled_det_db[1]
         vh_composite = y_db[:, :, 1]
 
-        # Stitch VV images into vertical column (Input | Despeckled | Composite)
-        stitched_vv = np.vstack([vv_input, vv_despeckled, vv_composite])
-        stitched_vv_rgba = vv_map.to_rgba(stitched_vv, bytes=True)
-        vv_img = Image.fromarray(stitched_vv_rgba, mode="RGBA")
-        examples.append(wandb.Image(vv_img, caption=f"({k}VV) Top: In, Middle: Out, Bottom: Composite"))
+        # Create 2x2 grid for VV: (Input | Composite) / (Despeckled z~N | Despeckled z=0)
+        top_row_vv = np.hstack([vv_input, vv_composite])
+        bottom_row_vv = np.hstack([vv_despeckled_stoch, vv_despeckled_det])
+        grid_vv = np.vstack([top_row_vv, bottom_row_vv])
+        grid_vv_rgba = vv_map.to_rgba(grid_vv, bytes=True)
+        vv_img = Image.fromarray(grid_vv_rgba, mode="RGBA")
+        examples.append(wandb.Image(vv_img, caption=f"({k}VV) TL: Input, TR: Composite, BL: z~N[0,1], BR: z=0"))
 
-        # Stitch VH images into vertical column (Input | Despeckled | Composite)
-        stitched_vh = np.vstack([vh_input, vh_despeckled, vh_composite])
-        stitched_vh_rgba = vh_map.to_rgba(stitched_vh, bytes=True)
-        vh_img = Image.fromarray(stitched_vh_rgba, mode="RGBA")
-        examples.append(wandb.Image(vh_img, caption=f"({k}VH) Top: In, Middle: Out, Bottom: Composite"))
+        # Create 2x2 grid for VH: (Input | Composite) / (Despeckled z~N | Despeckled z=0)
+        top_row_vh = np.hstack([vh_input, vh_composite])
+        bottom_row_vh = np.hstack([vh_despeckled_stoch, vh_despeckled_det])
+        grid_vh = np.vstack([top_row_vh, bottom_row_vh])
+        grid_vh_rgba = vh_map.to_rgba(grid_vh, bytes=True)
+        vh_img = Image.fromarray(grid_vh_rgba, mode="RGBA")
+        examples.append(wandb.Image(vh_img, caption=f"({k}VH) TL: Input, TR: Composite, BL: z~N[0,1], BR: z=0"))
 
     return examples
 

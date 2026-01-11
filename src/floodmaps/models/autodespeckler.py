@@ -333,8 +333,26 @@ class CVAE(nn.Module):
         z = self.reparameterize(mu, log_var)
         return {'despeckler_output': self.decode(z, x), 'despeckler_input': x, 'mu': mu, 'log_var': log_var}
     
-    def inference(self, x):
-        z = torch.randn(x.shape[0], self.latent_dim).to(x.device)
+    def inference(self, x, deterministic=False):
+        """
+        Inference mode for CVAE. Deterministic inference uses z=0, while
+        stochastic inference samples z from N(0,1). For N mean stochastic inference
+        feed in N samples of x and then average the outputs along the batch dimension.
+        
+        Parameters
+        ----------
+        x: (Tensor) Speckled image [N x C x H x W]
+        deterministic: (bool) Whether to use deterministic inference
+        
+        Returns
+        -------
+        dict
+            Dictionary containing the despeckled output, input, and latent codes
+        """
+        if deterministic:
+            z = torch.zeros(x.shape[0], self.latent_dim).to(x.device)
+        else:
+            z = torch.randn(x.shape[0], self.latent_dim).to(x.device)
         return {'despeckler_output': self.decode(z, x), 'despeckler_input': x}
 
 # TEMP: For ablation study we remove conditioning signal from encoder
@@ -477,8 +495,26 @@ class CVAE_no_cond(nn.Module):
         z = self.reparameterize(mu, log_var)
         return {'despeckler_output': self.decode(z, x), 'despeckler_input': x, 'mu': mu, 'log_var': log_var}
     
-    def inference(self, x):
-        z = torch.randn(x.shape[0], self.latent_dim).to(x.device)
+    def inference(self, x, deterministic=False):
+        """
+        Inference mode for CVAE. Deterministic inference uses z=0, while
+        stochastic inference samples z from N(0,1). For N mean stochastic inference
+        feed in N samples of x and then average the outputs along the batch dimension.
+        
+        Parameters
+        ----------
+        x: (Tensor) Speckled image [N x C x H x W]
+        deterministic: (bool) Whether to use deterministic inference
+
+        Returns
+        -------
+        dict
+            Dictionary containing the despeckled output, input, and latent codes
+        """
+        if deterministic:
+            z = torch.zeros(x.shape[0], self.latent_dim).to(x.device)
+        else:
+            z = torch.randn(x.shape[0], self.latent_dim).to(x.device)
         return {'despeckler_output': self.decode(z, x), 'despeckler_input': x}
 
 

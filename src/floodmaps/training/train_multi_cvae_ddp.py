@@ -662,10 +662,12 @@ def calculate_metrics(rank, world_size, dataloader, homogenous_dataloader, train
     3. ENL (speckle suppression)
     4. Variance of Laplacian (edge sharpness)
 
-    No reference metric ENL is calculated on a small sample of homogenous
+    NOTE: No-reference metric ENL is calculated on a small sample of homogenous
     regions picked from the val or test set.
 
     NOTE: PSNR and SSIM are computed on amplitude scale SAR data normalized to [0, 1].
+
+    NOTE: Evaluation deterministic inference using z=0.
 
     Parameters
     ----------
@@ -714,7 +716,7 @@ def calculate_metrics(rank, world_size, dataloader, homogenous_dataloader, train
         B, C, H, W = X.shape
 
         with torch.no_grad():
-            out_dict = model.module.inference(X)
+            out_dict = model.module.inference(X, deterministic=True)
             result = out_dict['despeckler_output']
 
             # convert back to dB scale
@@ -760,7 +762,7 @@ def calculate_metrics(rank, world_size, dataloader, homogenous_dataloader, train
         B, C, H, W = X.shape
 
         with torch.no_grad():
-            out_dict = model.module.inference(X)
+            out_dict = model.module.inference(X, deterministic=True)
             result = out_dict['despeckler_output']
 
             # convert back to dB scale

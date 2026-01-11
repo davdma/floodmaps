@@ -682,7 +682,7 @@ def normalize(patch, vmin, vmax):
     """Clip and normalize a patch to the range [0, 1]. Used for SSIM."""
     return torch.clip((patch - vmin) / (vmax - vmin), 0, 1)
 
-def psnr(noisy, ground_truth, max_val=1.0):
+def psnr(noisy, ground_truth, max_val=1.0, eps=1e-10):
     """PSNR metric for torch tensors.
 
     NOTE: Expects SAR amplitude scale data normalized to [0, 1] or [0, 255] range.
@@ -695,6 +695,8 @@ def psnr(noisy, ground_truth, max_val=1.0):
         Ground truth (multitemporal composite) SAR image
     max_val : float
         Maximum possible pixel value (default 1.0 for normalized [0, 1] data)
+    eps : float
+        Small epsilon to prevent division by zero when MSE=0
     
     Returns
     -------
@@ -704,8 +706,9 @@ def psnr(noisy, ground_truth, max_val=1.0):
     noisy = noisy.view(noisy.shape[0], -1)
     ground_truth = ground_truth.view(ground_truth.shape[0], -1)
     mse = torch.mean((noisy - ground_truth) ** 2, dim=1)
-    psnr = 10 * torch.log10(max_val ** 2 / mse)
-    return psnr
+    # Add eps to prevent infinity when MSE is 0 (perfect reconstruction)
+    psnr_val = 10 * torch.log10(max_val ** 2 / (mse + eps))
+    return psnr_val
 
 def enl(img):
     """ENL calculated for homogenous patches. Must be in linear power scale.

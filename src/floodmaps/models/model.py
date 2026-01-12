@@ -3,7 +3,7 @@ from torch import nn
 
 from floodmaps.models.unet import UNet
 from floodmaps.models.unet_plus import NestedUNet
-from floodmaps.models.discriminator import Classifier1, Classifier2, Classifier3
+from floodmaps.models.discriminator import Classifier1, Classifier2, Classifier3, ConditionalPatchGAN
 from floodmaps.models.autodespeckler import VarAutoencoder, CVAE, CVAE_no_cond, ResidualDespeckler
 from floodmaps.utils.utils import load_model_weights
 
@@ -45,6 +45,28 @@ def build_autodespeckler(cfg):
         return ResidualDespeckler(backbone)
     else:
         raise Exception('Invalid autodespeckler config.')
+
+def build_patchgan_discriminator(cfg):
+    """Factory function for PatchGAN discriminator construction for CVAE-GAN.
+    
+    Builds a conditional PatchGAN discriminator with spectral normalization.
+    Input is concatenated (noisy SAR, output) pairs (4 channels by default).
+    
+    Parameters
+    ----------
+    cfg : obj
+        Config with model.discriminator.features (list of ints, default [64, 128, 256])
+    
+    Returns
+    -------
+    ConditionalPatchGAN
+        PatchGAN discriminator instance
+    """
+    # Get features from config, default to [64, 128, 256]
+    features = getattr(cfg.model.discriminator, 'features', [64, 128, 256])
+    # Input: 2 channels noisy SAR + 2 channels output = 4 channels
+    in_channels = 4
+    return ConditionalPatchGAN(in_channels=in_channels, features=features)
 
 def build_sar_classifier(cfg):
     """Factory function for SAR classifier model construction.

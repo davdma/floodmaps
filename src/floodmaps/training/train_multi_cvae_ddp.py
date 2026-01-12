@@ -31,7 +31,7 @@ from floodmaps.training.optim import get_optimizer
 from floodmaps.training.scheduler import get_scheduler
 from floodmaps.training.loss import get_ad_loss
 from floodmaps.utils.utils import (flatten_dict, ADEarlyStopper, Metrics, BetaScheduler, get_gradient_norm,
-                   get_model_params, print_model_params_and_grads, find_free_port)
+                   get_model_params, print_model_params_and_grads, find_free_port, load_model_weights)
 from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
 from floodmaps.utils.metrics import (denormalize, normalize, convert_to_amplitude, var_laplacian, enl, psnr, ActiveUnitsTracker)
 
@@ -1181,7 +1181,13 @@ def run_experiment_ad(rank, world_size, free_port, cfg):
         raise ValueError("CUDA is required for distributed training")
 
     # setup model with DDP
-    model = DDP(build_autodespeckler(cfg).to(device), device_ids=[rank])
+    autodespeckler = build_autodespeckler(cfg).to(device)
+    
+    # Load pretrained weights if specified
+    if hasattr(cfg.model, 'weights') and cfg.model.weights is not None:
+        load_model_weights(autodespeckler, cfg.model.weights, device, model_name="Autodespeckler")
+    
+    model = DDP(autodespeckler, device_ids=[rank])
 
     # dataset and transforms
     print(f"Using {device} device")

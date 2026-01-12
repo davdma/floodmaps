@@ -310,6 +310,105 @@ class CharbonnierLoss(nn.Module):
         patch_loss = loss.view(loss.size(0), -1).sum(dim=1)
         return patch_loss.mean()
 
+
+# LSGAN losses for CVAE-GAN training
+# Uses sum-over-spatial reduction to match ELBO loss scaling convention
+class LSGANDiscriminatorLoss(nn.Module):
+    """LSGAN discriminator loss with sum-over-spatial reduction.
+    
+    Computes:
+        D_loss = 0.5 * (MSE(D(real), 1) + MSE(D(fake), 0))
+    
+    NOTE: Uses sum over spatial dimensions, mean over batch to match the ELBO loss
+    scaling convention (sum-over-pixels for reconstruction, sum-over-latent for KL).
+    
+    LSGAN uses MSE instead of BCE for more stable training and less mode collapse.
+    
+    Parameters
+    ----------
+    real_label : float
+        Target label for real samples (default 1.0)
+    fake_label : float
+        Target label for fake samples (default 0.0)
+    """
+    def __init__(self, real_label=1.0, fake_label=0.0):
+        super().__init__()
+        self.register_buffer('real_label', torch.tensor(real_label))
+        self.register_buffer('fake_label', torch.tensor(fake_label))
+    
+    def forward(self, d_real, d_fake):
+        """Compute discriminator loss.
+        
+        Parameters
+        ----------
+        d_real : torch.Tensor
+            Discriminator output for real samples [B, 1, H, W]
+        d_fake : torch.Tensor
+            Discriminator output for fake samples [B, 1, H, W]
+        
+        Returns
+        -------
+        dict
+            Dictionary with 'd_loss', 'd_loss_real', 'd_loss_fake'
+        """
+        # Element-wise MSE, sum over spatial, mean over batch
+        target_real = torch.full_like(d_real, self.real_label)
+        loss_real = (d_real - target_real) ** 2
+        d_loss_real = loss_real.view(loss_real.size(0), -1).sum(dim=1).mean()
+        
+        target_fake = torch.full_like(d_fake, self.fake_label)
+        loss_fake = (d_fake - target_fake) ** 2
+        d_loss_fake = loss_fake.view(loss_fake.size(0), -1).sum(dim=1).mean()
+        
+        d_loss = 0.5 * (d_loss_real + d_loss_fake)
+        
+        return {
+            'd_loss': d_loss,
+            'd_loss_real': d_loss_real,
+            'd_loss_fake': d_loss_fake
+        }
+
+
+class LSGANGeneratorLoss(nn.Module):
+    """LSGAN generator adversarial loss with sum-over-spatial reduction.
+    
+    Computes:
+        G_adv_loss = MSE(D(fake), 1)
+    
+    NOTE: Uses sum over spatial dimensions, mean over batch to match the ELBO loss
+    scaling convention (sum-over-pixels for reconstruction, sum-over-latent for KL).
+    
+    Generator tries to fool discriminator by making fake samples look real.
+    
+    Parameters
+    ----------
+    real_label : float
+        Target label for generator (wants D to output 1 for fakes)
+    """
+    def __init__(self, real_label=1.0):
+        super().__init__()
+        self.register_buffer('real_label', torch.tensor(real_label))
+    
+    def forward(self, d_fake):
+        """Compute generator adversarial loss.
+        
+        Parameters
+        ----------
+        d_fake : torch.Tensor
+            Discriminator output for fake samples [B, 1, H, W]
+        
+        Returns
+        -------
+        torch.Tensor
+            Generator adversarial loss (scalar)
+        """
+        # Element-wise MSE, sum over spatial, mean over batch
+        target = torch.full_like(d_fake, self.real_label)
+        loss = (d_fake - target) ** 2
+        per_sample = loss.view(loss.size(0), -1).sum(dim=1)
+        return per_sample.mean()
+
+
 class BCEDiceLoss(nn.Module):
     def __init__(self, pos_weight=None):
         """pos_weight can be a float or tensor - will be converted to tensor and registered as buffer."""

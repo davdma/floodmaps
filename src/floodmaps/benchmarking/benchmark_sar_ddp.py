@@ -51,8 +51,8 @@ def flatten_group_metrics(metrics_dict: Dict[str, Any], prefix: str) -> Dict[str
 def extract_trial_metrics(fmetrics, split: str, partition: str) -> Dict[str, Any]:
     """Extract and flatten all metrics from a trial run.
     
-    Extracts core metrics, NLCD group metrics, and SCL group metrics,
-    flattening them into a single dictionary.
+    Extracts core metrics, NLCD group metrics, SCL group metrics, and shift
+    distribution, flattening them into a single dictionary.
     
     Parameters
     ----------
@@ -61,7 +61,7 @@ def extract_trial_metrics(fmetrics, split: str, partition: str) -> Dict[str, Any
     split : str
         Data split ('test' or 'val')
     partition : str
-        Partition type for SAR metrics ('shift_invariant' or 'non_shift_invariant')
+        Partition type for SAR metrics ('shift_invariant', 'non_shift_invariant', or 'aligned')
     
     Returns
     -------
@@ -83,6 +83,10 @@ def extract_trial_metrics(fmetrics, split: str, partition: str) -> Dict[str, Any
     # Extract and flatten SCL group metrics
     if 'scl_metrics' in all_metrics:
         flat_metrics.update(flatten_group_metrics(all_metrics['scl_metrics'], 'scl'))
+    
+    # Extract shift distribution (only present for shift_invariant partition)
+    if 'shift_distribution' in all_metrics:
+        flat_metrics.update(all_metrics['shift_distribution'])
     
     return flat_metrics
 
@@ -256,8 +260,12 @@ def benchmark_sar(cfg: DictConfig) -> None:
     config_id = cfg.benchmarking.config_id
     shift_trials_path = save_dir / f"{config_id}_shift_trials.csv"
     non_shift_trials_path = save_dir / f"{config_id}_non_shift_trials.csv"
+    aligned_trials_path = save_dir / f"{config_id}_aligned_trials.csv"
     config_path = save_dir / f"{config_id}_config.yaml"
     summary_path = save_dir / f"{config_id}_summary.csv"
+    
+    # Check if aligned metrics are available (shift ablation enabled)
+    is_shift_ablation_available = getattr(cfg.data, 'shift_ablation', False)
     
     # Save config (only once per benchmark)
     save_config(config_path, cfg)
@@ -265,6 +273,7 @@ def benchmark_sar(cfg: DictConfig) -> None:
     # Load or initialize trials DataFrame
     shift_trials_df = load_trials_checkpoint(shift_trials_path)
     non_shift_trials_df = load_trials_checkpoint(non_shift_trials_path)
+    aligned_trials_df = load_trials_checkpoint(aligned_trials_path) if is_shift_ablation_available else pd.DataFrame()
     count = len(shift_trials_df)
     
     if count > 0:
@@ -329,15 +338,33 @@ def benchmark_sar(cfg: DictConfig) -> None:
                 ignore_index=True
             )
             
+            # Extract and save aligned metrics if shift ablation is enabled
+            if is_shift_ablation_available:
+                aligned_trial_metrics = extract_trial_metrics(fmetrics, split=cfg.eval.mode, partition="aligned")
+                aligned_trial_results = {
+                    'trial': trial_num,
+                    'seed': trial_seed,
+                    **aligned_trial_metrics
+                }
+                aligned_trials_df = pd.concat(
+                    [aligned_trials_df, pd.DataFrame([aligned_trial_results])],
+                    ignore_index=True
+                )
+                save_trials_checkpoint(aligned_trials_path, aligned_trials_df)
+            
             # Save checkpoint after each trial
             save_trials_checkpoint(shift_trials_path, shift_trials_df)
             save_trials_checkpoint(non_shift_trials_path, non_shift_trials_df)
             print(f"Trial {trial_num + 1} completed. Shift metrics saved to {shift_trials_path}, non-shift metrics saved to {non_shift_trials_path}")
+            if is_shift_ablation_available:
+                print(f"  Aligned metrics saved to {aligned_trials_path}")
         except Exception as err:
             err.add_note(f'Happened on benchmark trial number {trial_num + 1}.')
             print(f'\nERROR: Trial {trial_num + 1} failed. Checkpoint saved.')
             save_trials_checkpoint(shift_trials_path, shift_trials_df)
             save_trials_checkpoint(non_shift_trials_path, non_shift_trials_df)
+            if is_shift_ablation_available:
+                save_trials_checkpoint(aligned_trials_path, aligned_trials_df)
             raise err
     
     count += cur_evals
@@ -362,10 +389,16 @@ def benchmark_sar(cfg: DictConfig) -> None:
             'classifier': cfg.model.classifier,
             'channels': cfg.data.channels,
             'shift_invariant': cfg.train.shift_invariant,
+            'shift_ablation': is_shift_ablation_available,
             'trials': cfg.benchmarking.trials,
             **shift_stats,
             **non_shift_stats
         }
+        
+        # Add aligned metrics to summary if available
+        if is_shift_ablation_available and len(aligned_trials_df) > 0:
+            aligned_stats = compute_summary_statistics(aligned_trials_df, prefix="aligned")
+            summary.update(aligned_stats)
         
         # Save summary
         save_summary(summary_path, summary)
@@ -373,12 +406,16 @@ def benchmark_sar(cfg: DictConfig) -> None:
         print(f"Benchmark complete!")
         print(f"  - Shift trials: {shift_trials_path}")
         print(f"  - Non-shift trials: {non_shift_trials_path}")
+        if is_shift_ablation_available:
+            print(f"  - Aligned trials: {aligned_trials_path}")
         print(f"  - Config: {config_path}")
         print(f"  - Summary: {summary_path}")
     else:
         print(f"\nProgress: {count}/{cfg.benchmarking.trials} trials completed")
         print(f"Checkpoint saved to: {shift_trials_path}")
         print(f"Checkpoint saved to: {non_shift_trials_path}")
+        if is_shift_ablation_available:
+            print(f"Checkpoint saved to: {aligned_trials_path}")
         print(f"Run again to continue from trial {count + 1}")
 
 

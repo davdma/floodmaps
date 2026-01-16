@@ -317,6 +317,11 @@ def evaluate(model, dataloader, test_aligned_loader, device, loss_config, cfg, a
     running_tot_shift_vloss = torch.tensor(0.0, device=device)
     running_tot_non_shift_vloss = torch.tensor(0.0, device=device)
 
+    # Shift distribution counting - compute shift window dimensions from config
+    shift_range = cfg.data.size - cfg.data.window + 1  # 5 for 68/64
+    # Use flat tensor for efficient bincount accumulation
+    shift_counts = torch.zeros(shift_range * shift_range, dtype=torch.long, device=device)
+
     num_batches = len(dataloader)
     
     # Shift-invariant metric collections
@@ -389,6 +394,10 @@ def evaluate(model, dataloader, test_aligned_loader, device, loss_config, cfg, a
             shift_metric_collection.update(y_pred_probs, target_shift)
             shift_nlcd_metric_collection.update(y_pred_probs, target_shift, nlcd_classes.flatten())
             shift_scl_metric_collection.update(y_pred_probs, target_shift, scl_classes_shift.flatten())
+            
+            # Vectorized shift counting using bincount
+            flat_indices = row_shifts * shift_range + col_shifts
+            shift_counts += torch.bincount(flat_indices, minlength=shift_range * shift_range)
             
             # Compute non-shift-invariant loss and metrics
             non_shift_loss_dict = loss_config.compute_loss(out_dict, y.float(), typ='test', shift_invariant=False)
@@ -533,12 +542,21 @@ def evaluate(model, dataloader, test_aligned_loader, device, loss_config, cfg, a
         aligned_nlcd_metric_collection.reset()
         aligned_scl_metric_collection.reset()
 
+    # Build shift distribution dict from accumulated counts
+    shift_counts_2d = shift_counts.reshape(shift_range, shift_range)
+    shift_distribution = {}
+    for i in range(shift_range):
+        for j in range(shift_range):
+            shift_distribution[f"shift_count_{i}_{j}"] = int(shift_counts_2d[i, j].item())
+    shift_distribution["shift_range"] = shift_range
+
     # Return both shift-invariant and non-shift-invariant metrics
     shift_metrics_dict = {
         'core_metrics': shift_core_metrics_dict,
         'confusion_matrix': shift_confusion_matrix_dict,
         'nlcd_metrics': shift_nlcd_metrics_dict,
-        'scl_metrics': shift_scl_metrics_dict
+        'scl_metrics': shift_scl_metrics_dict,
+        'shift_distribution': shift_distribution
     }
     non_shift_metrics_dict = {
         'core_metrics': non_shift_core_metrics_dict,

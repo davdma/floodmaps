@@ -334,10 +334,13 @@ def test_loop(rank, world_size, model, dataloader, device, loss_config, cfg, ad_
 
     return epoch_vloss, epoch_cls_vloss, metrics_dict
 
-def evaluate(model, dataloader, device, loss_config, cfg, ad_cfg, c):
+def evaluate(model, dataloader, test_aligned_loader, device, loss_config, cfg, ad_cfg, c):
     """Evaluate metrics on test set without logging.
     Computes both shift-invariant and non-shift-invariant loss and
-    metrics. Should only be called by rank 0."""
+    metrics. Should only be called by rank 0.
+    
+    If shift ablation patches are available, aligned metrics are computed as well.
+    """
     running_tot_shift_vloss = torch.tensor(0.0, device=device)
     running_tot_non_shift_vloss = torch.tensor(0.0, device=device)
 
@@ -368,6 +371,20 @@ def evaluate(model, dataloader, device, loss_config, cfg, ad_cfg, c):
     ]).to(device)
     non_shift_nlcd_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=NLCD_CLASSES, sync_on_compute=False).to(device)
     non_shift_scl_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=SCL_CLASSES, sync_on_compute=False).to(device)
+
+    # Test aligned patch metrics
+    if test_aligned_loader is not None:
+        aligned_metric_collection = MetricCollection([
+            BinaryAccuracy(threshold=0.5, sync_on_compute=False),
+            BinaryPrecision(threshold=0.5, sync_on_compute=False),
+            BinaryRecall(threshold=0.5, sync_on_compute=False),
+            BinaryF1Score(threshold=0.5, sync_on_compute=False),
+            BinaryConfusionMatrix(threshold=0.5, sync_on_compute=False),
+            BinaryJaccardIndex(threshold=0.5, sync_on_compute=False),
+            BinaryAveragePrecision(thresholds=None, sync_on_compute=False)
+        ]).to(device)
+        aligned_nlcd_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=NLCD_CLASSES, sync_on_compute=False).to(device)
+        aligned_scl_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=SCL_CLASSES, sync_on_compute=False).to(device)
 
     window_size = cfg.data.window
     model.eval()
@@ -418,6 +435,24 @@ def evaluate(model, dataloader, device, loss_config, cfg, ad_cfg, c):
             
             running_tot_shift_vloss += shift_loss.detach()
             running_tot_non_shift_vloss += non_shift_loss.detach()
+    
+    # for shift ablation performance
+    if test_aligned_loader is not None:
+        with torch.no_grad():
+            for X, y, supplementary in test_aligned_loader:
+                X = X.to(device)
+                y = y.to(device)
+                nlcd_classes = supplementary[:, 3, :, :].to(device)
+                scl_classes = supplementary[:, 4, :, :].to(device)
+
+                out_dict = model(X)
+                logits = out_dict['classifier_output']
+                y_pred_probs = nn.functional.sigmoid(logits).flatten()
+                target = y.flatten() > 0.5
+                aligned_metric_collection.update(y_pred_probs, target)
+                aligned_nlcd_metric_collection.update(y_pred_probs, target, nlcd_classes.flatten())
+                aligned_scl_metric_collection.update(y_pred_probs, target, scl_classes.flatten())
+            
 
     # Compute shift-invariant metrics
     shift_metric_results = shift_metric_collection.compute()
@@ -428,6 +463,12 @@ def evaluate(model, dataloader, device, loss_config, cfg, ad_cfg, c):
     non_shift_metric_results = non_shift_metric_collection.compute()
     non_shift_nlcd_metrics_results = non_shift_nlcd_metric_collection.compute()
     non_shift_scl_metrics_results = non_shift_scl_metric_collection.compute()
+
+    # Compute aligned patch metrics
+    if test_aligned_loader is not None:
+        aligned_metric_results = aligned_metric_collection.compute()
+        aligned_nlcd_metrics_results = aligned_nlcd_metric_collection.compute()
+        aligned_scl_metrics_results = aligned_scl_metric_collection.compute()
     
     epoch_shift_vloss = running_tot_shift_vloss.item() / num_batches
     epoch_non_shift_vloss = running_tot_non_shift_vloss.item() / num_batches
@@ -451,6 +492,16 @@ def evaluate(model, dataloader, device, loss_config, cfg, ad_cfg, c):
         "test IoU": non_shift_metric_results['BinaryJaccardIndex'].item(),
         "test AUPRC": non_shift_metric_results['BinaryAveragePrecision'].item()
     }
+
+    # Build aligned patch core metrics dict
+    aligned_core_metrics_dict = {
+        "test accuracy": aligned_metric_results['BinaryAccuracy'].item(),
+        "test precision": aligned_metric_results['BinaryPrecision'].item(),
+        "test recall": aligned_metric_results['BinaryRecall'].item(),
+        "test f1": aligned_metric_results['BinaryF1Score'].item(),
+        "test IoU": aligned_metric_results['BinaryJaccardIndex'].item(),
+        "test AUPRC": aligned_metric_results['BinaryAveragePrecision'].item()
+    } if test_aligned_loader is not None else {}
     
     # Build shift-invariant confusion matrix and per-class metrics
     shift_confusion_matrix = shift_metric_results['BinaryConfusionMatrix'].tolist()
@@ -481,6 +532,22 @@ def evaluate(model, dataloader, device, loss_config, cfg, ad_cfg, c):
     non_shift_scl_metrics_dict = compute_confmat_dict(non_shift_scl_metrics_results,
                                             non_shift_scl_metric_collection.get_class_to_idx(),
                                             SCL_CLASSES, groups=SCL_GROUPS)
+
+    # Build aligned patch confusion matrix and per-class metrics
+    if test_aligned_loader is not None:
+        aligned_confusion_matrix = aligned_metric_results['BinaryConfusionMatrix'].tolist()
+        aligned_confusion_matrix_dict = {
+            "tn": aligned_confusion_matrix[0][0],
+            "fp": aligned_confusion_matrix[0][1],
+            "fn": aligned_confusion_matrix[1][0],
+            "tp": aligned_confusion_matrix[1][1]
+        }
+        aligned_nlcd_metrics_dict = compute_confmat_dict(aligned_nlcd_metrics_results,
+                                                aligned_nlcd_metric_collection.get_class_to_idx(),
+                                                NLCD_CLASSES, groups=NLCD_GROUPS)
+        aligned_scl_metrics_dict = compute_confmat_dict(aligned_scl_metrics_results,
+                                                aligned_scl_metric_collection.get_class_to_idx(),
+                                                SCL_CLASSES, groups=SCL_GROUPS)
     
     # Reset all metric collections
     shift_metric_collection.reset()
@@ -489,6 +556,11 @@ def evaluate(model, dataloader, device, loss_config, cfg, ad_cfg, c):
     non_shift_metric_collection.reset()
     non_shift_nlcd_metric_collection.reset()
     non_shift_scl_metric_collection.reset()
+    if test_aligned_loader is not None:
+        aligned_metric_collection.reset()
+        aligned_nlcd_metric_collection.reset()
+        aligned_scl_metric_collection.reset()
+
 
     # Return both shift-invariant and non-shift-invariant metrics
     shift_metrics_dict = {
@@ -503,10 +575,17 @@ def evaluate(model, dataloader, device, loss_config, cfg, ad_cfg, c):
         'nlcd_metrics': non_shift_nlcd_metrics_dict,
         'scl_metrics': non_shift_scl_metrics_dict
     }
+    aligned_metrics_dict = {
+        'core_metrics': aligned_core_metrics_dict,
+        'confusion_matrix': aligned_confusion_matrix_dict,
+        'nlcd_metrics': aligned_nlcd_metrics_dict,
+        'scl_metrics': aligned_scl_metrics_dict
+    } if test_aligned_loader is not None else {}
 
-    return epoch_shift_vloss, epoch_non_shift_vloss, shift_metrics_dict, non_shift_metrics_dict
+    return epoch_shift_vloss, epoch_non_shift_vloss, shift_metrics_dict, non_shift_metrics_dict, aligned_metrics_dict
 
-def train(rank, world_size, model, train_loader, val_loader, test_loader, device, cfg, ad_cfg, run, cache_dir=None):
+def train(rank, world_size, model, train_loader, val_loader, test_loader, test_aligned_loader,
+        device, cfg, ad_cfg, run, cache_dir=None):
     # log weights and gradients each epoch
     if rank == 0:
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -518,6 +597,7 @@ def train(rank, world_size, model, train_loader, val_loader, test_loader, device
             Training size:   {len(train_loader.dataset)}
             Validation size: {len(val_loader.dataset)}
             Test size:       {len(test_loader.dataset) if test_loader is not None else 'NA'}
+            Test aligned size: {len(test_aligned_loader.dataset) if test_aligned_loader is not None else 'NA'}
             Device:          {device}
         ''')
         run.watch(model.module, log="all", log_freq=cfg.logging.grad_norm_freq)
@@ -646,11 +726,15 @@ def train(rank, world_size, model, train_loader, val_loader, test_loader, device
         # for benchmarking purposes
         if cfg.eval.mode == 'test':
             # benchmark both non shift and shift invariant metrics
-            shift_test_loss, non_shift_test_loss, shift_test_set_metrics, non_shift_test_set_metrics = evaluate(model, test_loader, device, loss_cfg, cfg, ad_cfg, c)
+            shift_test_loss, non_shift_test_loss, shift_test_set_metrics, non_shift_test_set_metrics, aligned_test_set_metrics = evaluate(model, test_loader, test_aligned_loader, device, loss_cfg, cfg, ad_cfg, c)
             fmetrics.save_metrics('test', partition="shift_invariant", loss=shift_test_loss, **shift_test_set_metrics)
             fmetrics.save_metrics('test', partition="non_shift_invariant", loss=non_shift_test_loss, **non_shift_test_set_metrics)
             run.summary.update({f'final model shift {key}': value for key, value in shift_test_set_metrics['core_metrics'].items()})
             run.summary.update({f'final model non shift {key}': value for key, value in non_shift_test_set_metrics['core_metrics'].items()})
+            if test_aligned_loader is not None:
+                fmetrics.save_metrics('test', partition="aligned", **aligned_test_set_metrics)
+                run.summary.update({f'final model aligned {key}': value for key, value in aligned_test_set_metrics['core_metrics'].items()})
+
 
     return cls_weights, ad_weights, fmetrics
 
@@ -982,6 +1066,24 @@ def run_experiment_s1(rank, world_size, free_port, cfg, ad_cfg=None):
     test_set = FloodSampleSARDataset(sample_dir, channels=channels,
                                         typ="test", transform=standardize) if (rank == 0 and cfg.eval.mode == 'test') else None
 
+    # Only if manually aligned test patches available
+    # Use cfg.data.shift_ablation = True
+    # NOTE: See preprocess/shift_ablation.py
+    is_shift_ablation_available = getattr(cfg.data, 'shift_ablation', False)
+    if rank == 0 and cfg.eval.mode == 'test' and is_shift_ablation_available:
+        test_aligned_set = FloodSampleSARDataset(sample_dir, channels=channels,
+                                            typ="test_shift_ablation", transform=standardize)
+        # Verify shift ablation patch size matches expected window size
+        _, _, H, W = test_aligned_set.dataset.shape
+        expected_size = cfg.data.window
+        if H != expected_size or W != expected_size:
+            raise ValueError(
+                f"Shift ablation patches have size {H}x{W} but model expects {expected_size}x{expected_size}. "
+                f"Ensure cfg.preprocess.size matches cfg.data.window when preprocessing shift ablation patches."
+            )
+    else:
+        test_aligned_set = None
+
     # dataloaders
     # explicitly fork num workers in DDP to avoid memory bloat
     train_loader = DataLoader(train_set,
@@ -1010,6 +1112,17 @@ def run_experiment_s1(rank, world_size, free_port, cfg, ad_cfg=None):
                             shuffle=False,
                             multiprocessing_context='fork',
                             drop_last=False) if (rank == 0 and cfg.eval.mode == 'test') else None
+    
+    if rank == 0 and cfg.eval.mode == 'test' and is_shift_ablation_available:
+        # We expect small set of test patches, so num_workers = 0 is fine
+        test_aligned_loader = DataLoader(test_aligned_set,
+                            batch_size=cfg.train.batch_size,
+                            num_workers=0,
+                            pin_memory=True,
+                            shuffle=False,
+                            drop_last=False)
+    else:
+        test_aligned_loader = None
 
     # initialize wandb run
     if rank == 0:
@@ -1044,7 +1157,7 @@ def run_experiment_s1(rank, world_size, free_port, cfg, ad_cfg=None):
 
         # train and save results metrics
         cls_weights, ad_weights, fmetrics = train(rank, world_size, model, train_loader, val_loader,
-                                              test_loader, device, cfg, ad_cfg, run, cache_dir=sample_dir)
+                                              test_loader, test_aligned_loader, device, cfg, ad_cfg, run, cache_dir=sample_dir)
 
         if rank == 0 and cfg.save:
             save_experiment(cls_weights, ad_weights, fmetrics, cfg, ad_cfg, run)

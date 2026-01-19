@@ -15,7 +15,6 @@ class SARLossConfig():
         """Sets up train, validation, test losses."""
         self.cfg = cfg
         self.ad_cfg = ad_cfg
-        self.uses_autodespeckler = ad_cfg is not None
 
         # classifier logit output losses
         # shift losses (diff implementation for train, val, test loops for efficiency)
@@ -23,12 +22,8 @@ class SARLossConfig():
         # non shift loss (same function used for train, val, test)
         self.non_shift_loss_fn = self.get_non_shift_loss(cfg, device)
 
-        # autodespeckler reconstruction losses
-        self.ad_loss_fn = get_ad_loss(ad_cfg).to(device) if self.uses_autodespeckler else None
-
     def compute_loss(self, out_dict, targets, typ='train', shift_invariant=True):
-        """For autodespeckler architecture, will add reconstruction loss
-        from output of despeckler to the final loss.
+        """Compute classifier loss for SAR flood mapping models.
         
         Parameters
         ----------
@@ -47,27 +42,7 @@ class SARLossConfig():
         loss_dict : dict
             Dictionary containing the computed loss.
         """
-        # autodespeckler loss component - calculate reconstruction loss with respect to sar input
         loss_dict = dict()
-        if self.uses_autodespeckler:
-            recons_loss = self.ad_loss_fn(out_dict['despeckler_output'], out_dict['despeckler_input'])
-            loss_dict['recons_loss'] = recons_loss
-
-            if self.ad_cfg.model.autodespeckler == 'VAE':
-                # beta hyperparameter
-                log_var = torch.clamp(out_dict['log_var'], min=-6, max=6)
-                mu = out_dict['mu']
-                kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
-                loss_dict['kld_loss'] = kld_loss
-
-                recons_loss = recons_loss + self.ad_cfg.model.vae.VAE_beta * kld_loss
-
-                if torch.isnan(recons_loss).any() or torch.isinf(recons_loss).any():
-                    print(f'min mu: {mu.min().item()}')
-                    print(f'max mu: {mu.max().item()}')
-                    print(f'min log_var: {log_var.min().item()}')
-                    print(f'max log_var: {log_var.max().item()}')
-                    raise Exception('recons_loss + kld_loss is nan or inf')
 
         # classifier loss component + true label (shifted or not) + shift indices
         if shift_invariant:
@@ -82,12 +57,7 @@ class SARLossConfig():
         else:
             main_loss, y_true, shift_indices = self.non_shift_loss_fn(out_dict['classifier_output'], targets)
 
-        total_loss = (
-            self.cfg.train.balance_coeff * recons_loss + main_loss
-            if self.uses_autodespeckler else main_loss
-        )
-        loss_dict['total_loss'] = total_loss
-        loss_dict['classifier_loss'] = main_loss
+        loss_dict['loss'] = main_loss
         loss_dict['true_label'] = y_true
         loss_dict['shift_indices'] = shift_indices
         return loss_dict
@@ -192,9 +162,6 @@ class SARLossConfig():
                                         device=device)
         else:
             raise Exception('Loss function not found.')
-
-    def contains_reconstruction_loss(self):
-        return self.uses_autodespeckler
 
 def get_ad_loss(cfg):
     """Note: important to consider scale of losses if summing different components.

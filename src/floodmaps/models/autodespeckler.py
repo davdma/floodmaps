@@ -109,6 +109,57 @@ class VarAutoencoder(nn.Module):
         z = self.reparameterize(mu, log_var)
         return {'despeckler_output': self.decode(z), 'despeckler_input': x, 'mu': mu, 'log_var': log_var}
 
+    def inference(self, x, deterministic=False):
+        """Inference mode for VarAutoencoder.
+        
+        Deterministic inference uses z=mu (mean of the latent distribution),
+        while stochastic inference samples z using the reparameterization trick.
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            Speckled input image [B, C, H, W]
+        deterministic : bool, optional
+            If True, uses z=mu for deterministic output.
+            If False, samples z using reparameterization trick. Default is False.
+        
+        Returns
+        -------
+        dict
+            Output dictionary with despeckler_output, despeckler_input, mu, and log_var
+        """
+        mu, log_var = self.encode(x)
+        if deterministic:
+            z = mu
+        else:
+            z = self.reparameterize(mu, log_var)
+        return {'despeckler_output': self.decode(z), 'despeckler_input': x, 'mu': mu, 'log_var': log_var}
+    
+    def freeze_encoder(self):
+        """Freeze encoder weights: encoder, fc_mu, fc_var."""
+        for module in [self.encoder, self.fc_mu, self.fc_var]:
+            for param in module.parameters():
+                param.requires_grad = False
+
+    def unfreeze_encoder(self):
+        """Unfreeze encoder weights: encoder, fc_mu, fc_var."""
+        for module in [self.encoder, self.fc_mu, self.fc_var]:
+            for param in module.parameters():
+                param.requires_grad = True
+
+    def freeze_decoder(self):
+        """Freeze decoder weights: decoder_input, decoder, final_layer."""
+        for module in [self.decoder_input, self.decoder, self.final_layer]:
+            for param in module.parameters():
+                param.requires_grad = False
+
+    def unfreeze_decoder(self):
+        """Unfreeze decoder weights: decoder_input, decoder, final_layer."""
+        for module in [self.decoder_input, self.decoder, self.final_layer]:
+            for param in module.parameters():
+                param.requires_grad = True
+
+
 class UNet(nn.Module):
     """UNet for embedding into the CVAE decoder.
     
@@ -354,6 +405,31 @@ class CVAE(nn.Module):
         else:
             z = torch.randn(x.shape[0], self.latent_dim).to(x.device)
         return {'despeckler_output': self.decode(z, x), 'despeckler_input': x}
+    
+    def freeze_encoder(self):
+        """Freeze encoder weights: encoder, fc_mu, fc_var."""
+        for module in [self.encoder, self.fc_mu, self.fc_var]:
+            for param in module.parameters():
+                param.requires_grad = False
+
+    def unfreeze_encoder(self):
+        """Unfreeze encoder weights: encoder, fc_mu, fc_var."""
+        for module in [self.encoder, self.fc_mu, self.fc_var]:
+            for param in module.parameters():
+                param.requires_grad = True
+
+    def freeze_decoder(self):
+        """Freeze decoder weights: decoder_input, upsample_z, final_decoder."""
+        for module in [self.decoder_input, self.upsample_z, self.final_decoder]:
+            for param in module.parameters():
+                param.requires_grad = False
+
+    def unfreeze_decoder(self):
+        """Unfreeze decoder weights: decoder_input, upsample_z, final_decoder."""
+        for module in [self.decoder_input, self.upsample_z, self.final_decoder]:
+            for param in module.parameters():
+                param.requires_grad = True
+
 
 # TEMP: For ablation study we remove conditioning signal from encoder
 class CVAE_no_cond(nn.Module):
@@ -516,6 +592,30 @@ class CVAE_no_cond(nn.Module):
         else:
             z = torch.randn(x.shape[0], self.latent_dim).to(x.device)
         return {'despeckler_output': self.decode(z, x), 'despeckler_input': x}
+    
+    def freeze_encoder(self):
+        """Freeze encoder weights: encoder, fc_mu, fc_var."""
+        for module in [self.encoder, self.fc_mu, self.fc_var]:
+            for param in module.parameters():
+                param.requires_grad = False
+
+    def unfreeze_encoder(self):
+        """Unfreeze encoder weights: encoder, fc_mu, fc_var."""
+        for module in [self.encoder, self.fc_mu, self.fc_var]:
+            for param in module.parameters():
+                param.requires_grad = True
+
+    def freeze_decoder(self):
+        """Freeze decoder weights: decoder_input, upsample_z, final_decoder."""
+        for module in [self.decoder_input, self.upsample_z, self.final_decoder]:
+            for param in module.parameters():
+                param.requires_grad = False
+
+    def unfreeze_decoder(self):
+        """Unfreeze decoder weights: decoder_input, upsample_z, final_decoder."""
+        for module in [self.decoder_input, self.upsample_z, self.final_decoder]:
+            for param in module.parameters():
+                param.requires_grad = True
 
 
 class ResidualDespeckler(nn.Module):

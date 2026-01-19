@@ -238,6 +238,8 @@ class SARWaterDetector(nn.Module):
         self.classifier = build_sar_classifier(cfg)
         self.autodespeckler = (build_autodespeckler(ad_cfg)
                                 if ad_cfg is not None else None)
+        self.inference_mode = ad_cfg.model.inference_mode if ad_cfg is not None else None
+        self.n_look = ad_cfg.model.n_look if ad_cfg is not None else None
 
         # load weights
         if cfg.model.weights is not None:
@@ -295,21 +297,99 @@ class SARWaterDetector(nn.Module):
             print(f"{self.cfg.model.classifier} classifier weights loaded successfully.")
 
     def freeze_ad_weights(self):
-        """Freeze the weights of the autodespeckler during training."""
+        """Freeze all weights of the autodespeckler during training."""
         for param in self.autodespeckler.parameters():
             param.requires_grad = False
 
     def unfreeze_ad_weights(self):
-        """Unfreeze the weights of the autodespeckler during training."""
+        """Unfreeze all weights of the autodespeckler during training."""
         for param in self.autodespeckler.parameters():
             param.requires_grad = True
+    
+    def freeze_ad_encoder_weights(self):
+        """Freeze only the encoder portion of VAE/CVAE autodespeckler."""
+        if hasattr(self.autodespeckler, 'freeze_encoder'):
+            self.autodespeckler.freeze_encoder()
+
+    def unfreeze_ad_encoder_weights(self):
+        """Unfreeze only the encoder portion of VAE/CVAE autodespeckler."""
+        if hasattr(self.autodespeckler, 'unfreeze_encoder'):
+            self.autodespeckler.unfreeze_encoder()
+
+    def freeze_ad_decoder_weights(self):
+        """Freeze only the decoder portion of VAE/CVAE autodespeckler.
+        
+        For ResidualDespeckler (U-Net/U-Net++), this method does nothing
+        since those models don't have an encoder/decoder split.
+        """
+        if hasattr(self.autodespeckler, 'freeze_decoder'):
+            self.autodespeckler.freeze_decoder()
+
+    def unfreeze_ad_decoder_weights(self):
+        """Unfreeze only the decoder portion of VAE/CVAE autodespeckler.
+        
+        For ResidualDespeckler (U-Net/U-Net++), this method does nothing
+        since those models don't have an encoder/decoder split.
+        """
+        if hasattr(self.autodespeckler, 'unfreeze_decoder'):
+            self.autodespeckler.unfreeze_decoder()
+    
+    def _run_despeckler_inference(self, sar):
+        """Run autodespeckler with mode-appropriate kwargs based on model type."""
+        
+        ad = self.autodespeckler
+        ad_type = self.ad_cfg.model.autodespeckler
+        
+        # Deterministic models - mode doesn't matter
+        if ad_type in ('unet', 'unet++'):
+            return ad.inference(sar)
+        
+        # CVAE with deterministic, stochastic, or N-look inference modes
+        mode = self.inference_mode
+        if ad_type == 'CVAE':
+            if mode == "deterministic":
+                return ad.inference(sar, deterministic=True)
+            elif mode == "stochastic":
+                return ad.inference(sar, deterministic=False)
+            elif mode == "n_look":
+                assert self.n_look is not None, "n_look must be set for N-look inference"
+                outputs = [ad.inference(sar, deterministic=False)['despeckler_output'] 
+                        for _ in range(self.n_look)]
+                return {
+                    'despeckler_output': torch.stack(outputs).mean(dim=0),
+                    'despeckler_input': sar,
+                }
+            else:
+                # use default mode
+                return ad.inference(sar, deterministic=False)
+        
+        # VAE - always stochastic through encoder, no deterministic option
+        if ad_type == 'VAE':
+            if mode == "deterministic":
+                return ad.inference(sar, deterministic=True)
+            elif mode == "stochastic":
+                return ad.inference(sar, deterministic=False)
+            elif mode == "n_look":
+                assert self.n_look is not None, "n_look must be set for N-look inference"
+                outputs = [ad.inference(sar, deterministic=False)['despeckler_output'] for _ in range(self.n_look)]
+                return {
+                    'despeckler_output': torch.stack(outputs).mean(dim=0),
+                    'despeckler_input': sar,
+                    'mu': None,
+                    'log_var': None
+                }
+            else:
+                # use default mode
+                return ad.inference(sar, deterministic=False)
+        
+        raise ValueError(f"Unknown autodespeckler type: {ad_type}")
 
     def forward(self, x):
         """Returns dictionary containing outputs. If autodespeckler architecture used then
         output from the autodespeckler head is also included."""
         if self.uses_autodespeckler():
             sar = x[:, :2, :, :]
-            despeckler_dict = self.autodespeckler(sar)
+            despeckler_dict = self._run_despeckler_inference(sar)
             logits = self.classifier(torch.cat((despeckler_dict['despeckler_output'], x[:, 2:, :, :]), 1))
             despeckler_dict['classifier_output'] = logits
             return despeckler_dict

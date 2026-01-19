@@ -40,3 +40,55 @@ def get_optimizer(model, cfg):
         raise Exception('Optimizer not found.')
 
     return optimizer
+
+
+def get_optimizer_with_ad(model, cfg, ad_cfg):
+    """Create optimizer with separate learning rates for classifier and autodespeckler.
+    
+    Parameters
+    ----------
+    model : SARWaterDetector
+        Model with classifier and autodespeckler components.
+    cfg : obj
+        Main training config with cfg.train.lr for classifier and cfg.train.optimizer.
+    ad_cfg : obj
+        Autodespeckler config with ad_cfg.train.lr for autodespeckler.
+    
+    Returns
+    -------
+    torch.optim.Optimizer
+        Optimizer with separate parameter groups for classifier and autodespeckler.
+    """
+    # Create parameter groups with different learning rates
+    classifier_params = list(model.classifier.parameters())
+    autodespeckler_params = list(model.autodespeckler.parameters())
+    
+    if cfg.train.optimizer == 'Adam':
+        param_groups = [
+            {'params': classifier_params, 'lr': cfg.train.lr},
+            {'params': autodespeckler_params, 'lr': ad_cfg.train.lr}
+        ]
+        optimizer = torch.optim.Adam(param_groups)
+    elif cfg.train.optimizer == 'SGD':
+        param_groups = [
+            {'params': classifier_params, 'lr': cfg.train.lr},
+            {'params': autodespeckler_params, 'lr': ad_cfg.train.lr}
+        ]
+        optimizer = torch.optim.SGD(param_groups)
+    elif cfg.train.optimizer == 'AdamW':
+        # For AdamW, handle weight decay separately for classifier and autodespeckler
+        cls_decay_groups = get_weight_decay_param_groups(model.classifier, weight_decay=cfg.train.weight_decay)
+        ad_decay_groups = get_weight_decay_param_groups(model.autodespeckler, weight_decay=cfg.train.weight_decay)
+        
+        # Set learning rates for each group
+        for group in cls_decay_groups:
+            group['lr'] = cfg.train.lr
+        for group in ad_decay_groups:
+            group['lr'] = ad_cfg.train.lr
+        
+        param_groups = cls_decay_groups + ad_decay_groups
+        optimizer = torch.optim.AdamW(param_groups)
+    else:
+        raise Exception('Optimizer not found.')
+
+    return optimizer

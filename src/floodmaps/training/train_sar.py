@@ -28,31 +28,54 @@ from floodmaps.utils.utils import (flatten_dict, Metrics, EarlyStopper,
                          align_patches_with_shifts)
 from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
 from floodmaps.utils.metrics import (PerClassConfusionMatrix, compute_confmat_dict,
-                        NLCD_CLASSES, NLCD_GROUPS, SCL_CLASSES, SCL_GROUPS, RunningMeanVar)
+                        NLCD_CLASSES, NLCD_GROUPS, SCL_CLASSES, SCL_GROUPS)
 
 from floodmaps.training.loss import SARLossConfig
 from floodmaps.training.dataset import FloodSampleSARDataset
-from floodmaps.training.optim import get_optimizer
+from floodmaps.training.optim import get_optimizer, get_optimizer_with_ad
 from floodmaps.training.scheduler import get_scheduler
 
 MODEL_NAMES = ['unet', 'unet++']
-AUTODESPECKLER_NAMES = ['CNN1', 'CNN2', 'DAE', 'VAE']
-NOISE_NAMES = ['normal', 'masking', 'log_gamma']
 LOSS_NAMES = ['BCELoss', 'BCEDiceLoss', 'TverskyLoss', 'FocalTverskyLoss']
 
-# get our optimizer and metrics
-def train_loop(model, dataloader, device, optimizer, minibatches, loss_config,
-                cfg, ad_cfg, c, run, epoch):
-    running_tot_loss = torch.tensor(0.0, device=device) # all loss components
-    running_cls_loss = torch.tensor(0.0, device=device) # only classifier loss
-    if ad_cfg is not None:
-        running_recons_loss = torch.tensor(0.0, device=device)
+# SAR dB scale ranges for visualization (consistent with multitemporal training scripts)
+VV_DB_MIN, VV_DB_MAX = -30, 0
+VH_DB_MIN, VH_DB_MAX = -30, -5
 
-        # for VAE monitoring
-        if ad_cfg.model.autodespeckler == 'VAE':
-            running_kld_loss = torch.tensor(0.0, device=device)
-            mu_mean_var = RunningMeanVar(unbiased=True).to(device)
-            log_var_mean_var = RunningMeanVar(unbiased=True).to(device)
+def get_ad_sample_dir(ad_cfg, paths_cfg):
+    """Get the sample directory for the autodespeckler dataset (s1_multi).
+    
+    This function constructs the path to the autodespeckler's training dataset
+    directory based on the ad_cfg.data parameters. Used to load the despeckler's
+    normalization statistics (mean_std.pkl) for mixed normalization when using
+    pretrained despeckler weights.
+    
+    Parameters
+    ----------
+    ad_cfg : DictConfig
+        Autodespeckler configuration containing data.method, data.size, 
+        data.samples/data.stride, and optional data.suffix.
+    paths_cfg : DictConfig
+        Paths configuration containing preprocess_dir.
+    
+    Returns
+    -------
+    Path
+        Path to the autodespeckler sample directory (s1_multi).
+    """
+    method = ad_cfg.data.method
+    size = ad_cfg.data.size
+    sample_param = ad_cfg.data.samples if method == 'random' else ad_cfg.data.stride
+    suffix = getattr(ad_cfg.data, 'suffix', '')
+    if suffix:
+        return Path(paths_cfg.preprocess_dir) / 's1_multi' / f'{method}_{size}_{sample_param}_{suffix}/'
+    else:
+        return Path(paths_cfg.preprocess_dir) / 's1_multi' / f'{method}_{size}_{sample_param}/'
+
+# get our optimizer and metrics
+def train_loop(model, dataloader, device, optimizer, loss_config,
+                cfg, ad_cfg, c, run, epoch):
+    running_loss = torch.tensor(0.0, device=device)
 
     metric_collection = MetricCollection([
         BinaryAccuracy(threshold=0.5),
@@ -64,8 +87,6 @@ def train_loop(model, dataloader, device, optimizer, minibatches, loss_config,
 
     model.train()
     for batch_i, (X, y, _) in enumerate(dataloader):
-        if batch_i >= minibatches:
-            break
 
         X = X.to(device)
         y = y.to(device)
@@ -77,7 +98,7 @@ def train_loop(model, dataloader, device, optimizer, minibatches, loss_config,
         # also pass SAR layers for reconstruction loss
         loss_dict = loss_config.compute_loss(out_dict, y.float(), typ='train',
                                             shift_invariant=cfg.train.shift_invariant)
-        loss = loss_dict['total_loss']
+        loss = loss_dict['loss']
         y_true = loss_dict['true_label']
 
         optimizer.zero_grad()
@@ -89,82 +110,26 @@ def train_loop(model, dataloader, device, optimizer, minibatches, loss_config,
         target = y_true.flatten() > 0.5
 
         metric_collection.update(y_pred, target)
-        running_tot_loss += loss.detach()
-        running_cls_loss += loss_dict['classifier_loss'].detach()
-
-        if ad_cfg is not None:
-            running_recons_loss += loss_dict['recons_loss'].detach()
-
-            # for VAE monitoring only
-            if ad_cfg.model.autodespeckler == 'VAE':
-                # Collect mu and log_var for the whole epoch
-                mu_mean_var.update(out_dict['mu'])
-                log_var_mean_var.update(out_dict['log_var'])
-                running_kld_loss += loss_dict['kld_loss'].detach()
+        running_loss += loss.detach()
 
     metric_results = metric_collection.compute()
-    epoch_loss = running_tot_loss.item() / minibatches
+    epoch_loss = running_loss.item() / len(dataloader)
 
-    # wandb tracking loss and metrics per epoch - track recons loss as well
+    # wandb tracking loss and metrics per epoch
     log_dict = {"train accuracy": metric_results['BinaryAccuracy'].item(),
                 "train precision": metric_results['BinaryPrecision'].item(),
                 "train recall": metric_results['BinaryRecall'].item(),
                 "train f1": metric_results['BinaryF1Score'].item(),
                 "train IoU": metric_results['BinaryJaccardIndex'].item(),
-                "train tot loss": epoch_loss,
-                "train cls loss": running_cls_loss.item() / minibatches}
+                "train loss": epoch_loss}
 
-    # autodespeckler monitoring
-    if ad_cfg is not None:
-        log_dict['train_recons_loss'] = cfg.train.balance_coeff * running_recons_loss.item() / minibatches
-
-        epoch_ad_loss = (
-            running_recons_loss.item() + ad_cfg.model.vae.VAE_beta * running_kld_loss.item()
-            if ad_cfg.model.autodespeckler == 'VAE' else running_recons_loss.item()
-        )
-        log_dict['train_ad_loss'] = cfg.train.balance_coeff * epoch_ad_loss / minibatches
-
-        # ad loss percentage of total loss
-        ad_loss_percentage = (cfg.train.balance_coeff * epoch_ad_loss / running_tot_loss.item())
-        log_dict['ad_loss_percentage'] = ad_loss_percentage
-
-        # VAE mu and log_var monitoring
-        if ad_cfg.model.autodespeckler == 'VAE':
-            mu_mean_var_results = mu_mean_var.compute()
-            log_var_mean_var_results = log_var_mean_var.compute()
-
-            # kld loss as percentage of total ad loss
-            kld_loss_percentage = (ad_cfg.model.vae.VAE_beta
-                                   * running_kld_loss.item()
-                                   / epoch_ad_loss)
-            log_dict.update({
-                "train_mu_mean": mu_mean_var_results['mean'].item(),
-                "train_mu_std": mu_mean_var_results['var'].sqrt().item(),
-                "train_log_var_mean": log_var_mean_var_results['mean'].item(),
-                "train_log_var_std": log_var_mean_var_results['var'].sqrt().item(),
-                "train_kld_loss": cfg.train.balance_coeff * running_kld_loss.item() / minibatches,
-                "train_kld_loss_percentage": kld_loss_percentage,
-                "beta": ad_cfg.model.vae.VAE_beta
-            })
     run.log(log_dict, step=epoch)
     metric_collection.reset()
-    if ad_cfg is not None and ad_cfg.model.autodespeckler == 'VAE':
-        mu_mean_var.reset()
-        log_var_mean_var.reset()
 
     return epoch_loss
 
 def test_loop(model, dataloader, device, loss_config, cfg, ad_cfg, c, run, epoch):
-    running_tot_vloss = torch.tensor(0.0, device=device) # all loss components
-    running_cls_vloss = torch.tensor(0.0, device=device) # only classifier loss
-    if ad_cfg is not None:
-        running_recons_vloss = torch.tensor(0.0, device=device)
-
-        # for VAE monitoring
-        if ad_cfg.model.autodespeckler == 'VAE':
-            running_kld_vloss = torch.tensor(0.0, device=device)
-            mu_mean_var = RunningMeanVar(unbiased=True).to(device)
-            log_var_mean_var = RunningMeanVar(unbiased=True).to(device)
+    running_vloss = torch.tensor(0.0, device=device)
 
     num_batches = len(dataloader)
     metric_collection = MetricCollection([
@@ -195,7 +160,7 @@ def test_loop(model, dataloader, device, loss_config, cfg, ad_cfg, c, run, epoch
             out_dict = model(X_c)
             loss_dict = loss_config.compute_loss(out_dict, y.float(), typ='val',
                                                 shift_invariant=cfg.train.shift_invariant)
-            loss = loss_dict['total_loss']
+            loss = loss_dict['loss']
             y_true = loss_dict['true_label']
             
             # Align SCL using shift indices from loss computation
@@ -211,23 +176,13 @@ def test_loop(model, dataloader, device, loss_config, cfg, ad_cfg, c, run, epoch
             metric_collection.update(y_pred, target)
             nlcd_metric_collection.update(y_pred, target, nlcd_classes.flatten())
             scl_metric_collection.update(y_pred, target, scl_classes.flatten())
-            running_tot_vloss += loss.detach()
-            running_cls_vloss += loss_dict['classifier_loss'].detach()
-
-            if ad_cfg is not None:
-                running_recons_vloss += loss_dict['recons_loss'].detach()
-
-                # for VAE monitoring only
-                if ad_cfg.model.autodespeckler == 'VAE':
-                    mu_mean_var.update(out_dict['mu'])
-                    log_var_mean_var.update(out_dict['log_var'])
-                    running_kld_vloss += loss_dict['kld_loss'].detach()
+            running_vloss += loss.detach()
 
     metric_results = metric_collection.compute()
     nlcd_metrics_results = nlcd_metric_collection.compute()
     scl_metrics_results = scl_metric_collection.compute()
-    epoch_vloss = running_tot_vloss.item() / num_batches
-    epoch_cls_vloss = running_cls_vloss.item() / num_batches
+
+    epoch_vloss = running_vloss.item() / num_batches
 
     core_metrics_dict = {
         "val accuracy": metric_results['BinaryAccuracy'].item(),
@@ -240,41 +195,8 @@ def test_loop(model, dataloader, device, loss_config, cfg, ad_cfg, c, run, epoch
     
     log_dict = core_metrics_dict.copy()
     log_dict.update({
-        "val tot loss": epoch_vloss,
-        "val cls loss": epoch_cls_vloss
+        "val loss": epoch_vloss
     })
-
-    # autodespeckler monitoring
-    if ad_cfg is not None:
-        log_dict['val_recons_loss'] = cfg.train.balance_coeff * running_recons_vloss.item() / num_batches
-
-        epoch_ad_vloss = (
-            running_recons_vloss.item() + ad_cfg.model.vae.VAE_beta * running_kld_vloss.item()
-            if ad_cfg.model.autodespeckler == 'VAE' else running_recons_vloss.item()
-        )
-        log_dict['val_ad_loss'] = cfg.train.balance_coeff * epoch_ad_vloss / num_batches
-
-        # ad loss percentage of total loss
-        ad_loss_percentage = (cfg.train.balance_coeff * epoch_ad_vloss / running_tot_vloss.item())
-        log_dict['val_ad_loss_percentage'] = ad_loss_percentage
-
-        # VAE mu and log_var monitoring
-        if ad_cfg.model.autodespeckler == 'VAE':
-            mu_mean_var_results = mu_mean_var.compute()
-            log_var_mean_var_results = log_var_mean_var.compute()
-
-            # kld loss as percentage of total ad loss
-            kld_loss_percentage = (ad_cfg.model.vae.VAE_beta
-                                   * running_kld_vloss.item()
-                                   / epoch_ad_vloss)
-            log_dict.update({
-                "val_mu_mean": mu_mean_var_results['mean'].item(),
-                "val_mu_std": mu_mean_var_results['var'].sqrt().item(),
-                "val_log_var_mean": log_var_mean_var_results['mean'].item(),
-                "val_log_var_std": log_var_mean_var_results['var'].sqrt().item(),
-                "val_kld_loss": cfg.train.balance_coeff * running_kld_vloss.item() / num_batches,
-                "val_kld_loss_percentage": kld_loss_percentage
-            })
 
     run.log(log_dict, step=epoch)
     
@@ -294,9 +216,6 @@ def test_loop(model, dataloader, device, loss_config, cfg, ad_cfg, c, run, epoch
     metric_collection.reset()
     nlcd_metric_collection.reset()
     scl_metric_collection.reset()
-    if ad_cfg is not None and ad_cfg.model.autodespeckler == 'VAE':
-        mu_mean_var.reset()
-        log_var_mean_var.reset()
 
     metrics_dict = {
         'core_metrics': core_metrics_dict,
@@ -305,7 +224,7 @@ def test_loop(model, dataloader, device, loss_config, cfg, ad_cfg, c, run, epoch
         'scl_metrics': scl_metrics_dict
     }
 
-    return epoch_vloss, epoch_cls_vloss, metrics_dict
+    return epoch_vloss, metrics_dict
 
 def evaluate(model, dataloader, test_aligned_loader, device, loss_config, cfg, ad_cfg, c):
     """Evaluate metrics on test set without logging.
@@ -381,7 +300,7 @@ def evaluate(model, dataloader, test_aligned_loader, device, loss_config, cfg, a
             
             # Compute shift-invariant loss and metrics
             shift_loss_dict = loss_config.compute_loss(out_dict, y.float(), typ='test', shift_invariant=True)
-            shift_loss = shift_loss_dict['total_loss']
+            shift_loss = shift_loss_dict['loss']
             y_true_shift = shift_loss_dict['true_label']
             
             # Align SCL using shift indices from loss computation
@@ -401,7 +320,7 @@ def evaluate(model, dataloader, test_aligned_loader, device, loss_config, cfg, a
             
             # Compute non-shift-invariant loss and metrics
             non_shift_loss_dict = loss_config.compute_loss(out_dict, y.float(), typ='test', shift_invariant=False)
-            non_shift_loss = non_shift_loss_dict['total_loss']
+            non_shift_loss = non_shift_loss_dict['loss']
             y_true_non_shift = non_shift_loss_dict['true_label']
             
             # Align SCL using center indices for non-shift
@@ -608,7 +527,11 @@ def train(model, train_loader, val_loader, test_loader, test_aligned_loader, dev
     loss_cfg = SARLossConfig(cfg, ad_cfg=ad_cfg, device=device)
 
     # optimizer and scheduler for reducing learning rate
-    optimizer = get_optimizer(model, cfg)
+    # Use separate learning rates for classifier and autodespeckler if ad_cfg present
+    if ad_cfg is not None:
+        optimizer = get_optimizer_with_ad(model, cfg, ad_cfg)
+    else:
+        optimizer = get_optimizer(model, cfg)
     scheduler = get_scheduler(optimizer, cfg)
     early_stopper = EarlyStopper(patience=cfg.train.patience) if cfg.train.early_stopping else None
 
@@ -621,35 +544,34 @@ def train(model, train_loader, val_loader, test_loader, test_aligned_loader, dev
     else:
         start_epoch = 0
 
-    ignore_ad_loss = (ad_cfg is not None
-                and cfg.model.autodespeckler.freeze
-                and cfg.model.autodespeckler.freeze_epochs >= cfg.train.epochs)
-
-    minibatches = int(len(train_loader) * cfg.train.subset)
     center_1 = (cfg.data.size - cfg.data.window) // 2
     center_2 = center_1 + cfg.data.window
     c = (center_1, center_2)
     for epoch in range(start_epoch, cfg.train.epochs):
         try:
+            # Handle unfreezing autodespeckler at specified epoch
             if (ad_cfg is not None
-                and cfg.model.autodespeckler.freeze
-                and epoch == cfg.model.autodespeckler.freeze_epochs):
-                print(f"Unfreezing backbone at epoch {epoch}")
-                model.unfreeze_ad_weights()
+                and ad_cfg.train.freeze
+                and epoch == ad_cfg.train.freeze_epochs):
+                if ad_cfg.train.unfreeze_decoder_only:
+                    print(f"Unfreezing autodespeckler decoder only at epoch {epoch}")
+                    model.unfreeze_ad_decoder_weights()
+                else:
+                    print(f"Unfreezing entire autodespeckler at epoch {epoch}")
+                    model.unfreeze_ad_weights()
 
             # train loop
-            avg_loss = train_loop(model, train_loader, device, optimizer, minibatches,
+            avg_loss = train_loop(model, train_loader, device, optimizer,
                                   loss_cfg, cfg, ad_cfg, c, run, epoch)
 
             # at the end of each training epoch compute validation
-            avg_vloss, avg_cls_vloss, val_set_metrics = test_loop(model, val_loader, device,
+            avg_vloss, val_set_metrics = test_loop(model, val_loader, device,
                                     loss_cfg, cfg, ad_cfg, c, run, epoch)
         except Exception as err:
             raise RuntimeError(f'Error while training occurred at epoch {epoch}.') from err
 
         if cfg.train.early_stopping:
-            # use only classifier component for early stopping if AD is frozen
-            early_stopper.step(avg_cls_vloss if ignore_ad_loss else avg_vloss, model, epoch, metrics=val_set_metrics)
+            early_stopper.step(avg_vloss, model, epoch, metrics=val_set_metrics)
             if early_stopper.is_stopped():
                 break
 
@@ -668,7 +590,14 @@ def train(model, train_loader, val_loader, test_loader, test_aligned_loader, dev
         if should_save_chkpt:
             save_checkpoint(cfg.train.checkpoint.save_chkpt_path, model, optimizer, epoch, scheduler=scheduler, early_stopper=early_stopper)
 
-        run.log({"learning_rate": scheduler.get_last_lr()[0] if scheduler is not None else cfg.train.lr}, step=epoch)
+        lr_log = {"learning_rate": scheduler.get_last_lr()[0] if scheduler is not None else cfg.train.lr}
+        if ad_cfg is not None:
+            # Log autodespeckler learning rate (second param group when using get_optimizer_with_ad)
+            if scheduler is not None and len(scheduler.get_last_lr()) > 1:
+                lr_log["learning_rate_ad"] = scheduler.get_last_lr()[1]
+            else:
+                lr_log["learning_rate_ad"] = ad_cfg.train.lr
+        run.log(lr_log, step=epoch)
 
     # Save our model
     fmetrics = Metrics(use_partitions=True)
@@ -788,10 +717,10 @@ def sample_predictions(model, sample_set, mean, std, cfg, ad_cfg, sample_dir, da
     table = wandb.Table(columns=columns)
 
     if my_channels.has_vv():
-        # initialize mappable objects
-        vv_map = ScalarMappable(norm=None, cmap='gray')
+        # initialize mappable objects with fixed dB ranges for cross-comparability
+        vv_map = ScalarMappable(norm=Normalize(vmin=VV_DB_MIN, vmax=VV_DB_MAX), cmap='gray')
     if my_channels.has_vh():
-        vh_map = ScalarMappable(norm=None, cmap='gray')
+        vh_map = ScalarMappable(norm=Normalize(vmin=VH_DB_MIN, vmax=VH_DB_MAX), cmap='gray')
     if my_channels.has_dem():
         dem_map = ScalarMappable(norm=None, cmap='gray')
     if my_channels.has_slope_y():
@@ -872,14 +801,14 @@ def sample_predictions(model, sample_set, mean, std, cfg, ad_cfg, sample_dir, da
 
         if my_channels.has_vv():
             vv = X_c[:, :, channel_indices[0]].numpy()
-            vv_map.set_norm(Normalize(vmin=np.min(vv), vmax=np.max(vv)))
+            # Use fixed dB range normalization (already set on vv_map)
             vv = vv_map.to_rgba(vv, bytes=True)
             vv = np.clip(vv, 0, 255).astype(np.uint8)
             vv_img = Image.fromarray(vv, mode="RGBA")
             row.append(wandb.Image(vv_img))
         if my_channels.has_vh():
             vh = X_c[:, :, channel_indices[1]].numpy()
-            vh_map.set_norm(Normalize(vmin=np.min(vh), vmax=np.max(vh)))
+            # Use fixed dB range normalization (already set on vh_map)
             vh = vh_map.to_rgba(vh, bytes=True)
             vh = np.clip(vh, 0, 255).astype(np.uint8)
             vh_img = Image.fromarray(vh, mode="RGBA")
@@ -919,20 +848,23 @@ def sample_predictions(model, sample_set, mean, std, cfg, ad_cfg, sample_dir, da
             row.append(wandb.Image(flowlines_img))
 
         if model.uses_autodespeckler():
-            # add reconstruction VV and VH
-            recons_vv = despeckler_output[0].numpy()
-            vv_map.set_norm(Normalize(vmin=np.min(recons_vv), vmax=np.max(recons_vv)))
-            recons_vv = vv_map.to_rgba(recons_vv, bytes=True)
-            recons_vv = np.clip(recons_vv, 0, 255).astype(np.uint8)
-            recons_vv_img = Image.fromarray(recons_vv, mode="RGBA")
-            row.append(wandb.Image(recons_vv_img))
+            # add despeckled VV and VH using fixed dB range normalization
+            # Descale despeckler output from standardized space back to dB scale
+            despeckled_descaled = std[:2].view(2, 1, 1) * despeckler_output + mean[:2].view(2, 1, 1)
+            
+            despeckled_vv = despeckled_descaled[0].numpy()
+            # Use fixed dB range normalization (already set on vv_map)
+            despeckled_vv = vv_map.to_rgba(despeckled_vv, bytes=True)
+            despeckled_vv = np.clip(despeckled_vv, 0, 255).astype(np.uint8)
+            despeckled_vv_img = Image.fromarray(despeckled_vv, mode="RGBA")
+            row.append(wandb.Image(despeckled_vv_img))
 
-            recons_vh = despeckler_output[1].numpy()
-            vh_map.set_norm(Normalize(vmin=np.min(recons_vh), vmax=np.max(recons_vh)))
-            recons_vh = vh_map.to_rgba(recons_vh, bytes=True)
-            recons_vh = np.clip(recons_vh, 0, 255).astype(np.uint8)
-            recons_vh_img = Image.fromarray(recons_vh, mode="RGBA")
-            row.append(wandb.Image(recons_vh_img))
+            despeckled_vh = despeckled_descaled[1].numpy()
+            # Use fixed dB range normalization (already set on vh_map)
+            despeckled_vh = vh_map.to_rgba(despeckled_vh, bytes=True)
+            despeckled_vh = np.clip(despeckled_vh, 0, 255).astype(np.uint8)
+            despeckled_vh_img = Image.fromarray(despeckled_vh, mode="RGBA")
+            row.append(wandb.Image(despeckled_vh_img))
 
         y_shifted = y_shifted.squeeze(0).mul(255).clamp(0, 255).byte().numpy()
         y_pred = y_pred.squeeze(0).mul(255).clamp(0, 255).byte().numpy()
@@ -981,8 +913,8 @@ def run_experiment_s1(cfg, ad_cfg=None):
     # setup model
     model = SARWaterDetector(cfg, ad_cfg=ad_cfg).to(device)
 
-    # freeze AD weights
-    if ad_cfg is not None and cfg.model.autodespeckler.freeze:
+    # freeze AD weights based on ad_cfg.train settings
+    if ad_cfg is not None and ad_cfg.train.freeze:
         model.freeze_ad_weights()
 
     # dataset and transforms
@@ -1004,6 +936,24 @@ def run_experiment_s1(cfg, ad_cfg=None):
 
         train_mean = torch.from_numpy(train_mean[channels])
         train_std = torch.from_numpy(train_std[channels])
+
+    # Mixed normalization: When using pretrained autodespeckler weights, replace VV/VH
+    # (channels 0-1) with despeckler's training statistics for correct normalization.
+    # The despeckler was trained on s1_multi dataset with different statistics than
+    # the classifier's s1_weak dataset. This ensures the despeckler receives inputs
+    # in its expected normalized space.
+    if ad_cfg is not None and getattr(ad_cfg.model, 'weights', None) is not None:
+        ad_sample_dir = get_ad_sample_dir(ad_cfg, cfg.paths)
+        with open(ad_sample_dir / 'mean_std.pkl', 'rb') as f:
+            ad_mean, ad_std = pickle.load(f)
+            ad_mean = torch.from_numpy(ad_mean)  # Shape: (2,) for VV, VH
+            ad_std = torch.from_numpy(ad_std)
+        # Replace VV/VH statistics (first 2 channels of selected channels)
+        train_mean[:2] = ad_mean
+        train_std[:2] = ad_std
+        print(f"[Mixed Normalization] Using despeckler VV/VH statistics from: {ad_sample_dir}")
+        print(f"  VV: mean={ad_mean[0]:.4f}, std={ad_std[0]:.4f}")
+        print(f"  VH: mean={ad_mean[1]:.4f}, std={ad_std[1]:.4f}")
 
     standardize = transforms.Compose([transforms.Normalize(train_mean, train_std)])
 
@@ -1131,12 +1081,17 @@ def run_experiment_s1(cfg, ad_cfg=None):
 
     return fmetrics
 
-def validate_config(cfg):
+def validate_config(cfg, ad_cfg=None):
     def validate_channels(s):
         return type(s) == str and len(s) == 8 and all(c in '01' for c in s)
 
     # Add checks
     assert cfg.data.method in ['random', 'strided'], "Sampling method must be one of ['random', 'strided']"
+    
+    # VV and VH channels must always be active (required for autodespeckler)
+    assert cfg.data.channels[0] == '1' and cfg.data.channels[1] == '1', \
+        "VV (channel 0) and VH (channel 1) must always be enabled"
+    
     assert cfg.save in [True, False], "Save must be a boolean"
     if cfg.train.loss == 'TverskyLoss':
         assert 0.0 <= cfg.train.tversky.alpha <= 1.0, "Tversky alpha must be in [0, 1]"
@@ -1158,8 +1113,8 @@ def validate_config(cfg):
 
 @hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig):
-    validate_config(cfg)
     ad_cfg = getattr(cfg, 'ad', None)
+    validate_config(cfg, ad_cfg=ad_cfg)
     run_experiment_s1(cfg, ad_cfg=ad_cfg)
 
 if __name__ == '__main__':

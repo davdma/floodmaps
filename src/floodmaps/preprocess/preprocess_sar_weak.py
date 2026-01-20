@@ -702,7 +702,7 @@ def save_event_splits(train_events: List[Path], val_events: List[Path], test_eve
         logger.error(f'Failed to save event splits: {e}')
         raise
 
-def get_tile_infos_from_events(events: List[Path], label_idx: Dict[Tuple[str, str], Path] = {}, enhanced_lee=False) -> List[Tuple]:
+def get_tile_infos_from_events(events: List[Path], label_idx: Dict[Tuple[str, str], Path] = {}, filter_type: str = "none") -> List[Tuple]:
     """Get S1 SAR VV tile info from event directories. Tile info is grouped together as tuple
     in the format (event_path: Path, sar_vv_file: Path, label_file: Path, eid: str, s2_img_dt: str, s1_img_dt: str).
     
@@ -712,8 +712,8 @@ def get_tile_infos_from_events(events: List[Path], label_idx: Dict[Tuple[str, st
         List of event directory paths
     label_idx: Dict[Tuple[str, str], Path]
         Dictionary mapping (s2_img_dt, eid) to manual label paths
-    enhanced_lee: bool
-        Whether to use enhanced lee filtered SAR tiles (default: False)
+    filter_type: str
+        Type of SAR filter to use. Options: "none", "enhanced_lee", "cvae" (default: "none")
     
     Returns
     -------
@@ -740,7 +740,7 @@ def get_tile_infos_from_events(events: List[Path], label_idx: Dict[Tuple[str, st
                 label_file = event / f'pred_{s2_img_dt}_{eid}.tif'
 
             if label_file is not None:
-                if enhanced_lee:
+                if filter_type == "enhanced_lee":
                     sar_vv_file = event / f'enhanced_lee_{s2_img_dt}_{s1_img_dt}_{eid}_vv.tif'
                     sar_vh_file = event / f'enhanced_lee_{s2_img_dt}_{s1_img_dt}_{eid}_vh.tif'
                     if not sar_vv_file.exists():
@@ -748,6 +748,15 @@ def get_tile_infos_from_events(events: List[Path], label_idx: Dict[Tuple[str, st
                         continue
                     if not sar_vh_file.exists():
                         logger.debug(f'Enhanced lee filtered SAR tile {sar_vh_file.name} in {event.name} not found, skipping...')
+                        continue
+                elif filter_type == "cvae":
+                    sar_vv_file = event / f'cvae_{s2_img_dt}_{s1_img_dt}_{eid}_vv.tif'
+                    sar_vh_file = event / f'cvae_{s2_img_dt}_{s1_img_dt}_{eid}_vh.tif'
+                    if not sar_vv_file.exists():
+                        logger.debug(f'CVAE despeckled SAR tile {sar_vv_file.name} in {event.name} not found, skipping...')
+                        continue
+                    if not sar_vh_file.exists():
+                        logger.debug(f'CVAE despeckled SAR tile {sar_vh_file.name} in {event.name} not found, skipping...')
                         continue
                 tile_info = (event, sar_vv_file, label_file, eid, s2_img_dt, s1_img_dt)
                 tile_infos.append(tile_info)
@@ -782,6 +791,7 @@ def main(cfg: DictConfig) -> None:
     - stride: int (for strided method)
     - missing_percent: float (maximum missing percentage for patch acceptance) (default: 0.0)
     - cloud_percent: float (maximum cloud percentage for patch acceptance) (default: 0.1)
+    - filter_type: str ["none", "enhanced_lee", "cvae"] (SAR filter type to use) (default: "none")
     - seed: int (random number generator seed for random method)
     - n_workers: int (number of workers for parallel processing)
     - chunk_size: int (number of tiles to process per worker before saving as temp file) (default: 100)
@@ -815,7 +825,7 @@ def main(cfg: DictConfig) -> None:
         Stride (Strided method): {getattr(cfg.preprocess, 'stride', None)}
         Missing percent: {getattr(cfg.preprocess, 'missing_percent', 0.0)} (default: 0.0)
         Cloud percent: {getattr(cfg.preprocess, 'cloud_percent', 0.1)} (default: 0.1)
-        Enhanced lee: {getattr(cfg.preprocess, 'enhanced_lee', False)} (default: False)
+        Filter type: {getattr(cfg.preprocess, 'filter_type', 'none')} (default: "none")
         Random seed:     {getattr(cfg.preprocess, 'seed', None)}
         Workers:         {n_workers}
         Chunk size:      {getattr(cfg.preprocess, 'chunk_size', 100)} (default: 100)
@@ -949,10 +959,10 @@ def main(cfg: DictConfig) -> None:
 
     # Get list of tiles for splits as events can have multiple valid tiles
     logger.info('Grabbing labeled SAR tiles for splits...')
-    enhanced_lee = getattr(cfg.preprocess, 'enhanced_lee', False)
-    train_tile_infos = get_tile_infos_from_events(train_events, label_idx=label_idx, enhanced_lee=enhanced_lee)
-    val_tile_infos = get_tile_infos_from_events(val_events, label_idx=label_idx, enhanced_lee=enhanced_lee)
-    test_tile_infos = get_tile_infos_from_events(test_events, label_idx=label_idx, enhanced_lee=enhanced_lee)
+    filter_type = getattr(cfg.preprocess, 'filter_type', 'none')
+    train_tile_infos = get_tile_infos_from_events(train_events, label_idx=label_idx, filter_type=filter_type)
+    val_tile_infos = get_tile_infos_from_events(val_events, label_idx=label_idx, filter_type=filter_type)
+    test_tile_infos = get_tile_infos_from_events(test_events, label_idx=label_idx, filter_type=filter_type)
     
     logger.info(f'Tiles: {len(train_tile_infos)} train, {len(val_tile_infos)} val, {len(test_tile_infos)} test')
 

@@ -487,6 +487,8 @@ def run_weak_labeling(cfg: DictConfig):
     cfg.inference.n_workers: number of worker processes
     cfg.inference.threads_per_worker: number of threads per worker
     cfg.inference.batch_size: batch size for inference
+    cfg.inference.replace: replace existing predictions
+    cfg.inference.post: only label post-event images
 
     Recommended to pick n_workers and threads_per_worker such that
     n_workers * threads_per_worker = resources_used.ncpus, and so

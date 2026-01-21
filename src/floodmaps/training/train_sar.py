@@ -552,7 +552,7 @@ def train(model, train_loader, val_loader, test_loader, test_aligned_loader, dev
             # Handle unfreezing autodespeckler at specified epoch
             if (ad_cfg is not None
                 and ad_cfg.train.freeze
-                and epoch == ad_cfg.train.freeze_epochs):
+                and epoch == max(start_epoch, ad_cfg.train.freeze_epochs)):
                 if ad_cfg.train.unfreeze_decoder_only:
                     print(f"Unfreezing autodespeckler decoder only at epoch {epoch}")
                     model.unfreeze_ad_decoder_weights()

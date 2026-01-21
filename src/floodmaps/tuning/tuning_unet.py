@@ -102,6 +102,8 @@ def tuning_s2(cfg: DictConfig) -> None:
         # if search stopped print params of best run
         if cfg.tuning.early_stopping and early_stopper.search_stopped:
             print_save_best_params(save_file, search_dir / 'best.json')
+        else:
+            print_save_best_params(save_file, search_dir / 'current_best.json')
 
 def run_s1(parameters, cfg: DictConfig):
     """For setting the params in the cfg object make sure they are predeclared
@@ -160,9 +162,16 @@ def tuning_s1(cfg: DictConfig) -> None:
 
     # define the variable you want to optimize
     # We want to create model w dem and model wo dem
+    # problem = HpProblem()
+    # problem.add_hyperparameter((0.00001, 0.01, "log-uniform"), "learning_rate") # real parameter
+    # problem.add_hyperparameter((0.05, 0.50), "dropout")
+    # problem.add_hyperparameter(["BCELoss", "BCEDiceLoss", "TverskyLoss", "FocalTverskyLoss"], "loss")
+    # problem.add_hyperparameter(['Constant', 'ReduceLROnPlateau'], 'LR_scheduler')
+
+    # For CVAE - frozen
     problem = HpProblem()
-    problem.add_hyperparameter((0.00001, 0.01, "log-uniform"), "learning_rate") # real parameter
-    problem.add_hyperparameter((0.05, 0.50), "dropout")
+    problem.add_hyperparameter((0.0005, 0.015, "log-uniform"), "learning_rate")
+    problem.add_hyperparameter((0.05, 0.40), "dropout")
     problem.add_hyperparameter(["BCELoss", "BCEDiceLoss", "TverskyLoss", "FocalTverskyLoss"], "loss")
     problem.add_hyperparameter(['Constant', 'ReduceLROnPlateau'], 'LR_scheduler')
 
@@ -215,6 +224,8 @@ def tuning_s1(cfg: DictConfig) -> None:
         # if search stopped print params of best run
         if cfg.tuning.early_stopping and early_stopper.search_stopped:
             print_save_best_params(save_file, search_dir / 'best.json')
+        else:
+            print_save_best_params(save_file, search_dir / 'current_best.json')
 
 @hydra.main(version_base=None, config_path="pkg://configs", config_name="config.yaml")
 def main(cfg: DictConfig) -> None:

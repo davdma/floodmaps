@@ -2,7 +2,8 @@ import numpy as np
 from typing import Tuple, List
 from datetime import datetime
 from math import exp
-from numba import jit
+from numba import jit, prange
+import torch
 
 # S2 processing baseline offset correction
 # SEE: https://sentiwiki.copernicus.eu/web/s2-products
@@ -363,3 +364,94 @@ def enhanced_lee_filter(image, kernel_size=7, d=DAMP_DEFAULT, cu=CU_DEFAULT,
         raise ValueError("Image must be shape (H, W) or (1, H, W)")
     
     return powerToDb(filtered_image, nodata=nodata)
+
+
+@jit(nopython=True, parallel=True)
+def _enhanced_lee_filter_batch_numba(db_sar_batch, kernel_size, d, cu, cmax, nodata):
+    """Parallel batch processing of Enhanced Lee filter.
+    
+    Uses numba prange to parallelize over the flattened B*C dimension,
+    where each (H, W) slice is processed independently.
+    
+    Parameters
+    ----------
+    db_sar_batch : np.ndarray (B, C, H, W)
+        SAR data in dB scale (float64)
+    kernel_size : int
+        Size of the filter kernel.
+    d : float
+        Damping factor.
+    cu : float
+        Noise variation coefficient.
+    cmax : float
+        Maximum noise variation coefficient.
+    nodata : float
+        No data value.
+    
+    Returns
+    -------
+    np.ndarray (B, C, H, W)
+        Filtered SAR data in dB scale
+    """
+    B, C, H, W = db_sar_batch.shape
+    filtered = np.empty((B, C, H, W), dtype=np.float64)
+    
+    # Parallelize over flattened B*C dimension
+    for idx in prange(B * C):
+        b = idx // C
+        c = idx % C
+        
+        # Convert slice from dB to power
+        slice_db = db_sar_batch[b, c]
+        slice_power = np.zeros((H, W), dtype=np.float64)
+        for y in range(H):
+            for x in range(W):
+                if slice_db[y, x] != nodata:
+                    slice_power[y, x] = np.float_power(10, slice_db[y, x] / 10)
+        
+        # Apply filter (reuse existing core function)
+        filtered_power = _enhanced_lee_filter_numba(slice_power, kernel_size, d, cu, cmax)
+        
+        # Convert back to dB
+        for y in range(H):
+            for x in range(W):
+                if filtered_power[y, x] > 0:
+                    filtered[b, c, y, x] = 10 * np.log10(filtered_power[y, x])
+                else:
+                    filtered[b, c, y, x] = nodata
+    
+    return filtered
+
+
+def enhanced_lee_filter_batch(db_sar_batch, kernel_size=7, d=DAMP_DEFAULT, 
+                               cu=CU_DEFAULT, cmax=CMAX_DEFAULT, nodata=-9999):
+    """Apply Enhanced Lee filter to batched SAR data.
+    
+    Parallelized version using numba prange for efficient batch processing.
+    Expected speedup: 4-16x depending on CPU cores.
+    
+    Parameters
+    ----------
+    db_sar_batch : np.ndarray (B, C, H, W) or torch.Tensor
+        SAR data in dB scale
+    kernel_size : int
+        Size of the filter kernel (default: 7).
+    d : float
+        Damping factor (default: 1.0).
+    cu : float
+        Noise variation coefficient (default: 0.523).
+    cmax : float
+        Maximum noise variation coefficient (default: 1.73).
+    nodata : float
+        No data value (default: -9999).
+    
+    Returns
+    -------
+    np.ndarray (B, C, H, W)
+        Filtered SAR data in dB scale
+    """
+    if isinstance(db_sar_batch, torch.Tensor):
+        db_sar_batch = db_sar_batch.cpu().numpy()
+    
+    db_sar_batch = np.ascontiguousarray(db_sar_batch, dtype=np.float64)
+    return _enhanced_lee_filter_batch_numba(db_sar_batch, kernel_size, d, cu, cmax, nodata)

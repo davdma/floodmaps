@@ -530,6 +530,7 @@ def main(cfg: DictConfig) -> None:
         Stride (Strided method): {getattr(cfg.preprocess, 'stride', None)}
         Missing percent: {getattr(cfg.preprocess, 'missing_percent', 0.0)} (default: 0.0)
         Cloud percent: {getattr(cfg.preprocess, 'cloud_percent', 0.1)} (default: 0.1)
+        Filter type:     {getattr(cfg.preprocess, 'filter_type', 'none')} (default: "none")
         Random seed:     {getattr(cfg.preprocess, 'seed', None)}
         Ablation dir:    {cfg.preprocess.s1.ablation_dir}
         Sample dir(s):   {cfg.preprocess.s1.sample_dirs}
@@ -577,6 +578,7 @@ def main(cfg: DictConfig) -> None:
             seen_eids.add(eid)
     
     # collect tile infos for each points file
+    filter_type = getattr(cfg.preprocess, 'filter_type', 'none')
     tile_infos = []
     p = re.compile(r'sar_(\d{8})_(\d{8})_(\d{8}_\d+_\d+)_.*\.tif\.points')
     for points_path in ablation_dir.glob("*.points"):
@@ -587,7 +589,29 @@ def main(cfg: DictConfig) -> None:
         s1_img_dt = m.group(2)
         eid = m.group(3)
         event_path = eid_to_event_path[eid]
-        sar_vv_file = event_path / f'sar_{s2_img_dt}_{s1_img_dt}_{eid}_vv.tif'
+        
+        # Determine SAR file paths based on filter_type
+        if filter_type == "enhanced_lee":
+            sar_vv_file = event_path / f'enhanced_lee_{s2_img_dt}_{s1_img_dt}_{eid}_vv.tif'
+            sar_vh_file = event_path / f'enhanced_lee_{s2_img_dt}_{s1_img_dt}_{eid}_vh.tif'
+            if not sar_vv_file.exists():
+                logger.debug(f'Enhanced lee filtered SAR tile {sar_vv_file.name} in {event_path.name} not found, skipping...')
+                continue
+            if not sar_vh_file.exists():
+                logger.debug(f'Enhanced lee filtered SAR tile {sar_vh_file.name} in {event_path.name} not found, skipping...')
+                continue
+        elif filter_type == "cvae":
+            sar_vv_file = event_path / f'cvae_{s2_img_dt}_{s1_img_dt}_{eid}_vv.tif'
+            sar_vh_file = event_path / f'cvae_{s2_img_dt}_{s1_img_dt}_{eid}_vh.tif'
+            if not sar_vv_file.exists():
+                logger.debug(f'CVAE despeckled SAR tile {sar_vv_file.name} in {event_path.name} not found, skipping...')
+                continue
+            if not sar_vh_file.exists():
+                logger.debug(f'CVAE despeckled SAR tile {sar_vh_file.name} in {event_path.name} not found, skipping...')
+                continue
+        else:
+            sar_vv_file = event_path / f'sar_{s2_img_dt}_{s1_img_dt}_{eid}_vv.tif'
+        
         label_file = label_idx.get((s2_img_dt, eid), None)
         if label_file is None and (event_path / f'pred_{s2_img_dt}_{eid}.tif').exists():
             label_file = event_path / f'pred_{s2_img_dt}_{eid}.tif'

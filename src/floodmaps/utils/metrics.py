@@ -1,11 +1,12 @@
 from skimage.feature import graycomatrix, graycoprops
 import torch
+from torch import nn, Tensor
 import numpy as np
 import random
 from torch.utils.data import DataLoader, Subset
 import torch.nn.functional as F
 from torchmetrics.metric import Metric
-from torch import Tensor
+from torchmetrics.classification import BinaryAveragePrecision
 
 # Define standard NLCD groups for flood mapping
 NLCD_GROUPS = {
@@ -69,6 +70,94 @@ class PerClassConfusionMatrix(Metric):
     
     def get_class_to_idx(self):
         return self.class_to_idx
+
+
+class PerGroupAUPRC(Metric):
+    """Compute AUPRC (Area Under Precision-Recall Curve) for each predefined group of classes.
+    
+    This metric maintains a separate BinaryAveragePrecision metric for each group,
+    allowing per-group AUPRC computation. Each pixel is assigned to exactly one group
+    based on its class membership, so total memory is O(X) not O(X * N_groups).
+    
+    Parameters
+    ----------
+    groups : dict[str, list[int]]
+        Dictionary mapping group names to lists of class values belonging to that group.
+        Example: {'urban': [21, 22, 23, 24], 'water': [11], ...}
+    **kwargs
+        Additional arguments passed to parent Metric class (e.g., sync_on_compute=False).
+    
+    Returns (from compute)
+    -------
+    dict[str, Tensor]
+        Dictionary mapping group names to their AUPRC values.
+    
+    Example
+    -------
+    >>> groups = {'urban': [21, 22, 23, 24], 'water': [11]}
+    >>> metric = PerGroupAUPRC(groups=groups)
+    >>> metric.update(preds, targets, classes)
+    >>> result = metric.compute()  # {'urban': tensor(0.85), 'water': tensor(0.92)}
+    """
+    full_state_update = False
+
+    def __init__(self, groups: dict[str, list[int]], **kwargs):
+        super().__init__(**kwargs)
+        if groups is None or not isinstance(groups, dict) or len(groups) == 0:
+            raise ValueError("Groups must be provided as a non-empty dictionary")
+        
+        self.groups = groups
+        self.group_names = list(groups.keys())
+        # Create a BinaryAveragePrecision metric for each group
+        # Using thresholds=None for exact AUPRC computation (stores all predictions)
+        self.auprc_metrics = nn.ModuleDict({
+            name: BinaryAveragePrecision(thresholds=None, **kwargs)
+            for name in self.group_names
+        })
+
+    def update(self, preds: Tensor, targets: Tensor, classes: Tensor):
+        """Update metrics with predictions, targets, and class labels.
+        
+        Parameters
+        ----------
+        preds : Tensor
+            Prediction probabilities (not thresholded), shape (N,) or flattened.
+        targets : Tensor
+            Ground truth binary labels, shape (N,) or flattened.
+        classes : Tensor
+            Class labels for each pixel, shape (N,) or flattened.
+        """
+        classes = classes.long()
+        for name, class_list in self.groups.items():
+            class_tensor = torch.tensor(class_list, device=classes.device, dtype=classes.dtype)
+            mask = torch.isin(classes, class_tensor)
+            if mask.any():
+                self.auprc_metrics[name].update(preds[mask], targets[mask])
+
+    def compute(self):
+        """Compute AUPRC for each group.
+        
+        Returns
+        -------
+        dict[str, Tensor]
+            Dictionary mapping group names to their AUPRC values.
+            Returns nan for groups with no samples.
+        """
+        results = {}
+        for name, metric in self.auprc_metrics.items():
+            try:
+                results[name] = metric.compute()
+            except ValueError:
+                # No samples for this group - return nan
+                results[name] = torch.tensor(float('nan'))
+        return results
+    
+    def reset(self):
+        """Reset all underlying AUPRC metrics."""
+        super().reset()
+        for metric in self.auprc_metrics.values():
+            metric.reset()
+
 
 class RunningMeanVar(Metric):
     """Computes the running mean and variance of a tensor using Welford's algorithm."""

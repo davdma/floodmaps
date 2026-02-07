@@ -22,12 +22,38 @@ from floodmaps.utils.preprocess_utils import impute_missing_values
 SAR_NODATA = -9999
 
 
-def generate_prediction_sar(model, device, cfg: DictConfig, standardize, event_path, dt, eid, threshold=0.5, batch_size=128):
+def get_sar_prefix(filter_type: str) -> str:
+    """Get the file prefix based on filter type.
+    
+    Parameters
+    ----------
+    filter_type : str
+        Type of SAR filter. Options: "none", "enhanced_lee", "cvae"
+    
+    Returns
+    -------
+    str
+        File prefix for the specified filter type.
+    """
+    if filter_type == "none":
+        return "sar"
+    elif filter_type == "enhanced_lee":
+        return "enhanced_lee"
+    elif filter_type == "cvae":
+        return "cvae"
+    else:
+        raise ValueError(f"Unknown filter_type: {filter_type}. Must be one of ['none', 'enhanced_lee', 'cvae']")
+
+
+def generate_prediction_sar(model, device, cfg: DictConfig, standardize, event_path, s1_dt, eid, s2_dt=None, threshold=0.5, batch_size=128):
     """Generate predictions on unseen data using SAR water detector model.
     
     Predictions are made using a sliding window with 25% overlap.
     Missing data is imputed with tile-specific mean of each channel.
     Missing mask is saved to zero out predictions in final output.
+    
+    Supports both dual-date format (s2_dt + s1_dt + eid) and single-date format (s1_dt + eid).
+    File prefix is determined by cfg.inference.filter_type.
 
     Parameters
     ----------
@@ -35,14 +61,17 @@ def generate_prediction_sar(model, device, cfg: DictConfig, standardize, event_p
         Model object for inference.
     cfg : DictConfig
         Configuration object containing model and data parameters.
+        cfg.inference.filter_type determines SAR file prefix ("none", "enhanced_lee", "cvae").
     standardize : obj
         Standardization of input channels before being fed into the model.
     event_path : Path
         Path to the event directory where the raw sample data is stored.
-    dt : str
-        Date that the SAR capture was taken.
+    s1_dt : str
+        Date that the SAR (S1) capture was taken.
     eid : str
         Event ID of the sample.
+    s2_dt : str, optional
+        Date of the coincident S2 capture (for dual-date format). None for single-date format.
     threshold : float
         Threshold for the prediction.
     batch_size : int
@@ -56,12 +85,22 @@ def generate_prediction_sar(model, device, cfg: DictConfig, standardize, event_p
     layers = []
     my_channels = SARChannelIndexer([bool(int(x)) for x in cfg.data.channels])
     
+    # Get file prefix based on filter type
+    filter_type = getattr(cfg.inference, 'filter_type', 'none')
+    prefix = get_sar_prefix(filter_type)
+    
+    # Build SAR filename based on date format
+    if s2_dt is not None:
+        sar_basename = f'{prefix}_{s2_dt}_{s1_dt}_{eid}'
+    else:
+        sar_basename = f'{prefix}_{s1_dt}_{eid}'
+    
     # Initialize total missing values mask
     tot_missing_vals = None
     
     # Load VV channel
     if my_channels.has_vv():
-        vv_file = event_path / f'sar_{dt}_{eid}_vv.tif'
+        vv_file = event_path / f'{sar_basename}_vv.tif'
         with rasterio.open(vv_file) as src:
             vv_tile = src.read().astype(np.float32)
         
@@ -82,7 +121,7 @@ def generate_prediction_sar(model, device, cfg: DictConfig, standardize, event_p
     
     # Load VH channel
     if my_channels.has_vh():
-        vh_file = event_path / f'sar_{dt}_{eid}_vh.tif'
+        vh_file = event_path / f'{sar_basename}_vh.tif'
         with rasterio.open(vh_file) as src:
             vh_tile = src.read().astype(np.float32)
         
@@ -254,29 +293,53 @@ def init_worker(cfg_dict: dict, num_threads: int):
 def label_captures(sar_vv_files: List[Path]):
     """Worker function that inferences SAR captures and saves predictions to file.
     
+    Handles both dual-date format (prefix_s2dt_s1dt_eid_vv.tif) and 
+    single-date format (prefix_s1dt_eid_vv.tif).
+    
     Parameters
     ----------
     sar_vv_files : List[Path]
         List of SAR VV files (captures) to predict.
     """
-    p = re.compile(r'sar_(\d{8})_(.+)_vv\.tif')
+    # Get file prefix based on filter type
+    filter_type = getattr(cfg.inference, 'filter_type', 'none')
+    prefix = get_sar_prefix(filter_type)
+    
+    # Regex patterns for both naming conventions
+    # Dual-date: prefix_s2dt_s1dt_eid_vv.tif (e.g., cvae_20230103_20230103_20230103_373_813_vv.tif)
+    dual_date_pattern = re.compile(rf'{prefix}_(\d{{8}})_(\d{{8}})_(.+)_vv\.tif')
+    # Single-date: prefix_s1dt_eid_vv.tif (e.g., cvae_20220725_safb_vv.tif)
+    single_date_pattern = re.compile(rf'{prefix}_(\d{{8}})_(.+)_vv\.tif')
+    
     data_path = Path(cfg.inference.data_dir)
     
     for sar_vv_file in sar_vv_files:
-        m = p.search(sar_vv_file.name)
-        if not m:
-            continue
-            
-        dt = m.group(1)
-        eid = m.group(2)
+        # Try dual-date format first
+        m = dual_date_pattern.search(sar_vv_file.name)
+        if m:
+            s2_dt = m.group(1)
+            s1_dt = m.group(2)
+            eid = m.group(3)
+            output_basename = f'pred_sar_{s2_dt}_{s1_dt}_{eid}'
+        else:
+            # Try single-date format
+            m = single_date_pattern.search(sar_vv_file.name)
+            if m:
+                s2_dt = None
+                s1_dt = m.group(1)
+                eid = m.group(2)
+                output_basename = f'pred_sar_{s1_dt}_{eid}'
+            else:
+                # Neither pattern matched, skip file
+                continue
 
         # Skip if prediction already exists and replace is False
-        if not cfg.inference.replace and (data_path / f'pred_sar_{dt}_{eid}.tif').exists():
+        if not cfg.inference.replace and (data_path / f'{output_basename}.tif').exists():
             continue
 
         pred = generate_prediction_sar(
             model, "cpu", cfg, standardize, data_path,
-            dt, eid, threshold=cfg.inference.threshold,
+            s1_dt, eid, s2_dt=s2_dt, threshold=cfg.inference.threshold,
             batch_size=getattr(cfg.inference, 'batch_size', 128)
         )
 
@@ -289,14 +352,14 @@ def label_captures(sar_vv_files: List[Path]):
             mult_pred = pred * 255
             broadcasted = np.broadcast_to(mult_pred, (3, *pred.shape)).astype(np.uint8)
             with rasterio.open(
-                data_path / f'pred_sar_{dt}_{eid}.tif', 'w',
+                data_path / f'{output_basename}.tif', 'w',
                 driver='Gtiff', count=3,
                 height=pred.shape[-2], width=pred.shape[-1],
                 dtype=np.uint8, crs=crs, transform=transform
             ) as dst:
                 dst.write(broadcasted)
         elif cfg.inference.format == "npy":
-            np.save(data_path / f'pred_sar_{dt}_{eid}.npy', pred)
+            np.save(data_path / f'{output_basename}.npy', pred)
         else:
             raise Exception("format unknown")
 
@@ -304,10 +367,12 @@ def label_captures(sar_vv_files: List[Path]):
 def run_inference_sar(cfg: DictConfig):
     """Generates inference labels on downloaded data from download_aoi.py using SAR model.
 
-    NOTE: rasters are expected to have eid defined in file names i.e. sar_(date)_(eid)_vv.tif.
+    Supports both dual-date format (prefix_s2dt_s1dt_eid_vv.tif) and 
+    single-date format (prefix_s1dt_eid_vv.tif).
 
     Important cfg.inference parameters:
     cfg.inference.data_dir: Input directory containing SAR rasters
+    cfg.inference.filter_type: SAR filter type ("none", "enhanced_lee", "cvae"). Default: "none"
     cfg.inference.n_workers: Number of worker processes
     cfg.inference.threads_per_worker: Number of threads per worker
     cfg.inference.batch_size: Batch size for inference
@@ -330,11 +395,16 @@ def run_inference_sar(cfg: DictConfig):
     cfg : DictConfig
         Configuration object containing model and data parameters.
     """
+    # Get file prefix based on filter type
+    filter_type = getattr(cfg.inference, 'filter_type', 'none')
+    prefix = get_sar_prefix(filter_type)
+    print(f"Using filter_type: {filter_type} (file prefix: {prefix})")
+    
     # Get list of SAR VV captures to predict
-    lst = list(Path(cfg.inference.data_dir).glob('sar_*_vv.tif'))
+    lst = list(Path(cfg.inference.data_dir).glob(f'{prefix}_*_vv.tif'))
     
     if len(lst) == 0:
-        print(f"No SAR VV files found in {cfg.inference.data_dir}")
+        print(f"No {prefix}_*_vv.tif files found in {cfg.inference.data_dir}")
         return
 
     # Split into chunks for worker processes
@@ -373,8 +443,12 @@ def main(cfg: DictConfig):
     """Main entry point for inference on spatiotemporal data using SAR model.
     Generates predictions in specified folder for specific area of interest using S1 model.
 
-    NOTE: The script ingests data downloaded from download_aoi.py, and assumes its
-    file labeling convention, with sar files in the form sar_[dt]_[eid]_vv.tif.
+    Supports raw SAR, enhanced_lee filtered, and CVAE despeckled SAR inputs via
+    cfg.inference.filter_type parameter ("none", "enhanced_lee", "cvae").
+
+    Handles both file naming conventions:
+    - Dual-date: prefix_s2dt_s1dt_eid_vv.tif (e.g., cvae_20230103_20230103_20230103_373_813_vv.tif)
+    - Single-date: prefix_s1dt_eid_vv.tif (e.g., cvae_20220725_safb_vv.tif)
 
     Parameters
     ----------

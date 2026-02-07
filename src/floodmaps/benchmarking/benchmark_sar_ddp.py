@@ -16,13 +16,13 @@ mp.set_start_method("spawn", force=True)
 def flatten_group_metrics(metrics_dict: Dict[str, Any], prefix: str) -> Dict[str, Any]:
     """Flatten nested group metrics into a single-level dictionary.
     
-    Takes group_metrics from nlcd_metrics or scl_metrics and creates flattened
-    keys like 'nlcd_urban_acc', 'scl_water_prec', etc.
+    Takes group_metrics and group_auprc from nlcd_metrics or scl_metrics and creates
+    flattened keys like 'nlcd_urban_acc', 'scl_water_prec', 'nlcd_urban_auprc', etc.
     
     Parameters
     ----------
     metrics_dict : dict
-        Dictionary containing 'group_metrics' with nested structure
+        Dictionary containing 'group_metrics' and optionally 'group_auprc' with nested structure
     prefix : str
         Prefix for flattened keys (e.g., 'nlcd' or 'scl')
     
@@ -33,11 +33,12 @@ def flatten_group_metrics(metrics_dict: Dict[str, Any], prefix: str) -> Dict[str
     
     Examples
     --------
-    >>> nlcd_metrics = {'group_metrics': {'urban': {'acc': 0.95, 'f1': 0.90}}}
+    >>> nlcd_metrics = {'group_metrics': {'urban': {'acc': 0.95, 'f1': 0.90}}, 'group_auprc': {'urban': 0.85}}
     >>> flatten_group_metrics(nlcd_metrics, 'nlcd')
-    {'nlcd_urban_acc': 0.95, 'nlcd_urban_f1': 0.90}
+    {'nlcd_urban_acc': 0.95, 'nlcd_urban_f1': 0.90, 'nlcd_urban_auprc': 0.85}
     """
     flat_dict = {}
+    # Flatten group_metrics (acc, prec, rec, f1, iou)
     if 'group_metrics' in metrics_dict:
         for group_name, group_metrics in metrics_dict['group_metrics'].items():
             # Sanitize group name for use in column names
@@ -45,6 +46,13 @@ def flatten_group_metrics(metrics_dict: Dict[str, Any], prefix: str) -> Dict[str
             for metric_name, metric_value in group_metrics.items():
                 key = f"{prefix}_{safe_group}_{metric_name}"
                 flat_dict[key] = metric_value
+    
+    # Flatten group_auprc
+    if 'group_auprc' in metrics_dict:
+        for group_name, auprc_value in metrics_dict['group_auprc'].items():
+            safe_group = group_name.replace(' ', '_').replace('/', '_')
+            flat_dict[f"{prefix}_{safe_group}_auprc"] = auprc_value
+    
     return flat_dict
 
 

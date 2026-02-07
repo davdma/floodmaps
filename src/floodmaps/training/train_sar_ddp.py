@@ -1,6 +1,7 @@
 import wandb
 import torch
 import logging
+import math
 from datetime import datetime
 from torch import nn
 from torch.utils.data import DataLoader
@@ -33,7 +34,8 @@ from floodmaps.utils.utils import (flatten_dict, Metrics, EarlyStopper,
                          get_samples_with_wet_percentage, scl_to_rgb, compute_pos_weight,
                          align_patches_with_shifts, find_free_port)
 from floodmaps.utils.checkpoint import save_checkpoint, load_checkpoint
-from floodmaps.utils.metrics import (PerClassConfusionMatrix, compute_confmat_dict,
+from floodmaps.utils.metrics import (PerClassConfusionMatrix, PerGroupAUPRC,
+                        compute_confmat_dict,
                         NLCD_CLASSES, NLCD_GROUPS, SCL_CLASSES, SCL_GROUPS)
 
 from floodmaps.training.loss import SARLossConfig
@@ -47,6 +49,16 @@ LOSS_NAMES = ['BCELoss', 'BCEDiceLoss', 'TverskyLoss', 'FocalTverskyLoss']
 # SAR dB scale ranges for visualization (consistent with multitemporal training scripts)
 VV_DB_MIN, VV_DB_MAX = -30, 0
 VH_DB_MIN, VH_DB_MAX = -30, -5
+
+def tensor_to_json_safe(val):
+    """Convert tensor to JSON-safe Python value, replacing nan with None.
+    
+    JSON does not support NaN values, so we convert them to None which
+    serializes to null. This is used for metrics that may be undefined
+    when no samples exist for a particular class or group.
+    """
+    v = val.item()
+    return None if math.isnan(v) else v
 
 def get_ad_sample_dir(ad_cfg, paths_cfg):
     """Get the sample directory for the autodespeckler dataset (s1_multi).
@@ -274,6 +286,8 @@ def evaluate(model, dataloader, test_aligned_loader, device, loss_config, cfg, a
     ]).to(device)
     shift_nlcd_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=NLCD_CLASSES, sync_on_compute=False).to(device)
     shift_scl_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=SCL_CLASSES, sync_on_compute=False).to(device)
+    shift_nlcd_auprc = PerGroupAUPRC(groups=NLCD_GROUPS, sync_on_compute=False).to(device)
+    shift_scl_auprc = PerGroupAUPRC(groups=SCL_GROUPS, sync_on_compute=False).to(device)
     
     # Non-shift-invariant metric collections
     non_shift_metric_collection = MetricCollection([
@@ -287,6 +301,8 @@ def evaluate(model, dataloader, test_aligned_loader, device, loss_config, cfg, a
     ]).to(device)
     non_shift_nlcd_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=NLCD_CLASSES, sync_on_compute=False).to(device)
     non_shift_scl_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=SCL_CLASSES, sync_on_compute=False).to(device)
+    non_shift_nlcd_auprc = PerGroupAUPRC(groups=NLCD_GROUPS, sync_on_compute=False).to(device)
+    non_shift_scl_auprc = PerGroupAUPRC(groups=SCL_GROUPS, sync_on_compute=False).to(device)
 
     # Test aligned patch metrics
     if test_aligned_loader is not None:
@@ -301,6 +317,8 @@ def evaluate(model, dataloader, test_aligned_loader, device, loss_config, cfg, a
         ]).to(device)
         aligned_nlcd_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=NLCD_CLASSES, sync_on_compute=False).to(device)
         aligned_scl_metric_collection = PerClassConfusionMatrix(threshold=0.5, classes=SCL_CLASSES, sync_on_compute=False).to(device)
+        aligned_nlcd_auprc = PerGroupAUPRC(groups=NLCD_GROUPS, sync_on_compute=False).to(device)
+        aligned_scl_auprc = PerGroupAUPRC(groups=SCL_GROUPS, sync_on_compute=False).to(device)
 
     window_size = cfg.data.window
     model.eval()
@@ -332,6 +350,8 @@ def evaluate(model, dataloader, test_aligned_loader, device, loss_config, cfg, a
             shift_metric_collection.update(y_pred_probs, target_shift)
             shift_nlcd_metric_collection.update(y_pred_probs, target_shift, nlcd_classes.flatten())
             shift_scl_metric_collection.update(y_pred_probs, target_shift, scl_classes_shift.flatten())
+            shift_nlcd_auprc.update(y_pred_probs, target_shift, nlcd_classes.flatten())
+            shift_scl_auprc.update(y_pred_probs, target_shift, scl_classes_shift.flatten())
             
             # Vectorized shift counting using bincount
             flat_indices = row_shifts * shift_range + col_shifts
@@ -352,6 +372,8 @@ def evaluate(model, dataloader, test_aligned_loader, device, loss_config, cfg, a
             non_shift_metric_collection.update(y_pred_probs, target_non_shift)
             non_shift_nlcd_metric_collection.update(y_pred_probs, target_non_shift, nlcd_classes.flatten())
             non_shift_scl_metric_collection.update(y_pred_probs, target_non_shift, scl_classes_non_shift.flatten())
+            non_shift_nlcd_auprc.update(y_pred_probs, target_non_shift, nlcd_classes.flatten())
+            non_shift_scl_auprc.update(y_pred_probs, target_non_shift, scl_classes_non_shift.flatten())
             
             running_tot_shift_vloss += shift_loss.detach()
             running_tot_non_shift_vloss += non_shift_loss.detach()
@@ -372,23 +394,31 @@ def evaluate(model, dataloader, test_aligned_loader, device, loss_config, cfg, a
                 aligned_metric_collection.update(y_pred_probs, target)
                 aligned_nlcd_metric_collection.update(y_pred_probs, target, nlcd_classes.flatten())
                 aligned_scl_metric_collection.update(y_pred_probs, target, scl_classes.flatten())
+                aligned_nlcd_auprc.update(y_pred_probs, target, nlcd_classes.flatten())
+                aligned_scl_auprc.update(y_pred_probs, target, scl_classes.flatten())
             
 
     # Compute shift-invariant metrics
     shift_metric_results = shift_metric_collection.compute()
     shift_nlcd_metrics_results = shift_nlcd_metric_collection.compute()
     shift_scl_metrics_results = shift_scl_metric_collection.compute()
+    shift_nlcd_auprc_results = shift_nlcd_auprc.compute()
+    shift_scl_auprc_results = shift_scl_auprc.compute()
     
     # Compute non-shift-invariant metrics  
     non_shift_metric_results = non_shift_metric_collection.compute()
     non_shift_nlcd_metrics_results = non_shift_nlcd_metric_collection.compute()
     non_shift_scl_metrics_results = non_shift_scl_metric_collection.compute()
+    non_shift_nlcd_auprc_results = non_shift_nlcd_auprc.compute()
+    non_shift_scl_auprc_results = non_shift_scl_auprc.compute()
 
     # Compute aligned patch metrics
     if test_aligned_loader is not None:
         aligned_metric_results = aligned_metric_collection.compute()
         aligned_nlcd_metrics_results = aligned_nlcd_metric_collection.compute()
         aligned_scl_metrics_results = aligned_scl_metric_collection.compute()
+        aligned_nlcd_auprc_results = aligned_nlcd_auprc.compute()
+        aligned_scl_auprc_results = aligned_scl_auprc.compute()
     
     epoch_shift_vloss = running_tot_shift_vloss.item() / num_batches
     epoch_non_shift_vloss = running_tot_non_shift_vloss.item() / num_batches
@@ -434,9 +464,15 @@ def evaluate(model, dataloader, test_aligned_loader, device, loss_config, cfg, a
     shift_nlcd_metrics_dict = compute_confmat_dict(shift_nlcd_metrics_results,
                                             shift_nlcd_metric_collection.get_class_to_idx(),
                                             NLCD_CLASSES, groups=NLCD_GROUPS)
+    shift_nlcd_metrics_dict['group_auprc'] = {
+        name: tensor_to_json_safe(val) for name, val in shift_nlcd_auprc_results.items()
+    }
     shift_scl_metrics_dict = compute_confmat_dict(shift_scl_metrics_results,
                                             shift_scl_metric_collection.get_class_to_idx(),
                                             SCL_CLASSES, groups=SCL_GROUPS)
+    shift_scl_metrics_dict['group_auprc'] = {
+        name: tensor_to_json_safe(val) for name, val in shift_scl_auprc_results.items()
+    }
     
     # Build non-shift-invariant confusion matrix and per-class metrics
     non_shift_confusion_matrix = non_shift_metric_results['BinaryConfusionMatrix'].tolist()
@@ -449,9 +485,15 @@ def evaluate(model, dataloader, test_aligned_loader, device, loss_config, cfg, a
     non_shift_nlcd_metrics_dict = compute_confmat_dict(non_shift_nlcd_metrics_results,
                                             non_shift_nlcd_metric_collection.get_class_to_idx(),
                                             NLCD_CLASSES, groups=NLCD_GROUPS)
+    non_shift_nlcd_metrics_dict['group_auprc'] = {
+        name: tensor_to_json_safe(val) for name, val in non_shift_nlcd_auprc_results.items()
+    }
     non_shift_scl_metrics_dict = compute_confmat_dict(non_shift_scl_metrics_results,
                                             non_shift_scl_metric_collection.get_class_to_idx(),
                                             SCL_CLASSES, groups=SCL_GROUPS)
+    non_shift_scl_metrics_dict['group_auprc'] = {
+        name: tensor_to_json_safe(val) for name, val in non_shift_scl_auprc_results.items()
+    }
 
     # Build aligned patch confusion matrix and per-class metrics
     if test_aligned_loader is not None:
@@ -465,21 +507,33 @@ def evaluate(model, dataloader, test_aligned_loader, device, loss_config, cfg, a
         aligned_nlcd_metrics_dict = compute_confmat_dict(aligned_nlcd_metrics_results,
                                                 aligned_nlcd_metric_collection.get_class_to_idx(),
                                                 NLCD_CLASSES, groups=NLCD_GROUPS)
+        aligned_nlcd_metrics_dict['group_auprc'] = {
+            name: tensor_to_json_safe(val) for name, val in aligned_nlcd_auprc_results.items()
+        }
         aligned_scl_metrics_dict = compute_confmat_dict(aligned_scl_metrics_results,
                                                 aligned_scl_metric_collection.get_class_to_idx(),
                                                 SCL_CLASSES, groups=SCL_GROUPS)
+        aligned_scl_metrics_dict['group_auprc'] = {
+            name: tensor_to_json_safe(val) for name, val in aligned_scl_auprc_results.items()
+        }
     
     # Reset all metric collections
     shift_metric_collection.reset()
     shift_nlcd_metric_collection.reset()
     shift_scl_metric_collection.reset()
+    shift_nlcd_auprc.reset()
+    shift_scl_auprc.reset()
     non_shift_metric_collection.reset()
     non_shift_nlcd_metric_collection.reset()
     non_shift_scl_metric_collection.reset()
+    non_shift_nlcd_auprc.reset()
+    non_shift_scl_auprc.reset()
     if test_aligned_loader is not None:
         aligned_metric_collection.reset()
         aligned_nlcd_metric_collection.reset()
         aligned_scl_metric_collection.reset()
+        aligned_nlcd_auprc.reset()
+        aligned_scl_auprc.reset()
 
 
     # Build shift distribution dict from accumulated counts

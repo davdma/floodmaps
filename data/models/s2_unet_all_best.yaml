@@ -1,0 +1,63 @@
+seed: 23348
+save: false
+save_path:
+
+data:
+    size: 64 # pixel width of dataset patches
+    method: "strided" # ["random", "strided"]
+    samples: # [250, 500, 1000]
+    stride: 16
+    channels: "1111111111011111" # (R, G, B, B08, SWIR1, SWIR2, NDWI, MNDWI, AWEI_sh, AWEI_nsh, DEM, SlopeY, SlopeX, Water, Roads, Flowlines)
+    random_flip: true
+    mmap: false
+    use_weak: false
+    suffix: "all_clouds_v2-4"
+
+model:
+    classifier: "unet" # ['unet', 'unet++']
+    discriminator:
+    weights: ${paths.model_dir}/s2_unet_all_best.pth
+    unet:
+        dropout: 0.2717248598822369
+    unetpp:
+        dropout:
+        deep_supervision:
+    discriminator_weights:
+
+train:
+    epochs: 400
+    batch_size: 2048
+    loss: TverskyLoss # ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
+    use_pos_weight: true   # enable positive class weighting for BCE/BCEDice
+    pos_weight:            # null -> auto-compute from train labels; set float to override
+    pos_weight_clip: 10.0  # clip auto-computed weight to [1, clip]
+    tversky:
+      alpha: 0.3
+    clip: 1.0
+    lr: 0.0044353627541667
+    optimizer: Adam # ['Adam', 'SGD', 'AdamW']
+    weight_decay:
+    LR_scheduler: Constant # ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR']
+    LR_patience: 10
+    LR_T_max:
+    early_stopping: True
+    patience: 20
+    num_workers: 4
+    checkpoint:
+        load_chkpt: False # whether to train from a checkpoint specified in load_chkpt_path
+        load_chkpt_path:
+        save_chkpt: False # whether to save checkpoints
+        save_chkpt_path:
+        save_chkpt_interval: # save checkpoint every N epochs
+
+eval:
+    mode: test # ['val', 'test'],
+    
+wandb:
+    project:
+    group:
+    num_sample_predictions: 40
+    percent_wet_patches: 0.8
+
+logging:
+    grad_norm_freq: 10

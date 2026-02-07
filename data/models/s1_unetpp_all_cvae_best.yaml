@@ -1,0 +1,73 @@
+seed: 66922
+save: false
+save_path:
+
+data:
+    size: 68 # pixel width of dataset patches
+    window: 64 # pixel width of model input/output
+    method: "strided" # ["random", "strided"]
+    samples: # [250, 500, 1000]
+    stride: 68
+    channels: "11011111" # (VV, VH, DEM, SlopeY, SlopeX, Water, Roads, Flowlines)
+    random_flip: true
+    mmap: true
+    suffix: "cvae"
+    shift_ablation: true
+
+model:
+    classifier: "unet++" # ['unet', 'unet++']
+    weights: ${paths.model_dir}/s1_unetpp_all_cvae_best.pth
+    unet:
+        dropout:
+    unetpp:
+        dropout: 0.1031324038220001
+        deep_supervision: true
+    autodespeckler:
+        ad_config:
+        ad_weights:
+        freeze:
+        freeze_epochs:
+
+train:
+    epochs: 400
+    batch_size: 512
+    loss: BCELoss # ['BCELoss', 'BCEDiceLoss', 'TverskyLoss', 'FocalTverskyLoss']
+    use_pos_weight: true   # enable positive class weighting for BCE/BCEDice
+    pos_weight:            # null -> auto-compute from train labels; set float to override
+    pos_weight_clip: 30.0  # clip auto-computed weight to [1, clip]
+    shift_invariant: true
+    balance_coeff:
+    tversky:
+      alpha: 0.3
+    focal_tversky:
+      gamma: 1.3333
+    clip: 1.0
+    lr: 0.0022008681676774
+    optimizer: Adam # ['Adam', 'SGD']
+    weight_decay:
+    LR_scheduler: Constant # ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR']
+    LR_patience: 10
+    LR_T_max:
+    early_stopping: true
+    patience: 45
+    num_workers: 4
+    keep_contiguous_in_mem: true
+    checkpoint:
+        load_chkpt: False # whether to train from a checkpoint specified in load_chkpt_path
+        load_chkpt_path:
+        save_chkpt: False # whether to save checkpoints
+        save_chkpt_path:
+        save_chkpt_interval: 20 # 
+
+eval:
+    mode: test # ['val', 'test'],
+    
+wandb:
+    project:
+    group:
+    num_sample_predictions: 40
+    percent_wet_patches: 0.8
+
+logging:
+    grad_norm_freq: 10
+

@@ -1,17 +1,18 @@
-# Best Model Weights
+# Model Weights
+
+The `.pth` weights and corresponding model hyperparameters in `.yaml` files for models described in the publication are provided.
 
 ### S2 Multispectral Flood Mapping Model
-Newer Model:
-* `s2_unet_v2.pth` stores the weights for the tuned and (yet to be benchmarked) UNet model.
-* Uses 16-channel dataset (R, G, B, B08, B11, B12, NDWI, MNDWI, AWEI_sh, AWEI_nsh, DEM, SlopeY, SlopeX, Water, Roads, Flowlines).
-* The model does not use the DEM channel, with channel setting `1111111111011111` and dropout = `0.2392593256577808`.
-
-Deprecated Model:
-* This is an old model that uses the TCI 0-255 visual image values and 10 channel dataset which has been deprecated. Recommended to use the newer S2 model. 
-* `s2_unet_v1.pth` stores the weights for the tuned and benchmarked UNet model with 98.8% accuracy, 93.8% f1, 95.9% precision and 91.9% recall on the test set.
-* The model does not use the DEM channel, so the channel setting is `1111101111` with dropout = `0.2987776077544917`.
+* `s2_unet_all_best.pth` - benchmarked UNet model using all channels (except DEM).
+    * Use threshold `t=0.5` for inference. Achieves **89.77\% F1, 91.69\% Recall, 87.94\% Precision** on test set.
+* `s2_unetpp_all_best.pth` - benchmarked UNet++ model using all channels (except DEM).
+    * Use calibrated threshold `t=0.75` for inference. Achieves **89.98\% F1, 91.12\% Recall, and 88.86\% Precision** on test set.
 
 ### S1 SAR Flood Mapping Model
-* `s1_unetpp_v1.pth` stores the weights for the benchmarked UNet++ SAR model with 96.5% accuracy, 91.2% f1, 93.2% precision and 89.8% recall on the test set.
-* Uses 8-channel dataset (VV, VH, DEM, SlopeY, SlopeX, Water, Roads, Flowlines).
-* The model uses all channels with channel setting `11111111` with dropout = `0.0531091802785671` and deep_supervision = `True`.
+* `s1_unetpp_all_best.pth` - benchmarked UNet++ SAR model using all channels (except DEM).
+    * Use calibrated threshold `t=0.85` for inference. Achieves **75.32\% F1, 63.61\% Recall, and 92.35\% Precision** on test set.
+* `s1_unetpp_all_cvae_best.pth` - benchmarked UNet++ SAR model using all channels (except DEM), specifically trained for CVAE despeckled SAR images.
+    * Use calibrated threshold `t=0.87` for inference. Achieves **76.06\% F1, 64.82\% Recall, and 92.02\% Precision** on test set.
+
+### S1 Despeckling Model
+* `cvae.pth` - benchmarked SAR CVAE despeckler for VV and VH channels with **25.92-27.09 PSNR, 0.63-0.66 SSIM and 188.7-379.5 ENL** on test set.

@@ -1,0 +1,24 @@
+s1:
+  label_dirs:
+    - "texas"
+    - "illinois"
+    - "others"
+    - "sar_coincident"
+    - "ablation"
+  sample_dirs:
+    - "s2_s1_manual_1_5_labels"
+    - "s2_s1_random_150_1_5"
+
+split_csv: ${paths.data_dir}/splits/s1_dataset_split.csv
+size: 68 # pixel width of patch
+samples: # number of samples per image
+seed: # random number generator seed
+method: strided # sampling method ['random', 'strided']
+stride: 68
+missing_percent: 0.0
+cloud_percent: 0.1
+filter_type: none # ['none', 'enhanced_lee', 'cvae']
+n_workers: 32 # number of workers for parallel processing
+chunk_size: 40
+suffix: all # optional suffix to append to preprocessed folder
+scratch_dir: /scratch/dma/

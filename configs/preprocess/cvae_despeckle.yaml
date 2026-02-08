@@ -1,0 +1,10 @@
+sample_dirs:
+  - s2_s1_random_150_1_5
+  - s2_s1_manual_1_5_labels
+weighting: hann # ['uniform', 'hann']
+stride: 32
+replace: true # whether to overwrite pre-existing predictions
+deterministic: true
+n_workers: 8
+batch_size: 256
+threads_per_worker: 16

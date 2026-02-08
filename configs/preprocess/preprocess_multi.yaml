@@ -1,0 +1,17 @@
+s1:
+  sample_dirs:
+    - "s1_multi_random_49_3_7_5"
+    - "s1_multi_random2_49_3_7_5"
+
+size: 64 # pixel width of patch
+acquisitions: 7
+method: strided
+samples:
+stride: 64
+missing_percent: 0.0
+seed: 433002
+n_workers: 32 # number of workers for parallel processing
+chunk_size: 100
+suffix: "pre" # optional suffix to append to preprocessed folder
+split_csv: ${paths.data_dir}/splits/s1_multi_block_random_split.csv
+scratch_dir: /scratch/dma/

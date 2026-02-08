@@ -1,12 +1,11 @@
-threshold: 100 # minimum daily cumulative precipitation (mm) threshold for search
-before: 2 # number of days allowed for download before precipitation event
-after: 4 # number of days allowed for download following precipitation event
+threshold: 0 # minimum daily cumulative precipitation (mm) threshold for search
+before: 1 # number of days allowed for download before precipitation event
+after: 5 # number of days allowed for download following precipitation event
 maxcoverpercentage: 30 # maximum cloud and no data cover percentage
 maxevents: 100 # maximum number of extreme precipitation events to attempt downloading
-dir_path: None # specify a directory name for downloaded samples, format should end with backslash
-within_hours: 12 # floods event must have S1 and S2 data within this many hours
+dir_path: ${paths.imagery_dir}/s2_s1_manual_1_5_labels # specify a directory name for downloaded samples, format should end with backslash
+within_hours: 24 # floods event must have S1 and S2 data within this many hours
 region: None # filter precipitation only from supported regions: ["ceser"]
-config_file: None # specify a custom configuration file path
-manual: None # text file for parsing manual event indices with format: time, y, x
+manual: ${paths.labels_dir}/info/labels_s2_s1.txt # text file for parsing manual event indices with format: time, y, x
 s2_source: mpc # specify a provider for s2 data (Microsoft Planetary Computer, AWS) for the ESA data ['mpc', 'aws', 'cdse']
 s1_source: mpc # specify a provider for s1 data (Microsoft Planetary Computer, AWS) for the ESA data ['mpc', 'aws', 'cdse']

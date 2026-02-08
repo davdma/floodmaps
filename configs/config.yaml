@@ -1,7 +1,13 @@
 defaults:
   - paths: default
-  - inference: inference_s2
-  - s2_unet_infer_v2 # for training
+  - analysis:
+  - sampling:
+  - preprocess:
+  - inference: inference_sar
+  - tuning:
+  - benchmarking:
+  - ad:
+  - s1_unetpp_cvae_benchmark_saved
   - _self_
 
 # hydra config

@@ -1,0 +1,10 @@
+area_id: naperville # identifier for the area
+shapefile: ${paths.shape_dir}/Naperville_test_area_boundary.shp # path to shapefile of study area
+start_date: 2022-09-27 # date of flood event in format YYYY-MM-DD
+end_date: 2022-09-27 # date of flood event in format YYYY-MM-DD
+product_ids_s2: [S2B_MSIL2A_20220927T164039_N0510_R126_T16TCM_20240730T144156] # if want a specific product id to match
+product_ids_s1: [] # if want a specific product id to match
+dir_path: ${paths.imagery_dir}/areas/naperville_20220927/ # directory where downloaded imagery will be saved
+crs: # optional CRS to force the imagery to
+include_cmap: true # whether to include color maps for the rasters
+source: cdse # source of the data ['mpc', 'aws', 'cdse']

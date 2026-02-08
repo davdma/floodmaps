@@ -1,0 +1,13 @@
+dir_path: # specify a directory name for downloaded samples, format should end with backslash
+cells_file: ${paths.base_dir}/sar_dataset_cells.txt
+seed: 100
+acquisitions: 7
+time_interval: 49
+num_time_intervals: 3
+threshold: 150 # minimum daily cumulative precipitation (mm) threshold for search
+num_days: 5
+max_missing_percentage: 10
+max_tries: 6
+max_runtime: "60:00:00"
+n_workers: 32
+source: mpc # specify a provider for s1 data (Microsoft Planetary Computer, AWS) for the ESA data ['mpc', 'aws', 'cdse']

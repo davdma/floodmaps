@@ -1,60 +1,63 @@
 seed: 831002
-save: False
+save: false
 save_path:
 
 data:
     size: 64 # pixel width of dataset patches
-    samples: 1000 # [250, 500, 1000]
-    channels: "11111111111" # (R, G, B, B08, NDWI, DEM, SlopeY, SlopeX, Water, Roads, Flowlines)
-    use_weak: False # Use s2_weak (machine labels) vs s2 (manual labels)
-    suffix: "" # Optional suffix for preprocessing variant datasets
-    random_flip: True
+    method: "strided" # ["random", "strided"]
+    samples: # number of patches per tile (for "random" method)
+    stride: 16 # stride for sliding window (for "strided" method)
+    channels: "1111111111011111" # (R, G, B, B08, SWIR1, SWIR2, NDWI, MNDWI, AWEI_sh, AWEI_nsh, DEM, SlopeY, SlopeX, Water, Roads, Flowlines)
+    random_flip: true
+    mmap: false # memory-mapped file loading for large datasets
+    use_weak: false # s2_weak (machine labels) vs s2 (manual labels)
+    suffix: "" # optional suffix for preprocessing variant datasets
 
 model:
     classifier: "unet" # ['unet', 'unet++']
-    discriminator:
-    weights:
+    weights: # path to pretrained weights (for inference/finetuning)
     unet:
-        dropout: 0.1
+        dropout: 0.2
     unetpp:
-        dropout: 0.1
-        deep_supervision: True
-    discriminator_weights:
+        dropout: 0.3
+        deep_supervision: false
 
 train:
-    epochs: 250
-    batch_size: 4096
-    loss: BCELoss # ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
-    use_pos_weight: false   # enable positive class weighting for BCE/BCEDice
-    pos_weight:            # null -> auto-compute from train labels; set float to override
-    pos_weight_clip: 10.0  # clip auto-computed weight to [1, clip]
+    epochs: 300
+    batch_size: 2048
+    loss: BCELoss # ['BCELoss', 'BCEDiceLoss', 'TverskyLoss', 'FocalTverskyLoss']
+    use_pos_weight: false
+    pos_weight: # null -> auto-compute; set float to override
+    pos_weight_clip: 10.0
     tversky:
-      alpha: 0.4
+      alpha: 0.3
+    focal_tversky:
+      gamma: 1.33
     clip: 1.0
-    lr: 0.0001
-    optimizer: Adam # ['Adam', 'SGD']
+    lr: 0.001
+    optimizer: Adam # ['Adam', 'SGD', 'AdamW']
+    weight_decay:
     LR_scheduler: Constant # ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR']
-    LR_patience:
-    LR_T_max: 200
-    early_stopping: True
-    patience: 25
-    subset: 1.0
-    num_workers: 5
+    LR_patience: 10
+    LR_T_max:
+    early_stopping: true
+    patience: 20
+    num_workers: 4
     checkpoint:
-        load_chkpt: False # whether to train from a checkpoint specified in load_chkpt_path
+        load_chkpt: false
         load_chkpt_path:
-        save_chkpt: True # whether to enable checkpointing
+        save_chkpt: false
         save_chkpt_path:
-        save_chkpt_interval: 20 # save checkpoint every N epochs
+        save_chkpt_interval: 20
 
 eval:
-    mode: val # ['val', 'test'],
-    
+    mode: val # ['val', 'test']
+
 wandb:
     project: debug
     group:
     num_sample_predictions: 40
-    percent_wet_patches: 0.5  # Percentage of wet patches in sample predictions (0.0 to 1.0)
+    percent_wet_patches: 0.5
 
 logging:
     grad_norm_freq: 10

@@ -1,0 +1,4 @@
+sample_dirs:
+  - ${paths.imagery_dir}/s2_s1_random_150_1_5/
+  - ${paths.imagery_dir}/s2_s1_manual_1_5_labels/
+n_workers: 64

@@ -1,0 +1,10 @@
+area_id: safb
+shapefile: ${paths.shape_dir}/scott_air_force_base.shp # path to shapefile of study area
+start_date: 2022-07-22 # date of flood event in format YYYY-MM-DD
+end_date: 2022-07-25 # date of flood event in format YYYY-MM-DD
+product_ids_s2: ['S2A_MSIL2A_20220724T163851_R126_T15SYC_20220726T145458', 'S2B_MSIL2A_20220722T164849_R026_T15SYC_20220724T175024'] # if want a specific product id to match
+product_ids_s1: ['S1A_IW_GRDH_1SDV_20220725T235628_20220725T235653_044264_054878_rtc'] # if want a specific product id to match
+dir_path: ${paths.imagery_dir}/areas/safb_20220725/ # directory where downloaded imagery will be saved
+crs: # optional CRS to force the imagery to
+include_cmap: true # whether to include color maps for the rasters
+source: mpc # source of the data ['mpc', 'aws']

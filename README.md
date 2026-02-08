@@ -15,7 +15,7 @@ We aim to accomplish this task through the following process:
 5. **Final Model(s):** Tune and benchmark high performing Sentinel-2 multispectral and Sentinel-1 SAR segmentation models using the cumulative human + machine labels. Inference the final models to detect flood water extent in satellite imagery.
 
 ## Data Pipeline
-To collect and process satellite imagery, an automated data pipeline was implemented in the Python script `sample_s2.py` for Sentinel-2 only and `sample_s2_s1.py` for Sentinel-2 and Sentinel-1. The scripts download **4km x 4km geospatial "tiles"** which make up an indivisible unit within our dataset. The scripts are run on an Argonne computing cluster and submitted as slurm or pbsnodes jobs. For more information on setting up and using those scripts, consult the [sampling](sampling/README.md) folder documentation.
+To collect and process satellite imagery, an automated data pipeline was implemented in the Python script `sample_s2.py` for Sentinel-2 only and `sample_s2_s1.py` for Sentinel-2 and Sentinel-1. The scripts download **4km x 4km geospatial "tiles"** which make up an indivisible unit within our dataset. The scripts are run on an Argonne computing cluster and submitted as slurm or pbsnodes jobs. For more information on setting up and using those scripts, consult the [sampling](src/floodmaps/sampling/README.md) folder documentation.
 
 What it does:
 * Queries extreme precipitation events from 2016-present using the [PRISM dataset](https://prism.oregonstate.edu/).
@@ -64,9 +64,26 @@ As a result, we produced **146+** 4km by 4km manually labeled S2 flood tiles spr
 </div>
 
 ## Use the Models
-The weights of the top benchmarked UNet and UNet++ water detection models for S1 and S2 datasets are made available in the repo under [models](data/models). To use one of the models, copy the `.yaml` file into `configs/` and run with the config enabled.
+The weights of the top benchmarked UNet and UNet++ water detection models for S1 and S2 datasets are made available in the repo under [models](data/models). To use one of the models, copy the `.yaml` file into `configs/` and add it to the defaults list to enable.
 
-To make a prediction on an area of interest, simply provide the shapefile to `download_aoi.py`. After the relevant rasters have been downloaded, run inference using the trained models with `inference_s2.py` or `inference_sar.py`.
+To make a prediction on an area of interest, simply provide the shapefile to `download_aoi.py`. After the relevant rasters have been downloaded, run inference using the trained models with `inference_s2.py` for S2 model or `inference_sar.py` for S1 model.
+
+Example `config.yaml`:
+```yaml
+defaults:
+     - paths: default
+     - inference: inference_s2  # Enable S2 inference config
+     - s2_unetpp_all_best       # Enable the model config
+     - _self_
+```
+
+Then run:
+
+```bash
+python -m floodmaps.inference.inference_s2
+```
+
+> **Note:** See [data/models/README.md](data/models/README.md) for recommended thresholds for each model.
 
 <div align="center">
 <img width="90%" alt="labelmapwtile" src="https://github.com/user-attachments/assets/89c28ee1-91d7-486f-ae5a-49faebf211ae" />

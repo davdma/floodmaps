@@ -37,22 +37,19 @@ save: true
 save_path: null
 data:
   size: 64
-  method: random
-  samples: 1000
-  stride:
-  channels: '1111111111111111'
+  method: strided
+  stride: 16
+  channels: '1111111111011111'
   use_weak: false
   # ...
 model:
   classifier: unet
-  discriminator: null
   weights: ${paths.output_dir}/experiments/tmp_infer_s2_model/unet_cls.pth
   unet:
-    dropout: 0.2392593256577808
+    dropout: 0.24
   unetpp:
     dropout: null
     deep_supervision: null
-  discriminator_weights: null
 ```
 
 In this case you have `paths/default.yaml` used to specify paths across the repo, `inference/inference_s2.yaml` for inference params and `s2_unet_infer_v2.yaml` used to define the model that we want to use for inference. Since `paths` and `inference` are both config groups, their attributes are nested under `paths:` and `inference:` in the output config object. Observe that model params like `seed`, `save`, `save_path`, `data`, `model` that came from `s2_unet_infer_v2.yaml` are not indented under a shared `models:` group. See the reason for this below.
@@ -117,128 +114,140 @@ For training the config structure can differ slightly whether you are training S
 For S2 training to submit to `train_s2.py` the structure looks like:
 ```yaml
 seed: 831002
-save: True
+save: true
 save_path:
+
 data:
-    method: "random" # ["random", "strided"]
     size: 64 # pixel width of dataset patches
-    samples: 1000 # Number of patches per tile (for "random" method)
-    stride: # Stride for sliding window (for "strided" method)
-    channels: "1111111111111111" # Binary string selecting 16 available input channels
-                                  # (R, G, B, B08, B11, B12, NDWI, MNDWI, AWEI_sh, AWEI_nsh, DEM, SlopeY, SlopeX, Water, Roads, Flowlines)
-    use_weak: False # Use s2_weak (machine labels) vs s2 (manual labels)
-    suffix: "" # Optional suffix for preprocessing variant datasets
+    method: "strided" # ["random", "strided"]
+    samples: # Number of patches per tile (for "random" method)
+    stride: 16 # Stride for sliding window (for "strided" method)
+    channels: "1111111111011111" # Binary string selecting 16 available input channels
+                                 # (R, G, B, B08, SWIR1, SWIR2, NDWI, MNDWI, AWEI_sh, AWEI_nsh, DEM, SlopeY, SlopeX, Water, Roads, Flowlines)
     random_flip: true
-    mmap: False # Use memory-mapped file loading for large training datasets
+    mmap: false # Use memory-mapped file loading for large training datasets
+    use_weak: false # Use s2_weak (machine labels) vs s2 (manual labels)
+    suffix: "all_clouds_v2-4" # Optional suffix for preprocessing variant datasets
+
 model:
-    classifier: "unet" # ['unet', 'unet++']
-    discriminator: # ['classifier1', 'classifier2', 'classifier3']
-    weights:
+    classifier: "unet++" # ['unet', 'unet++']
+    weights: # path to pretrained weights (for inference/finetuning)
     unet:
-        dropout: 0.2392593256577808
-    unetpp:
         dropout:
-        deep_supervision:
-    discriminator_weights:
+    unetpp:
+        dropout: 0.31
+        deep_supervision: false
+
 train:
-    epochs: 400
-    batch_size: 4608
-    loss: BCELoss # ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
-    use_pos_weight: false  # enable positive class weighting for BCE/BCEDice
+    epochs: 300
+    batch_size: 2048
+    loss: BCEDiceLoss # ['BCELoss', 'BCEDiceLoss', 'TverskyLoss', 'FocalTverskyLoss']
+    use_pos_weight: true   # enable positive class weighting for BCE/BCEDice
     pos_weight:            # null -> auto-compute from train labels; set float to override
     pos_weight_clip: 10.0  # clip auto-computed weight to [1, clip]
     tversky:
-      alpha:
+      alpha: 0.3
     clip: 1.0
-    lr: 0.0057555553918297
+    lr: 0.008
     optimizer: Adam # ['Adam', 'SGD', 'AdamW']
     weight_decay:
     LR_scheduler: Constant # ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR']
-    LR_patience:
-    LR_T_max: 200
+    LR_patience: 10
+    LR_T_max:
     early_stopping: true
     patience: 20
-    num_workers: 7
+    num_workers: 4
     checkpoint:
-        load_chkpt: false # whether to train from a checkpoint specified in load_chkpt_path
+        load_chkpt: false
         load_chkpt_path:
-        save_chkpt: true # whether to save checkpoints
+        save_chkpt: false
         save_chkpt_path:
-        save_chkpt_interval: 20 # save checkpoint every N epochs
+        save_chkpt_interval: 20
+
 eval:
-    mode: val # ['val', 'test'],
+    mode: test # ['val', 'test']
+
 wandb:
-    project: debug
+    project: S2_Training
     group:
     num_sample_predictions: 40
+    percent_wet_patches: 0.8
+
 logging:
     grad_norm_freq: 10
 ```
 
-For S1 training to submit to `train_s1.py` the structure looks like:
+For S1 SAR training to submit to `train_sar.py` (single GPU) or `train_sar_ddp.py` (multi-GPU):
 ```yaml
-seed: 831002
-save: False
+seed: 33752
+save: true
 save_path:
+
 data:
-    method: random
     size: 68 # pixel width of dataset patches
-    window: 64 # pixel width of model input/output
-    samples: 1000 # [250, 500, 1000]
-    stride:
-    channels: "11111111" # Binary string selecting 8 available input channels
+    window: 64 # pixel width of model input/output (smaller due to shift-invariant loss)
+    method: "strided" # ["random", "strided"]
+    samples:
+    stride: 68
+    channels: "11011111" # Binary string selecting 8 available input channels
                          # (VV, VH, DEM, SlopeY, SlopeX, Water, Roads, Flowlines)
-    use_lee: False
-    suffix: "" # Optional suffix for preprocessing variant datasets
-    random_flip: True
-    mmap: False # Use memory-mapped file loading for large training datasets
+    random_flip: true
+    mmap: true
+    suffix: "all"
+
 model:
     classifier: "unet++" # ['unet', 'unet++']
     weights:
     unet:
         dropout:
     unetpp:
-        dropout:
-        deep_supervision:
-    autodespeckler:
+        dropout: 0.23
+        deep_supervision: false
+    autodespeckler: # optional CVAE despeckler attachment
         ad_config:
         ad_weights:
         freeze:
         freeze_epochs:
+
 train:
-    epochs: 200
-    batch_size: 256
-    loss: BCELoss # ['BCELoss', 'BCEDiceLoss', 'TverskyLoss']
-    use_pos_weight: false  # enable positive class weighting for BCE/BCEDice
-    pos_weight:            # null -> auto-compute from train labels; set float to override
-    pos_weight_clip: 10.0  # clip auto-computed weight to [1, clip]
-    shift_invariant: true
-    balance_coeff:
+    epochs: 400
+    batch_size: 1024
+    loss: BCELoss # ['BCELoss', 'BCEDiceLoss', 'TverskyLoss', 'FocalTverskyLoss']
+    use_pos_weight: true
+    pos_weight:
+    pos_weight_clip: 30.0
+    shift_invariant: true # align labels to predictions for shift-robust training
     tversky:
-      alpha:
+      alpha: 0.3
+    focal_tversky:
+      gamma: 1.33
     clip: 1.0
-    lr: 0.0005913
+    lr: 0.0097
     optimizer: Adam # ['Adam', 'SGD', 'AdamW']
     weight_decay:
     LR_scheduler: Constant # ['Constant', 'ReduceLROnPlateau', 'CosAnnealingLR']
-    LR_patience:
+    LR_patience: 10
     LR_T_max:
     early_stopping: true
-    patience: 10
-    subset: 0.15
-    num_workers: 5
+    patience: 30
+    num_workers: 4
+    keep_contiguous_in_mem: true # keep mmap'd data contiguous for faster access
     checkpoint:
-        load_chkpt: false # whether to train from a checkpoint specified in load_chkpt_path
+        load_chkpt: false
         load_chkpt_path:
-        save_chkpt: true # whether to save checkpoints
+        save_chkpt: false
         save_chkpt_path:
-        save_chkpt_interval: 20 # save checkpoint every N epochs
+        save_chkpt_interval: 20
+
 eval:
-    mode: val # ['val', 'test'],
+    mode: test # ['val', 'test']
+
 wandb:
-    project:
+    project: S1_Training
     group:
     num_sample_predictions: 40
+    percent_wet_patches: 0.8
+
 logging:
     grad_norm_freq: 10
 ```
@@ -250,14 +259,12 @@ For example for tuning we can use this snippet:
 ```yaml
 model:
     classifier: "unet" # ['unet', 'unet++']
-    discriminator:
     weights:
     unet:
         dropout: # keep this blank so we can override in the tuning script
     unetpp:
         dropout:
         deep_supervision:
-    discriminator_weights:
 ```
 
 Here we instantiate the UNet model and keep the `dropout` hyperparameter blank for the tuning job to specify.

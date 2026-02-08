@@ -3,11 +3,11 @@ defaults:
   - analysis:
   - sampling:
   - preprocess:
-  - inference: inference_sar
+  - inference: inference_sar # conduct inference using S1 UNet++
   - tuning:
   - benchmarking:
   - ad:
-  - s1_unetpp_cvae_benchmark_saved
+  - s1_unetpp_all_best # load example model settings
   - _self_
 
 # hydra config

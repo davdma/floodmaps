@@ -1,4 +1,11 @@
 # AI Flood Detection
+
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18528354.svg)](https://doi.org/10.5281/zenodo.18528354)
+<!-- [![Hugging Face Dataset](https://img.shields.io/badge/🤗%20Dataset-floodmaps-blue)](https://huggingface.co/datasets/yourname/floodmaps) -->
+
 ### Background
 Floods are a common and devastating natural hazard. There is a pressing need to replace traditional flood mapping methods with faster more accurate AI-assisted models that harness satellite imagery.
 
@@ -57,6 +64,8 @@ As a result, we produced **146+** 4km by 4km manually labeled S2 flood tiles spr
 <img width="70%" alt="dataset_table" src="https://github.com/user-attachments/assets/07afab63-fd37-42b5-abcc-43d14c4aca12" />
 </div>
 
+> **Note:** The S2 + PRISM dataset is available on [Zenodo](https://doi.org/10.5281/zenodo.18528354). See [Usage](#usage) for download and setup instructions.
+
 ## Benchmark(s)
 
 <div align="center">
@@ -104,6 +113,14 @@ Then install each of the conda environments:
 conda env create -f envs/floodmaps-sampling.yml
 conda env create -f envs/floodmaps-training.yml
 conda env create -f envs/floodmaps-tuning.yml
+```
+
+Download the Sentinel-2 dataset and labels + PRISM NetCDF4 from Zenodo [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18528354.svg)](https://doi.org/10.5281/zenodo.18528354):
+
+```bash
+# extracts the rasters and labels into data/imagery/ and data/labels/
+wget https://zenodo.org/records/18528354/files/s2-prism-dataset-v1.0.tar.gz
+tar -xzvf dataset-v1.0.tar.gz -C data/
 ```
 
 The project uses `hydra` to handle configurations. The `configs` folder contains the configuration groups and files for running the scripts. Scripts will first parse the input config from `configs/config.yaml`, so it is necessary to setup `config.yaml` correctly before running any script (note: there are some scripts that require additional `argparse` params). To setup configs correctly, set the directory paths first in `configs/paths/default.yaml`, then use interpolation of those paths across the config:

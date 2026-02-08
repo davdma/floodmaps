@@ -1,5 +1,6 @@
+save_dir: ${paths.benchmarks_dir}/sar_models_classes # directory where csvs are saved
 trials: 10 # total number of trials per benchmark
 max_evals: 5 # max number of evaluations per script run (<trials if walltime is limiting)
-save_file: ${paths.benchmarks_dir}/runs_s1.csv # path to save file
-save_chkpt_path: ${paths.benchmarks_dir}/chkpt_s1.pkl # path to save chkpt file
-seed: 263932 # random seed
+config_id: s1_unetpp_shift_nodem_all # unique identifier for this benchmark configuration
+description: "Sentinel-1 UNet++ tuned with all channels except dem, with shift invariance." # optional description
+seed: 778042 # master random seed for reproducibility

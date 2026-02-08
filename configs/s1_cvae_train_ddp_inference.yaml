@@ -1,0 +1,59 @@
+seed: 9290
+save: false
+save_path:
+
+data:
+    method: strided  # ['random', 'strided']
+    size: 64
+    samples:        # used if method == 'random'
+    stride: 64      # used if method == 'stride'
+    random_flip: true
+    mmap: false
+    suffix: "train"
+    block_size: 8192 # for dataloading shards
+
+model:
+    autodespeckler: CVAE # ['VAE', 'CVAE']
+    weights: ${paths.experiment_dir}/2026-01-19_s1_cvae_train_phuber_200_1/CVAE_ad.pth
+    cvae:
+        latent_dim: 200 # [200, 512, 1024]
+        VAE_beta: 1.0
+        beta_annealing: false
+        beta_period: 10
+        beta_cycles: 2
+        beta_proportion: 0.5
+        features: [32, 64, 128, 256]
+        decoder_dropout: 0.0
+        no_cond: false # TEMP: switches to CVAE_no_cond
+
+train:
+    epochs: 160
+    batch_size: 2048
+    loss: PseudoHuberLoss # L1Loss # ['L1Loss', 'MSELoss', 'PseudoHuberLoss', 'HuberLoss', 'LogCoshLoss']
+    pseudo_huber_c: 0.3
+    clip: 1.0
+    lr: 0.002
+    optimizer: Adam # ['Adam', 'SGD']
+    LR_scheduler: Constant # ['Constant', 'ReduceLROnPlateau']
+    LR_patience: 5  # used if LR_scheduler == 'ReduceLROnPlateau'
+    early_stopping: true
+    patience: 80
+    num_workers: 4
+    use_amp: true
+    checkpoint:
+        load_chkpt: true
+        load_chkpt_path: ${paths.checkpoint_dir}/s1_cvae_train_phuber_1.pt
+        save_chkpt: true
+        save_chkpt_interval: 10
+        save_chkpt_path: ${paths.checkpoint_dir}/s1_cvae_train_phuber_1.pt
+
+eval:
+    mode: test # ['val', 'test'],
+
+wandb:
+    project: S1_Multi_Final
+    group: "CVAE phuber (pre-trained)"
+    num_sample_predictions: 40
+
+logging:
+    grad_norm_freq: 10

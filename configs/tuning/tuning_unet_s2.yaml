@@ -1,0 +1,7 @@
+dataset: s2 # ['s1', 's2']
+run_index: 1 # 0 for random trials, 1 for bayesian opt (requires 10+ previous runs)
+max_evals: 9 # max number of evaluations per run
+experiment_name: unet_nodem_manual_all_clouds_fixed_dropout # name of tuning experiments (will be directory where results are saved)
+early_stopping: true # early stopping for bayesian opt
+patience: 30
+random_state: 536545

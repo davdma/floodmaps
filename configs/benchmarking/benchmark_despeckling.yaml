@@ -1,0 +1,4 @@
+save_dir: ${paths.benchmarks_dir}/sar_despeckling # directory where csvs are saved
+config_id: s1_cvae_despeckling # unique identifier for this benchmark configuration
+description: "Sentinel-1 CVAE despeckling metrics compared to raw and enhanced lee filtered data." # optional description
+seed: 778042 # master random seed for reproducibility

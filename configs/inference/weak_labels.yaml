@@ -1,7 +1,7 @@
 format: tif # ['tif', 'npy']
 replace: true # whether to overwrite pre-existing predictions
 manual: # manual file to specify list of EIDs in directory for predictions
-data_dir: ${paths.imagery_dir}/missing_vals_test/ # s2_s1_random_150_1_5/
+data_dir: ${paths.imagery_dir}/s2_s1_random_150_1_5/
 post: false # only label post-event images
 threshold: 0.5 # threshold for classifying a positive prediction
 batch_size: 256

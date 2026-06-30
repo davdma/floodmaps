@@ -170,6 +170,28 @@ hydra:
     dir: ${base_dir}/hydra
 ```
 
+## Citation
+
+If you use this software or dataset in your work, please cite the associated arXiv preprint:
+
+David Ma, Jeremy Feinstein, Shreya Pandit, Arkaprabha Ganguli, and Eugene Yan. "High-Resolution Flood Mapping With Sentinel-1 and Sentinel-2 via Misalignment-Robust Cross-Sensor Learning and Generative Despeckling." arXiv:2606.30511, 2026. https://doi.org/10.48550/arXiv.2606.30511
+
+```bibtex
+@misc{ma2026highresolutionfloodmapping,
+  title = {High-Resolution Flood Mapping With Sentinel-1 and Sentinel-2 via Misalignment-Robust Cross-Sensor Learning and Generative Despeckling},
+  author = {Ma, David and Feinstein, Jeremy and Pandit, Shreya and Ganguli, Arkaprabha and Yan, Eugene},
+  year = {2026},
+  eprint = {2606.30511},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.CV},
+  doi = {10.48550/arXiv.2606.30511},
+  url = {https://arxiv.org/abs/2606.30511}
+}
+```
+
+## License
+
+This project is released under the MIT License. See [LICENSE](LICENSE) for the full license text.
 
 
 
